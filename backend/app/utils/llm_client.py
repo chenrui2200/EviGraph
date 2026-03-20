@@ -7,38 +7,59 @@ Supports Ollama num_ctx parameter to prevent prompt truncation
 import json
 import os
 import re
+import time
+import random
+import threading
 from typing import Optional, Dict, Any, List
-from openai import OpenAI
+import openai
+from openai import OpenAI, APIConnectionError, APITimeoutError, RateLimitError
 
 from ..config import Config
+from ..utils.logger import get_logger
+
+logger = get_logger('mirofish.llm_client')
 
 
 class LLMClient:
-    """LLM Client"""
+    """
+    LLM Client with thread-local storage to prevent Windows Socket error (10038)
+    and smart JSON repair logic.
+    """
+
+    _thread_local = threading.local()
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
-        timeout: float = 300.0
+        timeout: float = 300.0,
+        max_retries: Optional[int] = None
     ):
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model = model or Config.LLM_MODEL_NAME
+        self.timeout = timeout
+        self.max_retries = max_retries if max_retries is not None else Config.LLM_MAX_RETRIES
 
         if not self.api_key:
             raise ValueError("LLM_API_KEY not configured")
 
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            timeout=timeout,
-        )
-
-        # Ollama context window size — prevents prompt truncation.
-        # Read from env OLLAMA_NUM_CTX, default 8192 (Ollama default is only 2048).
+        # Ollama context window size
         self._num_ctx = int(os.environ.get('OLLAMA_NUM_CTX', '8192'))
+
+    @property
+    def client(self) -> OpenAI:
+        """Get or create thread-local OpenAI client to avoid WinError 10038"""
+        if not hasattr(self._thread_local, "client"):
+            logger.debug(f"Creating new OpenAI client for thread {threading.get_ident()}")
+            self._thread_local.client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                timeout=self.timeout,
+                max_retries=0,
+            )
+        return self._thread_local.client
 
     def _is_ollama(self) -> bool:
         """Check if we're talking to an Ollama server."""
@@ -52,16 +73,7 @@ class LLMClient:
         response_format: Optional[Dict] = None
     ) -> str:
         """
-        Send chat request
-
-        Args:
-            messages: Message list
-            temperature: Temperature parameter
-            max_tokens: Max token count
-            response_format: Response format (e.g., JSON mode)
-
-        Returns:
-            Model response text
+        Send chat request with manual retry and thread-safe client access
         """
         kwargs = {
             "model": self.model,
@@ -73,17 +85,50 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
 
-        # For Ollama: pass num_ctx via extra_body to prevent prompt truncation
+        # For Ollama: pass num_ctx via extra_body
         if self._is_ollama() and self._num_ctx:
             kwargs["extra_body"] = {
                 "options": {"num_ctx": self._num_ctx}
             }
 
-        response = self.client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content
-        # Some models (like MiniMax M2.5) include <think>thinking content in response, need to remove
-        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
-        return content
+        last_error = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                # Use property that provides thread-local client
+                response = self.client.chat.completions.create(**kwargs)
+                content = response.choices[0].message.content
+                # Some models include <think> content
+                content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+                return content
+
+            except (APIConnectionError, APITimeoutError) as e:
+                last_error = e
+                # If connection error, reset thread-local client for next attempt
+                if hasattr(self._thread_local, "client"):
+                    del self._thread_local.client
+
+                if attempt < self.max_retries:
+                    wait_time = (2 ** attempt) + random.random()
+                    logger.warning(f"LLM connection error (attempt {attempt + 1}/{self.max_retries + 1}): {e}. Retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"LLM connection failed after {self.max_retries + 1} attempts: {e}")
+                    raise
+
+            except RateLimitError as e:
+                last_error = e
+                if attempt < self.max_retries:
+                    wait_time = 10 * (attempt + 1)
+                    logger.warning(f"LLM rate limit (attempt {attempt + 1}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    raise
+
+            except Exception as e:
+                logger.error(f"LLM unexpected error: {str(e)}")
+                raise
+
+        raise last_error if last_error else Exception("LLM call failed")
 
     def chat_json(
         self,
@@ -92,15 +137,7 @@ class LLMClient:
         max_tokens: int = 4096
     ) -> Dict[str, Any]:
         """
-        Send chat request and return JSON
-
-        Args:
-            messages: Message list
-            temperature: Temperature parameter
-            max_tokens: Max token count
-
-        Returns:
-            Parsed JSON object
+        Send chat request and return JSON with smart repair logic
         """
         response = self.chat(
             messages=messages,
@@ -117,4 +154,49 @@ class LLMClient:
         try:
             return json.loads(cleaned_response)
         except json.JSONDecodeError:
-            raise ValueError(f"Invalid JSON format from LLM: {cleaned_response}")
+            # Attempt to repair truncated JSON
+            repaired = self._repair_json(cleaned_response)
+            try:
+                return json.loads(repaired)
+            except Exception:
+                raise ValueError(f"Invalid and unrepairable JSON format from LLM: {cleaned_response}")
+
+    def _repair_json(self, json_str: str) -> str:
+        """
+        Basic logic to repair truncated JSON by balancing braces and brackets.
+        Useful when LLM hits token limit or times out midway.
+        """
+        # Remove trailing junk that often appears before truncation
+        json_str = re.sub(r',[\s\n]*$', '', json_str) # remove trailing comma
+        json_str = re.sub(r'\"[\w\s]*$', '', json_str) # remove unclosed string key/value
+
+        stack = []
+        in_string = False
+        escaped = False
+
+        for char in json_str:
+            if char == '"' and not escaped:
+                in_string = not in_string
+            if not in_string:
+                if char == '{':
+                    stack.append('}')
+                elif char == '[':
+                    stack.append(']')
+                elif char == '}' or char == ']':
+                    if stack and stack[-1] == char:
+                        stack.pop()
+
+            if char == '\\' and not escaped:
+                escaped = True
+            else:
+                escaped = False
+
+        # If we were in a string, close it first
+        if in_string:
+            json_str += '"'
+
+        # Close all remaining scopes in reverse order
+        while stack:
+            json_str += stack.pop()
+
+        return json_str

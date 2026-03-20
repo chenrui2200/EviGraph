@@ -85,63 +85,55 @@
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
           </svg>
           <div class="action-bar-text">
-            <span class="action-bar-title">Interactive Tools</span>
-            <span class="action-bar-subtitle mono">{{ profiles.length }} agents available</span>
+            <span class="action-bar-title">Knowledge Base Tools</span>
+            <span class="action-bar-subtitle mono">GraphRAG Interpretor</span>
           </div>
+          <button class="project-selector-btn" @click="showProjectSelector = !showProjectSelector" :title="selectedGraphIds.length > 0 ? `${selectedGraphIds.length} graphs selected` : 'Select knowledge bases'">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+              <polyline points="9 22 9 12 15 12 15 22"></polyline>
+            </svg>
+            <span v-if="selectedGraphIds.length > 0" class="selection-badge">{{ selectedGraphIds.length }}</span>
+          </button>
         </div>
+
+          <!-- Project Selector Dropdown -->
+          <div v-if="showProjectSelector" class="project-selector-dropdown">
+            <div class="selector-header">
+              <span class="selector-title">Select Knowledge Bases</span>
+              <div class="selector-actions">
+                <button @click="selectAllProjects" class="selector-action-btn">All</button>
+                <button @click="clearProjectSelection" class="selector-action-btn">Clear</button>
+              </div>
+            </div>
+            <div class="projects-list">
+              <div
+                v-for="project in availableProjects"
+                :key="project.project_id"
+                class="project-item"
+                :class="{ selected: selectedGraphIds.includes(project.graph_id) }"
+                @click="toggleProjectSelection(project.graph_id)"
+              >
+                <input type="checkbox" :checked="selectedGraphIds.includes(project.graph_id)" @click.stop />
+                <div class="project-item-info">
+                  <span class="project-item-name">{{ project.name || 'Unnamed Project' }}</span>
+                  <span class="project-item-id">{{ project.project_id.slice(0, 12) }}</span>
+                </div>
+              </div>
+              <div v-if="availableProjects.length === 0" class="projects-empty">
+                No completed knowledge bases available
+              </div>
+            </div>
+          </div>
+
           <div class="action-bar-tabs">
-            <button 
-              class="tab-pill"
-              :class="{ active: activeTab === 'chat' && chatTarget === 'report_agent' }"
-              @click="selectReportAgentChat"
+            <button
+              class="tab-pill active"
             >
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
               </svg>
-              <span>Chat with Report Agent</span>
-            </button>
-            <div class="agent-dropdown" v-if="profiles.length > 0">
-              <button 
-                class="tab-pill agent-pill"
-                :class="{ active: activeTab === 'chat' && chatTarget === 'agent' }"
-                @click="toggleAgentDropdown"
-              >
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
-                  <circle cx="12" cy="7" r="4"></circle>
-                </svg>
-                <span>{{ selectedAgent ? selectedAgent.username : 'Chat with any individual' }}</span>
-                <svg class="dropdown-arrow" :class="{ open: showAgentDropdown }" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
-                  <polyline points="6 9 12 15 18 9"></polyline>
-                </svg>
-              </button>
-              <div v-if="showAgentDropdown" class="dropdown-menu">
-                <div class="dropdown-header">Select conversation target</div>
-                <div 
-                  v-for="(agent, idx) in profiles" 
-                  :key="idx"
-                  class="dropdown-item"
-                  @click="selectAgent(agent, idx)"
-                >
-                  <div class="agent-avatar">{{ (agent.username || 'A')[0] }}</div>
-                  <div class="agent-info">
-                    <span class="agent-name">{{ agent.username }}</span>
-                    <span class="agent-role">{{ agent.profession || 'Unknown profession' }}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="tab-divider"></div>
-            <button 
-              class="tab-pill survey-pill"
-              :class="{ active: activeTab === 'survey' }"
-              @click="selectSurveyTab"
-            >
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M9 11l3 3L22 4"></path>
-                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
-              </svg>
-              <span>Send survey to the world</span>
+              <span>Query Knowledge Base</span>
             </button>
           </div>
         </div>
@@ -414,6 +406,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { chatWithReport, getReport, getAgentLog } from '../api/report'
 import { interviewAgents, getSimulationProfilesRealtime } from '../api/simulation'
+import { getProjectList } from '../api/graph'
 
 const props = defineProps({
   reportId: String,
@@ -430,6 +423,11 @@ const selectedAgent = ref(null)
 const selectedAgentIndex = ref(null)
 const showFullProfile = ref(true)
 const showToolsDetail = ref(true)
+
+// Multi-project selection state
+const availableProjects = ref([])
+const selectedGraphIds = ref([])
+const showProjectSelector = ref(false)
 
 // Chat State
 const chatInput = ref('')
@@ -588,6 +586,7 @@ const renderMarkdown = (content) => {
   html = html.replace(/\s+<\/ol>/g, '</ol>')
   
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+  html = html.replace(/\[Source: (.*?), Page: (.*?)\]/g, '<span class="source-tag">[$1, P.$2]</span>')
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>')
   html = html.replace(/_(.+?)_/g, '<em>$1</em>')
   html = html.replace(/^---$/gm, '<hr class="md-hr">')
@@ -925,6 +924,42 @@ const loadProfiles = async () => {
   }
 }
 
+// Load available projects for multi-graph selection
+const loadAvailableProjects = async () => {
+  try {
+    const res = await getProjectList(50)
+    if (res.success && res.data) {
+      // Filter projects that have completed graphs
+      availableProjects.value = res.data.filter(p =>
+        p.status === 'graph_completed' && p.graph_id
+      )
+      addLog(`Loaded ${availableProjects.value.length} available knowledge bases`)
+    }
+  } catch (err) {
+    addLog(`Failed to load projects: ${err.message}`)
+  }
+}
+
+// Toggle project selection
+const toggleProjectSelection = (graphId) => {
+  const index = selectedGraphIds.value.indexOf(graphId)
+  if (index > -1) {
+    selectedGraphIds.value.splice(index, 1)
+  } else {
+    selectedGraphIds.value.push(graphId)
+  }
+}
+
+// Select all projects
+const selectAllProjects = () => {
+  selectedGraphIds.value = availableProjects.value.map(p => p.graph_id)
+}
+
+// Clear project selection
+const clearProjectSelection = () => {
+  selectedGraphIds.value = []
+}
+
 // Click outside to close dropdown
 const handleClickOutside = (e) => {
   const dropdown = document.querySelector('.agent-dropdown')
@@ -938,6 +973,7 @@ onMounted(() => {
   addLog('Step5 Interaction initialized')
   loadReportData()
   loadProfiles()
+  loadAvailableProjects()
   document.addEventListener('click', handleClickOutside)
 })
 
@@ -2564,6 +2600,20 @@ watch(() => props.simulationId, (newId) => {
   padding: 2px 6px;
   border-radius: 4px;
   color: #1F2937;
+}
+
+:deep(.source-tag) {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  background: #EEF2FF;
+  color: #4F46E5;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 4px;
+  border: 1px solid #E0E7FF;
+  font-weight: 600;
+  vertical-align: middle;
 }
 
 :deep(.md-hr) {

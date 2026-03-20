@@ -40,12 +40,13 @@ class SearchResult:
         }
 
     def to_text(self) -> str:
-        """Convert to text format for LLM understanding"""
+        """Convert to text format for LLM understanding with source tracking"""
         text_parts = [f"Search Query: {self.query}", f"Found {self.total_count} related results"]
 
         if self.facts:
-            text_parts.append("\n### Related Facts:")
+            text_parts.append("\n### Related Facts (with evidence tracing):")
             for i, fact in enumerate(self.facts, 1):
+                # Ensure fact string includes its source if available from edges/nodes
                 text_parts.append(f"{i}. {fact}")
 
         return "\n".join(text_parts)
@@ -441,24 +442,56 @@ class GraphToolsService:
             nodes = []
 
             # Parse edge results
-            if hasattr(search_results, 'edges'):
-                edge_list = search_results.edges
-            elif isinstance(search_results, dict) and 'edges' in search_results:
-                edge_list = search_results['edges']
-            else:
-                edge_list = []
+            edge_list = search_results.get('edges', [])
+            all_episode_uuids = []
+            for edge in edge_list:
+                if isinstance(edge, dict) and edge.get('episode_ids'):
+                    uuids = edge.get('episode_ids')
+                    if isinstance(uuids, list):
+                        all_episode_uuids.extend(uuids)
+                    else:
+                        all_episode_uuids.append(str(uuids))
+
+            # Fetch episodes once to get metadata
+            episodes_data = self.storage.get_episodes(list(set(all_episode_uuids)))
+            episode_map = {ep["uuid"]: ep for ep in episodes_data}
 
             for edge in edge_list:
                 if isinstance(edge, dict):
                     fact = edge.get('fact', '')
                     if fact:
-                        facts.append(fact)
+                        # Append source info if found in episodes
+                        source_info = ""
+                        edge_ep_ids = edge.get('episode_ids', [])
+                        if not isinstance(edge_ep_ids, list):
+                            edge_ep_ids = [str(edge_ep_ids)]
+
+                        for ep_id in edge_ep_ids:
+                            ep = episode_map.get(ep_id)
+                            if ep and ep.get("metadata"):
+                                meta = ep["metadata"]
+                                src = meta.get("source", "Unknown")
+                                page = meta.get("page")
+
+                                # Enhanced traceability: check if we have total_pages to show "Page X of Y"
+                                total = meta.get("total_pages")
+                                page_info = f", Page {page}" if page else ""
+                                if page and total:
+                                    page_info = f", Page {page}/{total}"
+
+                                source_info = f" [Source: {src}{page_info}]"
+                                break # Use first found source info
+
+                        fact_with_source = f"{fact}{source_info}"
+                        facts.append(fact_with_source)
+
                     edges.append({
                         "uuid": edge.get('uuid', ''),
                         "name": edge.get('name', ''),
                         "fact": fact,
                         "source_node_uuid": edge.get('source_node_uuid', ''),
                         "target_node_uuid": edge.get('target_node_uuid', ''),
+                        "episodes": edge.get('episode_ids', [])
                     })
 
             # Parse node results
@@ -494,6 +527,90 @@ class GraphToolsService:
         except Exception as e:
             logger.warning(f"Graph search failed, degrading to local search: {str(e)}")
             return self._local_search(graph_id, query, limit, scope)
+
+    def search_multi_graphs(
+        self,
+        graph_ids: List[str],
+        query: str,
+        limit: int = 10,
+        scope: str = "edges"
+    ) -> SearchResult:
+        """
+        Multi-graph semantic search (searches across multiple graphs and merges results)
+
+        Args:
+            graph_ids: List of Graph IDs to search
+            query: Search query
+            limit: Total number of results to return (distributed across graphs)
+            scope: Search scope, "edges" or "nodes" or "both"
+
+        Returns:
+            SearchResult with merged results from all graphs
+        """
+        logger.info(f"Multi-graph search: {len(graph_ids)} graphs, query={query[:50]}...")
+
+        if not graph_ids:
+            logger.warning("No graph IDs provided for multi-graph search")
+            return SearchResult(facts=[], edges=[], nodes=[], query=query, total_count=0)
+
+        # Calculate limit per graph
+        limit_per_graph = max(1, limit // len(graph_ids))
+
+        all_facts = []
+        all_edges = []
+        all_nodes = []
+        seen_facts = set()
+        seen_edge_uuids = set()
+        seen_node_uuids = set()
+
+        # Search each graph
+        for graph_id in graph_ids:
+            try:
+                result = self.search_graph(
+                    graph_id=graph_id,
+                    query=query,
+                    limit=limit_per_graph,
+                    scope=scope
+                )
+
+                # Merge facts (deduplicate)
+                for fact in result.facts:
+                    if fact not in seen_facts:
+                        all_facts.append(fact)
+                        seen_facts.add(fact)
+
+                # Merge edges (deduplicate by uuid)
+                for edge in result.edges:
+                    edge_uuid = edge.get('uuid', '')
+                    if edge_uuid and edge_uuid not in seen_edge_uuids:
+                        all_edges.append(edge)
+                        seen_edge_uuids.add(edge_uuid)
+
+                # Merge nodes (deduplicate by uuid)
+                for node in result.nodes:
+                    node_uuid = node.get('uuid', '')
+                    if node_uuid and node_uuid not in seen_node_uuids:
+                        all_nodes.append(node)
+                        seen_node_uuids.add(node_uuid)
+
+            except Exception as e:
+                logger.warning(f"Failed to search graph {graph_id}: {str(e)}")
+                continue
+
+        # Trim to limit if needed
+        all_facts = all_facts[:limit]
+        all_edges = all_edges[:limit]
+        all_nodes = all_nodes[:limit]
+
+        logger.info(f"Multi-graph search complete: {len(all_facts)} facts from {len(graph_ids)} graphs")
+
+        return SearchResult(
+            facts=all_facts,
+            edges=all_edges,
+            nodes=all_nodes,
+            query=query,
+            total_count=len(all_facts)
+        )
 
     def _local_search(
         self,

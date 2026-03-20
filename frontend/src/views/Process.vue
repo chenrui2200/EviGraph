@@ -358,24 +358,58 @@
             </div>
           </div>
 
-          <!-- Phase 3: Complete -->
+          <!-- Phase 3: Hit Test -->
           <div class="process-phase" :class="{ 'active': currentPhase === 2, 'completed': currentPhase > 2 }">
             <div class="phase-header">
               <span class="phase-num">03</span>
               <div class="phase-info">
-                <div class="phase-title">Build Complete</div>
-                <div class="phase-api">Ready for next step</div>
+                <div class="phase-title">Knowledge Recall Hit Test</div>
+                <div class="phase-api">Test GraphRAG retrieval accuracy</div>
               </div>
               <span class="phase-status" :class="getPhaseStatusClass(2)">
-                {{ getPhaseStatusText(2) }}
+                {{ currentPhase === 2 ? 'Active' : (currentPhase > 2 ? 'Completed' : 'Waiting') }}
               </span>
+            </div>
+
+            <div class="phase-detail" v-if="currentPhase >= 2">
+              <div class="detail-section">
+                <div class="detail-label">Recall Test</div>
+                <div class="hit-test-box">
+                  <div class="search-input-wrapper">
+                    <input
+                      v-model="hitTestQuery"
+                      placeholder="Enter a question to test knowledge recall..."
+                      @keyup.enter="runHitTest"
+                      :disabled="hitTestLoading"
+                    />
+                    <button @click="runHitTest" :disabled="hitTestLoading || !hitTestQuery.trim()">
+                      {{ hitTestLoading ? '...' : '→' }}
+                    </button>
+                  </div>
+
+                  <div v-if="hitTestResults" class="hit-test-results">
+                    <div class="results-header">
+                      <span>Found {{ hitTestResults.facts?.length || 0 }} relevant facts</span>
+                    </div>
+                    <div class="facts-scroll-area">
+                      <div v-for="(fact, idx) in hitTestResults.facts" :key="idx" class="fact-item">
+                        <p class="fact-text">{{ parseFactText(fact).content }}</p>
+                        <div v-if="parseFactText(fact).source" class="fact-source">
+                          <span class="source-label">LOCATION</span>
+                          <span class="source-tag">{{ parseFactText(fact).source }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
           <!-- Next step button -->
           <div class="next-step-section" v-if="currentPhase >= 2">
             <button class="next-step-btn" @click="goToNextStep" :disabled="currentPhase < 2">
-              Enter Environment Setup
+              Finalize & View Analysis
               <span class="btn-arrow">→</span>
             </button>
           </div>
@@ -408,13 +442,37 @@
         </div>
       </div>
     </div>
+
+    <!-- Bottom Info / Logs -->
+    <div class="system-logs" :class="{ 'minimized': isFullScreen }">
+      <div class="log-header">
+        <div class="header-left">
+          <span class="log-title">SYSTEM DASHBOARD</span>
+          <span class="log-id">{{ currentProjectId || 'NO_PROJECT' }}</span>
+        </div>
+        <div class="header-right">
+          <span v-if="currentPhase === 0" class="log-status pulse">ONTOLOGY_GENERATION</span>
+          <span v-else-if="currentPhase === 1" class="log-status pulse">GRAPH_BUILDING</span>
+          <span v-else-if="currentPhase === 2" class="log-status success">COMPLETED</span>
+        </div>
+      </div>
+      <div class="log-content" ref="logContent">
+        <div class="log-line" v-for="(log, idx) in systemLogs" :key="idx">
+          <span class="log-time">{{ log.time }}</span>
+          <span class="log-msg">{{ log.msg }}</span>
+        </div>
+        <div v-if="systemLogs.length === 0" class="log-empty">
+          Waiting for task signals...
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
+import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, searchGraph } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 import * as d3 from 'd3'
 
@@ -435,6 +493,12 @@ const ontologyProgress = ref(null) // Ontology generation progress
 const currentPhase = ref(-1) // -1: Uploading, 0: Generating ontology, 1: Building graph, 2: Complete
 const selectedItem = ref(null) // Selected node or edge
 const isFullScreen = ref(false)
+const systemLogs = ref([]) // Real-time system logs for dashboard
+
+// Hit Test state
+const hitTestQuery = ref('')
+const hitTestLoading = ref(false)
+const hitTestResults = ref(null)
 
 // DOM refs
 const graphContainer = ref(null)
@@ -460,18 +524,25 @@ const statusText = computed(() => {
 
 const entityTypes = computed(() => {
   if (!graphData.value?.nodes) return []
-  
+
   const typeMap = {}
-  const colors = ['#FF6B35', '#004E89', '#7B2D8E', '#1A936F', '#C5283D', '#E9724C']
-  
+  const colors = {
+    'Document': '#000000',
+    'Page': '#666666',
+    'Episode': '#999999',
+    'Entity': '#FF6B35'
+  }
+  const defaultColors = ['#FF6B35', '#004E89', '#7B2D8E', '#1A936F', '#C5283D', '#E9724C']
+
   graphData.value.nodes.forEach(node => {
-    const type = node.labels?.find(l => l !== 'Entity') || 'Entity'
+    const type = node.labels?.find(l => l !== 'Entity' && l !== 'Node') || 'Entity'
     if (!typeMap[type]) {
-      typeMap[type] = { name: type, count: 0, color: colors[Object.keys(typeMap).length % colors.length] }
+      const color = colors[type] || defaultColors[Object.keys(typeMap).length % defaultColors.length]
+      typeMap[type] = { name: type, count: 0, color: color }
     }
     typeMap[type].count++
   })
-  
+
   return Object.values(typeMap)
 })
 
@@ -480,9 +551,51 @@ const goHome = () => {
   router.push('/')
 }
 
+const runHitTest = async () => {
+  if (!hitTestQuery.value.trim() || !projectData.value?.graph_id) return
+
+  hitTestLoading.value = true
+  try {
+    const response = await searchGraph({
+      graph_id: projectData.value.graph_id,
+      query: hitTestQuery.value,
+      limit: 10
+    })
+
+    if (response.success) {
+      hitTestResults.value = response.data
+    } else {
+      console.error('Hit test failed:', response.error)
+    }
+  } catch (err) {
+    console.error('Hit test error:', err)
+  } finally {
+    hitTestLoading.value = false
+  }
+}
+
+const parseFactText = (factStr) => {
+  if (!factStr) return { content: '', source: '' }
+
+  // Look for [Source: ..., Page: ...] or [Source: ...]
+  const sourceMatch = factStr.match(/\[Source: [^\]]+\]$/)
+  if (sourceMatch) {
+    const source = sourceMatch[0].replace('[Source: ', '').replace(']', '')
+    const content = factStr.substring(0, sourceMatch.index).trim()
+    return { content, source }
+  }
+
+  return { content: factStr, source: '' }
+}
+
 const goToNextStep = () => {
-  // TODO: Enter environment setup step
-  alert('Environment setup in development...')
+  if (!currentProjectId.value) return
+
+  // Go to interaction page (Step 5 style)
+  router.push({
+    name: 'Home', // Or a dedicated report page if exists
+    query: { projectId: currentProjectId.value, tab: 'analysis' }
+  })
 }
 
 const toggleFullScreen = () => {
@@ -586,16 +699,15 @@ const handleNewProject = async () => {
     })
     formDataObj.append('simulation_requirement', pending.simulationRequirement)
 
-    // Call ontology generation API
+    // Call ontology generation API (now asynchronous)
     const response = await generateOntology(formDataObj)
 
     if (response.success) {
       // Clear pending upload data
       clearPendingUpload()
 
-      // Update project ID and data
+      // Update project ID and initial data
       currentProjectId.value = response.data.project_id
-      projectData.value = response.data
 
       // Update URL (no page refresh)
       router.replace({
@@ -603,10 +715,9 @@ const handleNewProject = async () => {
         params: { projectId: response.data.project_id }
       })
 
-      ontologyProgress.value = null
-
-      // Automatically start graph building
-      await startBuildGraph()
+      // Start polling ontology task
+      const taskId = response.data.task_id
+      startPollingTask(taskId, 'ontology')
     } else {
       error.value = response.error || 'Ontology generation failed'
     }
@@ -770,65 +881,97 @@ const fetchGraphData = async () => {
 }
 
 // Poll task status
-const startPollingTask = (taskId) => {
+const startPollingTask = (taskId, type = 'build') => {
   // Execute query once immediately
-  pollTaskStatus(taskId)
+  pollTaskStatus(taskId, type)
 
   // Then poll at intervals
   pollTimer = setInterval(() => {
-    pollTaskStatus(taskId)
+    pollTaskStatus(taskId, type)
   }, 2000)
 }
 
 // Query task status
-const pollTaskStatus = async (taskId) => {
+const pollTaskStatus = async (taskId, type = 'build') => {
   try {
     const response = await getTaskStatus(taskId)
 
     if (response.success) {
       const task = response.data
 
-      // Update progress display
-      buildProgress.value = {
-        progress: task.progress || 0,
-        message: task.message || 'Processing...'
+      // Update logs dashboard
+      if (task.logs && task.logs.length > 0) {
+        // Map backend log format {timestamp, message} to frontend format {time, msg}
+        const newLogs = task.logs.map(l => ({
+          time: l.timestamp,
+          msg: l.message
+        }))
+
+        // Only update if logs changed (simple length check for performance)
+        if (newLogs.length !== systemLogs.value.length) {
+          systemLogs.value = newLogs
+        }
       }
 
-      console.log('Task status:', task.status, 'Progress:', task.progress)
+      // Update progress display
+      if (type === 'ontology') {
+        currentPhase.value = 0
+        ontologyProgress.value = {
+          progress: task.progress || 0,
+          message: task.message || 'Analyzing documents...'
+        }
+      } else {
+        currentPhase.value = 1
+        buildProgress.value = {
+          progress: task.progress || 0,
+          message: task.message || 'Processing...'
+        }
+      }
+
+      console.log(`${type} task status:`, task.status, 'Progress:', task.progress)
 
       if (task.status === 'completed') {
-        console.log('✅ Graph build complete, loading full data...')
-        
+        console.log(`✅ ${type} task complete`)
+
         stopPolling()
-        stopGraphPolling()
-        currentPhase.value = 2
 
-        // Update progress display to complete status
-        buildProgress.value = {
-          progress: 100,
-          message: 'Build complete, loading graph...'
-        }
+        if (type === 'ontology') {
+          ontologyProgress.value = null
 
-        // Reload project data to get graph_id
-        const projectResponse = await getProject(currentProjectId.value)
-        if (projectResponse.success) {
-          projectData.value = projectResponse.data
-
-          // Finally load complete graph data
-          if (projectResponse.data.graph_id) {
-            console.log('📊 Loading complete graph:', projectResponse.data.graph_id)
-            await loadGraph(projectResponse.data.graph_id)
-            console.log('✅ Graph load complete')
+          // Small delay to ensure backend disk persistence is stable
+          setTimeout(async () => {
+            // Reload project data
+            const projectResponse = await getProject(currentProjectId.value)
+            if (projectResponse.success) {
+              projectData.value = projectResponse.data
+            }
+            // Automatically move to phase 2
+            await startBuildGraph()
+          }, 1000)
+        } else {
+          stopGraphPolling()
+          currentPhase.value = 2
+          buildProgress.value = {
+            progress: 100,
+            message: 'Build complete, loading graph...'
           }
-        }
 
-        // Clear progress display
-        buildProgress.value = null
+          // Reload project data to get graph_id
+          const projectResponse = await getProject(currentProjectId.value)
+          if (projectResponse.success) {
+            projectData.value = projectResponse.data
+            if (projectResponse.data.graph_id) {
+              await loadGraph(projectResponse.data.graph_id)
+            }
+          }
+          buildProgress.value = null
+        }
       } else if (task.status === 'failed') {
         stopPolling()
         stopGraphPolling()
-        error.value = 'Graph build failed: ' + (task.error || 'Unknown error')
-        buildProgress.value = null
+        error.value = `${type} failed: ` + (task.error || 'Unknown error')
+        if (type === 'ontology') ontologyProgress.value = null
+        else buildProgress.value = null
       }
     }
   } catch (err) {
@@ -1077,6 +1220,16 @@ watch(graphData, () => {
   if (graphData.value) {
     nextTick(() => renderGraph())
   }
+})
+
+// Auto-scroll logs section
+const logContent = ref(null)
+watch(() => systemLogs.value.length, () => {
+  nextTick(() => {
+    if (logContent.value) {
+      logContent.value.scrollTop = logContent.value.scrollHeight
+    }
+  })
 })
 
 // Lifecycle
@@ -1938,6 +2091,104 @@ onUnmounted(() => {
   letter-spacing: 0.05em;
 }
 
+/* Hit Test Styles */
+.hit-test-box {
+  margin-top: 12px;
+}
+
+.search-input-wrapper {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.search-input-wrapper input {
+  flex: 1;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid #E0E0E0;
+  font-family: inherit;
+  font-size: 0.85rem;
+  outline: none;
+}
+
+.search-input-wrapper input:focus {
+  border-color: #FF6B35;
+}
+
+.search-input-wrapper button {
+  width: 40px;
+  background: #000;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.search-input-wrapper button:hover:not(:disabled) {
+  background: #FF6B35;
+}
+
+.search-input-wrapper button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.hit-test-results {
+  background: #F9F9F9;
+  border: 1px solid #E0E0E0;
+  padding: 12px;
+}
+
+.results-header {
+  font-size: 0.75rem;
+  color: #999;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed #E0E0E0;
+}
+
+.facts-scroll-area {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.fact-item {
+  margin-bottom: 16px;
+}
+
+.fact-item:last-child {
+  margin-bottom: 0;
+}
+
+.fact-text {
+  font-size: 0.85rem;
+  color: #333;
+  margin: 0 0 8px 0;
+  line-height: 1.5;
+}
+
+.fact-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.source-label {
+  font-size: 0.65rem;
+  color: #999;
+  font-weight: 600;
+}
+
+.source-tag {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  background: #FFF5F2;
+  border: 1px solid #FFE0D6;
+  color: #FF6B35;
+  font-family: 'JetBrains Mono', monospace;
+}
+
 /* Next Step Button */
 .next-step-section {
   margin-top: 24px;
@@ -2056,5 +2307,114 @@ onUnmounted(() => {
   .right-panel.hidden {
       display: none;
   }
+}
+
+/* System Dashboard Logs */
+.system-logs {
+  background: #000;
+  color: #fff;
+  padding: 16px 24px;
+  font-family: 'JetBrains Mono', monospace;
+  height: 160px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #333;
+  z-index: 20;
+  transition: transform 0.3s ease;
+}
+
+.system-logs.minimized {
+  transform: translateY(120px);
+}
+
+.system-logs.minimized:hover {
+  transform: translateY(0);
+}
+
+.log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #222;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.log-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #FF6B35;
+}
+
+.log-id {
+  font-size: 0.7rem;
+  color: #444;
+}
+
+.log-status {
+  font-size: 0.65rem;
+  padding: 2px 8px;
+  background: #222;
+  border-radius: 2px;
+  color: #888;
+}
+
+.log-status.pulse {
+  color: #FF6B35;
+  animation: pulse 1.5s infinite;
+}
+
+.log-status.success {
+  color: #1A936F;
+}
+
+.log-content {
+  flex: 1;
+  overflow-y: auto;
+  font-size: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.log-line {
+  display: flex;
+  gap: 16px;
+  line-height: 1.4;
+}
+
+.log-time {
+  color: #444;
+  min-width: 70px;
+}
+
+.log-msg {
+  color: #ccc;
+  word-break: break-all;
+}
+
+.log-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #333;
+  font-style: italic;
+  font-size: 0.7rem;
+}
+
+.log-content::-webkit-scrollbar {
+  width: 4px;
+}
+
+.log-content::-webkit-scrollbar-thumb {
+  background: #222;
 }
 </style>

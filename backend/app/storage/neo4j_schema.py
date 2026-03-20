@@ -1,8 +1,8 @@
 """
 Neo4j Schema — Cypher queries for index creation and schema management.
-
-Called by Neo4jStorage.create_graph() to set up vector + fulltext indexes.
 """
+
+from ..config import Config
 
 # Constraints
 CREATE_GRAPH_UUID_CONSTRAINT = """
@@ -20,23 +20,56 @@ CREATE CONSTRAINT episode_uuid IF NOT EXISTS
 FOR (ep:Episode) REQUIRE ep.uuid IS UNIQUE
 """
 
-# Vector indexes (Neo4j 5.11+)
-CREATE_ENTITY_VECTOR_INDEX = """
-CREATE VECTOR INDEX entity_embedding IF NOT EXISTS
-FOR (n:Entity) ON (n.embedding)
-OPTIONS {indexConfig: {
-    `vector.dimensions`: 768,
-    `vector.similarity_function`: 'cosine'
-}}
+CREATE_DOCUMENT_UUID_CONSTRAINT = """
+CREATE CONSTRAINT document_uuid IF NOT EXISTS
+FOR (d:Document) REQUIRE d.uuid IS UNIQUE
 """
 
-CREATE_RELATION_VECTOR_INDEX = """
+CREATE_PAGE_UUID_CONSTRAINT = """
+CREATE CONSTRAINT page_uuid IF NOT EXISTS
+FOR (p:Page) REQUIRE p.uuid IS UNIQUE
+"""
+
+# Regular indexes for fast filtering by graph_id
+CREATE_ENTITY_GRAPH_ID_INDEX = """
+CREATE INDEX entity_graph_id IF NOT EXISTS
+FOR (n:Entity) ON (n.graph_id)
+"""
+
+CREATE_DOC_GRAPH_ID_INDEX = """
+CREATE INDEX doc_graph_id IF NOT EXISTS
+FOR (d:Document) ON (d.graph_id)
+"""
+
+CREATE_PAGE_GRAPH_ID_INDEX = """
+CREATE INDEX page_graph_id IF NOT EXISTS
+FOR (p:Page) ON (p.graph_id)
+"""
+
+CREATE_EPISODE_GRAPH_ID_INDEX = """
+CREATE INDEX episode_graph_id IF NOT EXISTS
+FOR (e:Episode) ON (e.graph_id)
+"""
+
+# Vector indexes (Neo4j 5.11+)
+def get_entity_vector_index_query(dimension: int = 768) -> str:
+    return f"""
+CREATE VECTOR INDEX entity_embedding IF NOT EXISTS
+FOR (n:Entity) ON (n.embedding)
+OPTIONS {{indexConfig: {{
+    `vector.dimensions`: {dimension},
+    `vector.similarity_function`: 'cosine'
+}}}}
+"""
+
+def get_relation_vector_index_query(dimension: int = 768) -> str:
+    return f"""
 CREATE VECTOR INDEX fact_embedding IF NOT EXISTS
 FOR ()-[r:RELATION]-() ON (r.fact_embedding)
-OPTIONS {indexConfig: {
-    `vector.dimensions`: 768,
+OPTIONS {{indexConfig: {{
+    `vector.dimensions`: {dimension},
     `vector.similarity_function`: 'cosine'
-}}
+}}}}
 """
 
 # Fulltext indexes (for BM25 keyword search)
@@ -50,13 +83,23 @@ CREATE FULLTEXT INDEX fact_fulltext IF NOT EXISTS
 FOR ()-[r:RELATION]-() ON EACH [r.fact, r.name]
 """
 
-# All schema queries to run on startup
-ALL_SCHEMA_QUERIES = [
-    CREATE_GRAPH_UUID_CONSTRAINT,
-    CREATE_ENTITY_UUID_CONSTRAINT,
-    CREATE_EPISODE_UUID_CONSTRAINT,
-    CREATE_ENTITY_VECTOR_INDEX,
-    CREATE_RELATION_VECTOR_INDEX,
-    CREATE_ENTITY_FULLTEXT_INDEX,
-    CREATE_FACT_FULLTEXT_INDEX,
-]
+# All schema queries (as functions or constants)
+def get_all_schema_queries(dimension: int = 768) -> list:
+    return [
+        CREATE_GRAPH_UUID_CONSTRAINT,
+        CREATE_ENTITY_UUID_CONSTRAINT,
+        CREATE_EPISODE_UUID_CONSTRAINT,
+        CREATE_DOCUMENT_UUID_CONSTRAINT,
+        CREATE_PAGE_UUID_CONSTRAINT,
+        CREATE_ENTITY_GRAPH_ID_INDEX,
+        CREATE_DOC_GRAPH_ID_INDEX,
+        CREATE_PAGE_GRAPH_ID_INDEX,
+        CREATE_EPISODE_GRAPH_ID_INDEX,
+        get_entity_vector_index_query(dimension),
+        get_relation_vector_index_query(dimension),
+        CREATE_ENTITY_FULLTEXT_INDEX,
+        CREATE_FACT_FULLTEXT_INDEX,
+    ]
+
+# Keep this for backward compatibility if needed, but the storage class should call the function
+ALL_SCHEMA_QUERIES = get_all_schema_queries(Config.EMBEDDING_DIMENSION)

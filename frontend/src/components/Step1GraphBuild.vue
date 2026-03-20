@@ -143,28 +143,58 @@
         </div>
       </div>
 
-      <!-- Step 03: Complete -->
+      <!-- Step 03: Knowledge Recall Hit Test -->
       <div class="step-card" :class="{ 'active': currentPhase === 2, 'completed': currentPhase >= 2 }">
         <div class="card-header">
           <div class="step-info">
             <span class="step-num">03</span>
-            <span class="step-title">Build Complete</span>
+            <span class="step-title">Knowledge Recall Hit Test</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase >= 2" class="badge accent">In Progress</span>
+            <span v-if="currentPhase >= 2" class="badge accent">Active</span>
+            <span v-else class="badge pending">Waiting</span>
           </div>
         </div>
-        
+
         <div class="card-content">
-          <p class="api-note">POST /api/simulation/create</p>
-          <p class="description">Graph build is complete. Please proceed to the next step to set up the simulation environment</p>
-          <button 
-            class="action-btn" 
-            :disabled="currentPhase < 2 || creatingSimulation"
-            @click="handleEnterEnvSetup"
+          <p class="api-note">Test GraphRAG retrieval accuracy</p>
+          <p class="description">Graph build is complete. You can now test the knowledge recall capability by asking questions.</p>
+
+          <div v-if="currentPhase >= 2" class="hit-test-box">
+            <div class="search-input-wrapper">
+              <input
+                v-model="hitTestQuery"
+                placeholder="Enter a question to test knowledge recall..."
+                @keyup.enter="runHitTest"
+                :disabled="hitTestLoading"
+              />
+              <button @click="runHitTest" :disabled="hitTestLoading || !hitTestQuery.trim()">
+                {{ hitTestLoading ? '...' : '→' }}
+              </button>
+            </div>
+
+            <div v-if="hitTestResults" class="hit-test-results">
+              <div class="results-header">
+                <span>Found {{ hitTestResults.facts?.length || 0 }} relevant facts</span>
+              </div>
+              <div class="facts-scroll-area">
+                <div v-for="(fact, idx) in hitTestResults.facts" :key="idx" class="fact-item">
+                  <p class="fact-text">{{ parseFactText(fact).content }}</p>
+                  <div v-if="parseFactText(fact).source" class="fact-source">
+                    <span class="source-label">LOCATION</span>
+                    <span class="source-tag">{{ parseFactText(fact).source }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <button
+            v-if="currentPhase >= 2"
+            class="action-btn next-btn"
+            @click="$emit('next-step')"
           >
-            <span v-if="creatingSimulation" class="spinner-sm"></span>
-            {{ creatingSimulation ? 'Creating...' : 'Enter Environment Setup ➝' }}
+            Finalize & View Analysis ➝
           </button>
         </div>
       </div>
@@ -190,6 +220,7 @@
 import { computed, ref, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { createSimulation } from '../api/simulation'
+import { searchGraph } from '../api/graph'
 
 const router = useRouter()
 
@@ -202,11 +233,80 @@ const props = defineProps({
   systemLogs: { type: Array, default: () => [] }
 })
 
-defineEmits(['next-step'])
+const emit = defineEmits(['next-step'])
 
 const selectedOntologyItem = ref(null)
 const logContent = ref(null)
 const creatingSimulation = ref(false)
+
+// Hit Test state
+const hitTestQuery = ref('')
+const hitTestLoading = ref(false)
+const hitTestResults = ref(null)
+
+const runHitTest = async () => {
+  if (!hitTestQuery.value.trim() || !props.projectData?.graph_id) return
+
+  hitTestLoading.value = true
+  try {
+    const response = await searchGraph({
+      graph_id: props.projectData.graph_id,
+      query: hitTestQuery.value,
+      limit: 10
+    })
+
+    if (response.success) {
+      hitTestResults.value = response.data
+    }
+  } catch (err) {
+    console.error('Hit test error:', err)
+  } finally {
+    hitTestLoading.value = false
+  }
+}
+
+const parseFactText = (factStr) => {
+  if (!factStr) return { content: '', source: '' }
+  const sourceMatch = factStr.match(/\[Source: [^\]]+\]$/)
+  if (sourceMatch) {
+    const source = sourceMatch[0].replace('[Source: ', '').replace(']', '')
+    const content = factStr.substring(0, sourceMatch.index).trim()
+    return { content, source }
+  }
+  return { content: factStr, source: '' }
+}
+
+const handleFinalize = async () => {
+  if (!props.projectData?.project_id || !props.projectData?.graph_id) {
+    console.error('Missing project or graph information')
+    return
+  }
+
+  creatingSimulation.value = true
+  try {
+    // Create a default simulation to enable the Interaction/Report Agent
+    const res = await createSimulation({
+      project_id: props.projectData.project_id,
+      graph_id: props.projectData.graph_id,
+      enable_twitter: true,
+      enable_reddit: true
+    })
+
+    if (res.success && res.data?.simulation_id) {
+      // Emit next-step with simulationId to MainView
+      emit('next-step', { simulationId: res.data.simulation_id })
+    } else {
+      console.error('Failed to create simulation:', res.error)
+      // Fallback: just go to next step without simulationId
+      emit('next-step')
+    }
+  } catch (err) {
+    console.error('Simulation creation error:', err)
+    emit('next-step')
+  } finally {
+    creatingSimulation.value = false
+  }
+}
 
 // Enter environment setup - create simulation and navigate
 const handleEnterEnvSetup = async () => {
@@ -596,6 +696,107 @@ watch(() => props.systemLogs.length, () => {
   text-transform: uppercase;
   margin-top: 4px;
   display: block;
+}
+
+/* Hit Test Styles */
+.hit-test-box {
+  margin-bottom: 20px;
+  padding: 16px;
+  background: #FAFAFA;
+  border: 1px solid #EAEAEA;
+  border-radius: 6px;
+}
+
+.search-input-wrapper {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.search-input-wrapper input {
+  flex: 1;
+  padding: 8px 12px;
+  background: #FFF;
+  border: 1px solid #DDD;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.search-input-wrapper input:focus {
+  border-color: #FF5722;
+}
+
+.search-input-wrapper button {
+  padding: 0 16px;
+  background: #000;
+  color: #FFF;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.hit-test-results {
+  margin-top: 12px;
+}
+
+.results-header {
+  font-size: 11px;
+  color: #999;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.facts-scroll-area {
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.fact-item {
+  padding-bottom: 12px;
+  border-bottom: 1px dashed #EEE;
+}
+
+.fact-item:last-child {
+  border-bottom: none;
+}
+
+.fact-text {
+  font-size: 12px;
+  color: #333;
+  margin: 0 0 6px 0;
+  line-height: 1.5;
+}
+
+.fact-source {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.source-label {
+  font-size: 9px;
+  color: #AAA;
+  font-weight: 700;
+}
+
+.source-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  background: #FFF5F2;
+  border: 1px solid #FFE0D6;
+  color: #FF5722;
+  font-family: 'JetBrains Mono', monospace;
+  border-radius: 2px;
+}
+
+.next-btn {
+  margin-top: 10px;
 }
 
 /* Step 03 Button */

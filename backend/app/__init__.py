@@ -83,7 +83,44 @@ def create_app(config_class=Config):
     # Health check
     @app.route('/health')
     def health():
-        return {'status': 'ok', 'service': 'MiroFish-Offline Backend'}
+        from .storage.embedding_service import EmbeddingService
+
+        # Check Neo4j
+        neo4j_status = "ok"
+        neo4j_error = None
+        storage = app.extensions.get('neo4j_storage')
+        if not storage:
+            neo4j_status = "not_initialized"
+        else:
+            try:
+                # Simple query to check connection
+                with storage.driver.session() as session:
+                    session.run("RETURN 1").single()
+            except Exception as e:
+                neo4j_status = "error"
+                neo4j_error = str(e)
+
+        # Check Embedding
+        embedding_service = EmbeddingService()
+        embedding_status = "ok" if embedding_service.health_check() else "error"
+
+        return {
+            'status': 'ok',
+            'service': 'MiroFish-Offline Backend',
+            'dependencies': {
+                'neo4j': {
+                    'status': neo4j_status,
+                    'uri': Config.NEO4J_URI,
+                    'error': neo4j_error
+                },
+                'embedding': {
+                    'status': embedding_status,
+                    'model': Config.EMBEDDING_MODEL,
+                    'provider': embedding_service.provider,
+                    'url': embedding_service._embed_url
+                }
+            }
+        }
 
     if should_log_startup:
         logger.info("MiroFish-Offline Backend startup complete")

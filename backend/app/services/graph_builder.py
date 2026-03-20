@@ -6,6 +6,7 @@ Uses GraphStorage (Neo4j) to replace Zep Cloud API.
 import time
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
 
@@ -185,55 +186,82 @@ class GraphBuilderService:
     def add_text_batches(
         self,
         graph_id: str,
-        chunks: List[str],
+        chunks: List[Any],
         batch_size: int = 3,
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable] = None,
+        max_workers: int = 2
     ) -> List[str]:
-        """Add text in batches to graph, return uuid list of all episodes"""
-        episode_uuids = []
+        """
+        Add text in parallel to graph using ThreadPoolExecutor.
+        Each thread processes one chunk independently (LLM call + Neo4j merge).
+        Returns uuid list of all episodes. Supports both strings and TextChunks.
+        """
+        # Lower default max_workers to 2 for better stability on local LLMs
+        episode_uuids = [None] * len(chunks)
         total_chunks = len(chunks)
-        total_batches = (total_chunks + batch_size - 1) // batch_size
 
-        logger.info(f"[graph_build] Starting: {total_chunks} chunks, {total_batches} batches (batch_size={batch_size})")
+        logger.info(f"[graph_build] Starting Parallel Extraction: {total_chunks} chunks (max_workers={max_workers})")
 
-        for i in range(0, total_chunks, batch_size):
-            batch_chunks = chunks[i:i + batch_size]
-            batch_num = i // batch_size + 1
+        def _process_single_chunk(idx, chunk_data):
+            # Handle both raw strings and TextChunk objects
+            if hasattr(chunk_data, 'text'):
+                text = chunk_data.text
+                metadata = chunk_data.metadata
+            elif isinstance(chunk_data, dict) and "text" in chunk_data:
+                text = chunk_data["text"]
+                metadata = chunk_data.get("metadata")
+            else:
+                text = str(chunk_data)
+                metadata = None
 
-            if progress_callback:
-                progress = (i + len(batch_chunks)) / total_chunks
-                progress_callback(
-                    f"Processing batch {batch_num}/{total_batches} ({len(batch_chunks)} chunks)...",
-                    progress
-                )
+            t0 = time.time()
+            try:
+                episode_id = self.storage.add_text(graph_id, text, metadata=metadata)
+                elapsed = time.time() - t0
+                log_msg = f"Chunk {idx+1}/{total_chunks} extracted in {elapsed:.1f}s"
+                logger.info(f"[graph_build] {log_msg}")
+                return idx, episode_id, log_msg
+            except Exception as e:
+                elapsed = time.time() - t0
+                err_msg = f"Chunk {idx+1}/{total_chunks} FAILED after {elapsed:.1f}s: {e}"
+                logger.error(f"[graph_build] {err_msg}")
+                raise e
 
-            for j, chunk in enumerate(batch_chunks):
-                chunk_idx = i + j + 1
-                chunk_preview = chunk[:80].replace('\n', ' ')
-                logger.info(
-                    f"[graph_build] Chunk {chunk_idx}/{total_chunks} "
-                    f"({len(chunk)} chars): \"{chunk_preview}...\""
-                )
-                t0 = time.time()
+        processed_count = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Map futures to indices
+            future_to_idx = {
+                executor.submit(_process_single_chunk, i, chunk): i
+                for i, chunk in enumerate(chunks)
+            }
+
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
                 try:
-                    episode_id = self.storage.add_text(graph_id, chunk)
-                    episode_uuids.append(episode_id)
-                    elapsed = time.time() - t0
-                    logger.info(
-                        f"[graph_build] Chunk {chunk_idx}/{total_chunks} done in {elapsed:.1f}s"
-                    )
-                except Exception as e:
-                    elapsed = time.time() - t0
-                    logger.error(
-                        f"[graph_build] Chunk {chunk_idx}/{total_chunks} FAILED "
-                        f"after {elapsed:.1f}s: {e}"
-                    )
+                    res_idx, episode_id, log_msg = future.result()
+                    episode_uuids[res_idx] = episode_id
+                    processed_count += 1
+
                     if progress_callback:
-                        progress_callback(f"Batch {batch_num} processing failed: {str(e)}", 0)
+                        progress = processed_count / total_chunks
+                        # Pass log message to progress callback if it supports it
+                        # The callback in api/graph.py updates task message and logs
+                        progress_callback(
+                            f"Extracted {processed_count}/{total_chunks} chunks...",
+                            progress,
+                            log=log_msg
+                        )
+                except Exception as e:
+                    logger.error(f"Error processing chunk at index {idx}: {e}")
+                    # In case of failure, we still want to finish other threads or stop depending on policy
+                    # Here we let it continue but log the error.
+                    # Note: The task will eventually be marked as failed by the caller if we raise.
+                    if progress_callback:
+                        progress_callback(f"Chunk processing failed: {str(e)}", 0)
                     raise
 
         logger.info(f"[graph_build] All {total_chunks} chunks processed successfully")
-        return episode_uuids
+        return [uid for uid in episode_uuids if uid is not None]
 
     def _get_graph_info(self, graph_id: str) -> GraphInfo:
         """Get graph information"""

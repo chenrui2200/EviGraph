@@ -10,7 +10,7 @@ import time
 import uuid
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Union
 
 from neo4j import GraphDatabase, Session as Neo4jSession
 from neo4j.exceptions import (
@@ -158,6 +158,61 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             self._call_with_retry(session.execute_write, _set)
 
+    def _ensure_document(self, tx, graph_id: str, filename: str) -> str:
+        """Ensure Document node exists and link to Graph."""
+        import hashlib
+        # Use stable UUID based on graph and filename
+        doc_seed = f"{graph_id}:{filename}".encode('utf-8')
+        doc_uuid = str(uuid.UUID(hashlib.md5(doc_seed).hexdigest()))
+
+        tx.run(
+            """
+            MATCH (g:Graph {graph_id: $gid})
+            MERGE (d:Document {uuid: $doc_uuid})
+            ON CREATE SET
+                d.name = $name,
+                d.graph_id = $gid,
+                d.created_at = datetime()
+            ON MATCH SET
+                d.graph_id = $gid
+            MERGE (g)-[r:HAS_DOCUMENT]->(d)
+            ON CREATE SET r.graph_id = $gid
+            ON MATCH SET r.graph_id = $gid
+            """,
+            gid=graph_id,
+            doc_uuid=doc_uuid,
+            name=filename
+        )
+        return doc_uuid
+
+    def _ensure_page(self, tx, graph_id: str, doc_uuid: str, page_num: int) -> str:
+        """Ensure Page node exists and link to Document."""
+        import hashlib
+        page_seed = f"{doc_uuid}:{page_num}".encode('utf-8')
+        page_uuid = str(uuid.UUID(hashlib.md5(page_seed).hexdigest()))
+
+        tx.run(
+            """
+            MATCH (d:Document {uuid: $doc_uuid})
+            MERGE (p:Page {uuid: $page_uuid})
+            ON CREATE SET
+                p.number = $num,
+                p.doc_uuid = $doc_uuid,
+                p.graph_id = $gid,
+                p.created_at = datetime()
+            ON MATCH SET
+                p.graph_id = $gid
+            MERGE (d)-[r:HAS_PAGE]->(p)
+            ON CREATE SET r.graph_id = $gid
+            ON MATCH SET r.graph_id = $gid
+            """,
+            doc_uuid=doc_uuid,
+            page_uuid=page_uuid,
+            num=page_num,
+            gid=graph_id
+        )
+        return page_uuid
+
     def get_ontology(self, graph_id: str) -> Dict[str, Any]:
         with self._driver.session() as session:
             result = session.run(
@@ -173,65 +228,97 @@ class Neo4jStorage(GraphStorage):
     # Add data (NER → nodes/edges)
     # ----------------------------------------------------------------
 
-    def add_text(self, graph_id: str, text: str) -> str:
-        """Process text: NER/RE → batch embed → create nodes/edges → return episode_id."""
+    def add_text(self, graph_id: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
+        """Process text: Create skeleton -> NER/RE -> batch embed -> update knowledge."""
         episode_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
 
-        # Get ontology for NER guidance
-        ontology = self.get_ontology(graph_id)
-
-        # Extract entities and relations
-        logger.info(f"[add_text] Starting NER extraction for chunk ({len(text)} chars)...")
-        extraction = self._ner.extract(text, ontology)
-        entities = extraction.get("entities", [])
-        relations = extraction.get("relations", [])
-
-        logger.info(
-            f"[add_text] NER done: {len(entities)} entities, {len(relations)} relations"
-        )
-
-        # --- Batch embed all texts at once ---
-        entity_summaries = [f"{e['name']} ({e['type']})" for e in entities]
-        fact_texts = [r.get("fact", f"{r['source']} {r['type']} {r['target']}") for r in relations]
-        all_texts_to_embed = entity_summaries + fact_texts
-
-        all_embeddings: list = []
-        if all_texts_to_embed:
-            logger.info(f"[add_text] Batch-embedding {len(all_texts_to_embed)} texts...")
-            try:
-                all_embeddings = self._embedding.embed_batch(all_texts_to_embed)
-            except Exception as e:
-                logger.warning(f"[add_text] Batch embedding failed, falling back to empty: {e}")
-                all_embeddings = [[] for _ in all_texts_to_embed]
-
-        entity_embeddings = all_embeddings[:len(entities)]
-        relation_embeddings = all_embeddings[len(entities):]
-        logger.info(f"[add_text] Embedding done, writing to Neo4j...")
-
+        # 1. Create episode node and structural skeleton IMMEDIATELY
+        # This provides immediate visual feedback in the graph visualization
         with self._driver.session() as session:
-            # Create episode node
-            def _create_episode(tx):
+            def _create_skeleton(tx):
+                # Create episode
                 tx.run(
                     """
                     CREATE (ep:Episode {
                         uuid: $uuid,
                         graph_id: $graph_id,
                         data: $data,
-                        processed: true,
+                        metadata_json: $metadata_json,
+                        processed: false,
                         created_at: $created_at
                     })
                     """,
                     uuid=episode_id,
                     graph_id=graph_id,
                     data=text,
+                    metadata_json=metadata_json,
                     created_at=now,
                 )
 
-            self._call_with_retry(session.execute_write, _create_episode)
+                # Link to Page/Document if metadata is available
+                if metadata:
+                    filename = metadata.get("source")
+                    page_num = metadata.get("page")
+                    if filename:
+                        doc_uuid = self._ensure_document(tx, graph_id, filename)
+                        if page_num:
+                            page_uuid = self._ensure_page(tx, graph_id, doc_uuid, page_num)
+                            tx.run(
+                                """
+                                MATCH (p:Page {uuid: $p_uuid}), (ep:Episode {uuid: $ep_uuid})
+                                MERGE (p)-[r:HAS_EPISODE]->(ep)
+                                ON CREATE SET r.graph_id = $gid
+                                ON MATCH SET r.graph_id = $gid
+                                """,
+                                p_uuid=page_uuid, ep_uuid=episode_id, gid=graph_id
+                            )
+                        else:
+                            tx.run(
+                                """
+                                MATCH (d:Document {uuid: $d_uuid}), (ep:Episode {uuid: $ep_uuid})
+                                MERGE (d)-[r:HAS_EPISODE]->(ep)
+                                ON CREATE SET r.graph_id = $gid
+                                ON MATCH SET r.graph_id = $gid
+                                """,
+                                d_uuid=doc_uuid, ep_uuid=episode_id, gid=graph_id
+                            )
 
-            # MERGE entities (upsert by graph_id + name + primary label)
-            entity_uuid_map: Dict[str, str] = {}  # name_lower -> uuid
+            self._call_with_retry(session.execute_write, _create_skeleton)
+
+        # 2. Knowledge Extraction (Guided by Ontology)
+        ontology = self.get_ontology(graph_id)
+        logger.info(f"[add_text] Starting NER extraction for episode {episode_id[:8]}...")
+        extraction = self._ner.extract(text, ontology)
+        entities = extraction.get("entities", [])
+        relations = extraction.get("relations", [])
+
+        logger.info(f"[add_text] NER extracted {len(entities)} entities and {len(relations)} relations for episode {episode_id[:8]}")
+
+        # 3. Batch embed all extraction results
+        entity_summaries = [f"{e['name']} ({e['type']})" for e in entities]
+        fact_texts = [r.get("fact", f"{r['source']} {r['type']} {r['target']}") for r in relations]
+        all_texts_to_embed = entity_summaries + fact_texts
+
+        all_embeddings: list = []
+        if all_texts_to_embed:
+            try:
+                all_embeddings = self._embedding.embed_batch(all_texts_to_embed)
+            except Exception as e:
+                logger.warning(f"[add_text] Embedding failed: {e}")
+                all_embeddings = [[] for _ in all_texts_to_embed]
+
+        entity_embeddings = all_embeddings[:len(entities)]
+        relation_embeddings = all_embeddings[len(entities):]
+
+        # 4. Write knowledge back to Neo4j
+        with self._driver.session() as session:
+            # Mark episode as processed
+            session.run("MATCH (ep:Episode {uuid: $uuid}) SET ep.processed = true", uuid=episode_id)
+
+            # MERGE entities and link to episode
+            entity_uuid_map: Dict[str, str] = {}
             for idx, entity in enumerate(entities):
                 ename = entity["name"]
                 etype = entity["type"]
@@ -239,131 +326,112 @@ class Neo4jStorage(GraphStorage):
                 summary_text = entity_summaries[idx]
                 embedding = entity_embeddings[idx] if idx < len(entity_embeddings) else []
 
-                e_uuid = str(uuid.uuid4())
-                entity_uuid_map[ename.lower()] = e_uuid
-
-                def _merge_entity(tx, _uuid=e_uuid, _name=ename, _type=etype,
-                                  _attrs=attrs, _embedding=embedding,
-                                  _summary=summary_text, _now=now):
-                    # MERGE by graph_id + lowercase name to deduplicate
-                    result = tx.run(
+                def _merge_knowledge(tx, _name=ename, _type=etype, _attrs=attrs,
+                                    _emb=embedding, _summary=summary_text, _ep_id=episode_id):
+                    # Merge Entity
+                    res = tx.run(
                         """
                         MERGE (n:Entity {graph_id: $gid, name_lower: $name_lower})
                         ON CREATE SET
-                            n.uuid = $uuid,
+                            n.uuid = randomUUID(),
                             n.name = $name,
                             n.summary = $summary,
                             n.attributes_json = $attrs_json,
                             n.embedding = $embedding,
-                            n.created_at = $now
+                            n.created_at = datetime()
                         ON MATCH SET
-                            n.summary = CASE WHEN n.summary = '' OR n.summary IS NULL
-                                THEN $summary ELSE n.summary END,
+                            n.summary = CASE WHEN n.summary = '' OR n.summary IS NULL THEN $summary ELSE n.summary END,
                             n.attributes_json = $attrs_json,
                             n.embedding = $embedding
                         RETURN n.uuid AS uuid
                         """,
-                        gid=graph_id,
-                        name_lower=_name.lower(),
-                        uuid=_uuid,
-                        name=_name,
-                        summary=_summary,
-                        attrs_json=json.dumps(_attrs, ensure_ascii=False),
-                        embedding=_embedding,
-                        now=_now,
+                        gid=graph_id, name_lower=_name.lower(), name=_name,
+                        summary=_summary, attrs_json=json.dumps(_attrs, ensure_ascii=False),
+                        embedding=_emb
                     )
-                    record = result.single()
-                    return record["uuid"] if record else _uuid
+                    e_uuid = res.single()["uuid"]
 
-                actual_uuid = self._call_with_retry(session.execute_write, _merge_entity)
+                    # Link Episode -> Entity
+                    tx.run(
+                        """
+                        MATCH (n:Entity {uuid: $e_uuid}), (ep:Episode {uuid: $ep_id})
+                        MERGE (ep)-[r:MENTIONS]->(n)
+                        ON CREATE SET r.graph_id = $gid
+                        ON MATCH SET r.graph_id = $gid
+                        """,
+                        e_uuid=e_uuid, ep_id=_ep_id, gid=graph_id
+                    )
+
+                    # Add label
+                    if _type and _type != "Entity":
+                        tx.run(f"MATCH (n:Entity {{uuid: $uuid}}) SET n:`{_type}`", uuid=e_uuid)
+
+                    return e_uuid
+
+                actual_uuid = self._call_with_retry(session.execute_write, _merge_knowledge)
                 entity_uuid_map[ename.lower()] = actual_uuid
-
-                # Add entity type label
-                if etype and etype != "Entity":
-                    try:
-                        def _add_label(tx, _name_lower=ename.lower()):
-                            tx.run(
-                                f"MATCH (n:Entity {{graph_id: $gid, name_lower: $nl}}) SET n:`{etype}`",
-                                gid=graph_id,
-                                nl=_name_lower,
-                            )
-                        self._call_with_retry(session.execute_write, _add_label)
-                    except Exception as e:
-                        logger.warning(f"Failed to add label '{etype}' to '{ename}': {e}")
 
             # Create relations
             for idx, relation in enumerate(relations):
-                source_name = relation["source"]
-                target_name = relation["target"]
-                rtype = relation["type"]
+                s_name = relation["source"]
+                t_name = relation["target"]
+                r_type = relation["type"]
                 fact = relation["fact"]
+                s_uuid = entity_uuid_map.get(s_name.lower())
+                t_uuid = entity_uuid_map.get(t_name.lower())
 
-                source_uuid = entity_uuid_map.get(source_name.lower())
-                target_uuid = entity_uuid_map.get(target_name.lower())
+                if s_uuid and t_uuid:
+                    fact_emb = relation_embeddings[idx] if idx < len(relation_embeddings) else []
 
-                if not source_uuid or not target_uuid:
-                    logger.warning(
-                        f"Skipping relation {source_name}->{target_name}: "
-                        f"entity not found in extraction results"
-                    )
-                    continue
+                    def _create_rel(tx, _suid=s_uuid, _tuid=t_uuid, _rt=r_type, _f=fact, _fe=fact_emb):
+                        tx.run(
+                            """
+                            MATCH (src:Entity {uuid: $suid}), (tgt:Entity {uuid: $tuid})
+                            CREATE (src)-[r:RELATION {
+                                uuid: randomUUID(),
+                                graph_id: $gid,
+                                name: $name,
+                                fact: $fact,
+                                fact_embedding: $fact_embedding,
+                                episode_ids: [$ep_id],
+                                created_at: datetime()
+                            }]->(tgt)
+                            """,
+                            suid=_suid, tuid=_tuid, gid=graph_id, name=_rt,
+                            fact=_f, fact_embedding=_fe, ep_id=episode_id
+                        )
+                    self._call_with_retry(session.execute_write, _create_rel)
 
-                fact_embedding = relation_embeddings[idx] if idx < len(relation_embeddings) else []
-                r_uuid = str(uuid.uuid4())
-
-                def _create_relation(tx, _r_uuid=r_uuid, _source_uuid=source_uuid,
-                                     _target_uuid=target_uuid, _rtype=rtype,
-                                     _fact=fact, _fact_emb=fact_embedding,
-                                     _episode_id=episode_id, _now=now):
-                    tx.run(
-                        """
-                        MATCH (src:Entity {uuid: $src_uuid})
-                        MATCH (tgt:Entity {uuid: $tgt_uuid})
-                        CREATE (src)-[r:RELATION {
-                            uuid: $uuid,
-                            graph_id: $gid,
-                            name: $name,
-                            fact: $fact,
-                            fact_embedding: $fact_embedding,
-                            attributes_json: '{}',
-                            episode_ids: [$episode_id],
-                            created_at: $now,
-                            valid_at: null,
-                            invalid_at: null,
-                            expired_at: null
-                        }]->(tgt)
-                        """,
-                        src_uuid=_source_uuid,
-                        tgt_uuid=_target_uuid,
-                        uuid=_r_uuid,
-                        gid=graph_id,
-                        name=_rtype,
-                        fact=_fact,
-                        fact_embedding=_fact_emb,
-                        episode_id=_episode_id,
-                        now=_now,
-                    )
-
-                self._call_with_retry(session.execute_write, _create_relation)
-
-        logger.info(f"[add_text] Chunk done: episode={episode_id}")
+        logger.info(f"[add_text] Knowledge update done for episode {episode_id[:8]}")
         return episode_id
 
     def add_text_batch(
         self,
         graph_id: str,
-        chunks: List[str],
+        chunks: List[Union[str, Any]],
         batch_size: int = 3,
         progress_callback: Optional[Callable] = None,
     ) -> List[str]:
-        """Batch-add text chunks with progress reporting."""
+        """Batch-add text chunks with progress reporting. Supports both strings and TextChunks."""
         episode_ids = []
         total = len(chunks)
 
-        for i, chunk in enumerate(chunks):
-            if not chunk or not chunk.strip():
+        for i, chunk_data in enumerate(chunks):
+            # Handle both raw strings and TextChunk objects
+            if hasattr(chunk_data, 'text') and hasattr(chunk_data, 'metadata'):
+                text = chunk_data.text
+                metadata = chunk_data.metadata
+            elif isinstance(chunk_data, dict) and "text" in chunk_data:
+                text = chunk_data["text"]
+                metadata = chunk_data.get("metadata")
+            else:
+                text = str(chunk_data)
+                metadata = None
+
+            if not text or not text.strip():
                 continue
-            episode_id = self.add_text(graph_id, chunk)
+
+            episode_id = self.add_text(graph_id, text, metadata=metadata)
             episode_ids.append(episode_id)
 
             if progress_callback:
@@ -472,6 +540,56 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             return self._call_with_retry(session.execute_read, _read)
 
+    def get_episodes(self, episode_uuids: List[str]) -> List[Dict[str, Any]]:
+        if not episode_uuids:
+            return []
+
+        def _read(tx):
+            # Enriched query to get document and page info via relationships
+            result = tx.run(
+                """
+                MATCH (ep:Episode)
+                WHERE ep.uuid IN $uuids
+                OPTIONAL MATCH (p:Page)-[:HAS_EPISODE]->(ep)
+                OPTIONAL MATCH (d:Document)-[:HAS_PAGE]->(p)
+                OPTIONAL MATCH (d2:Document)-[:HAS_EPISODE]->(ep)
+                RETURN ep, p.number AS page_num,
+                       coalesce(d.name, d2.name) AS doc_name
+                """,
+                uuids=episode_uuids,
+            )
+            episodes = []
+            for record in result:
+                props = dict(record["ep"])
+
+                # Convert Neo4j DateTime to string
+                for k, v in props.items():
+                    if hasattr(v, "isoformat"):
+                        props[k] = v.isoformat()
+
+                meta_json = props.pop("metadata_json", "{}")
+                try:
+                    metadata = json.loads(meta_json) if meta_json else {}
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
+
+                # Overlay graph structure info onto metadata if present
+                if record["doc_name"]:
+                    metadata["source"] = record["doc_name"]
+                if record["page_num"]:
+                    metadata["page"] = record["page_num"]
+
+                episodes.append({
+                    "uuid": props.get("uuid"),
+                    "text": props.get("data"),
+                    "metadata": metadata,
+                    "created_at": props.get("created_at")
+                })
+            return episodes
+
+        with self._driver.session() as session:
+            return self._call_with_retry(session.execute_read, _read)
+
     # ----------------------------------------------------------------
     # Search
     # ----------------------------------------------------------------
@@ -493,14 +611,26 @@ class Neo4jStorage(GraphStorage):
 
         with self._driver.session() as session:
             if scope in ("edges", "both"):
-                result["edges"] = self._search.search_edges(
+                edges = self._search.search_edges(
                     session, graph_id, query, limit
                 )
+                # Sanitize results for JSON serialization
+                for e in edges:
+                    for k, v in e.items():
+                        if hasattr(v, "isoformat"):
+                            e[k] = v.isoformat()
+                result["edges"] = edges
 
             if scope in ("nodes", "both"):
-                result["nodes"] = self._search.search_nodes(
+                nodes = self._search.search_nodes(
                     session, graph_id, query, limit
                 )
+                # Sanitize results
+                for n in nodes:
+                    for k, v in n.items():
+                        if hasattr(v, "isoformat"):
+                            n[k] = v.isoformat()
+                result["nodes"] = nodes
 
         return result
 
@@ -549,13 +679,14 @@ class Neo4jStorage(GraphStorage):
     def get_graph_data(self, graph_id: str) -> Dict[str, Any]:
         """
         Full graph dump with enriched edge format (for frontend).
-        Includes derived fields: fact_type, source_node_name, target_node_name.
+        Includes Entity, Document, Page, and Episode nodes for a complete view.
         """
         def _read(tx):
-            # Get all nodes
+            # Get all relevant nodes (Entities, Documents, Pages, Episodes)
             node_result = tx.run(
                 """
-                MATCH (n:Entity {graph_id: $gid})
+                MATCH (n {graph_id: $gid})
+                WHERE n:Entity OR n:Document OR n:Page OR n:Episode
                 RETURN n, labels(n) AS labels
                 """,
                 gid=graph_id,
@@ -564,25 +695,57 @@ class Neo4jStorage(GraphStorage):
             node_map: Dict[str, str] = {}  # uuid -> name
             for record in node_result:
                 nd = self._node_to_dict(record["n"], record["labels"])
+                # Fallback name for Page and Episode nodes
+                if "Page" in record["labels"] and not nd.get("name"):
+                    nd["name"] = f"Page {record['n'].get('number', '?')}"
+                elif "Episode" in record["labels"] and not nd.get("name"):
+                    # Use a short preview of the text for Episode name
+                    text_preview = (record['n'].get('data') or "")[:30].replace('\n', ' ')
+                    nd["name"] = f"Chunk: {text_preview}..."
+
                 nodes.append(nd)
-                node_map[nd["uuid"]] = nd["name"]
+                node_map[nd["uuid"]] = nd.get("name") or "Unnamed"
 
             # Get all edges with source/target node names (JOIN)
             edge_result = tx.run(
                 """
-                MATCH (src:Entity)-[r:RELATION {graph_id: $gid}]->(tgt:Entity)
+                MATCH (src)-[r {graph_id: $gid}]->(tgt)
+                WHERE (src:Entity OR src:Document OR src:Page OR src:Episode)
+                  AND (tgt:Entity OR tgt:Document OR tgt:Page OR tgt:Episode)
                 RETURN r, src.uuid AS src_uuid, tgt.uuid AS tgt_uuid,
-                       src.name AS src_name, tgt.name AS tgt_name
+                       src.name AS src_name, tgt.name AS tgt_name,
+                       labels(src) AS src_labels, labels(tgt) AS tgt_labels,
+                       src.number AS src_num, tgt.number AS tgt_num,
+                       src.data AS src_data, tgt.data AS tgt_data,
+                       type(r) AS rel_type
                 """,
                 gid=graph_id,
             )
             edges = []
             for record in edge_result:
                 ed = self._edge_to_dict(record["r"], record["src_uuid"], record["tgt_uuid"])
+
                 # Enriched fields for frontend
-                ed["fact_type"] = ed["name"]
-                ed["source_node_name"] = record["src_name"] or ""
-                ed["target_node_name"] = record["tgt_name"] or ""
+                ed["fact_type"] = ed.get("name") or record["rel_type"]
+
+                # Handle names for structural nodes
+                src_name = record["src_name"]
+                if not src_name:
+                    if "Page" in record["src_labels"]:
+                        src_name = f"Page {record['src_num']}"
+                    elif "Episode" in record["src_labels"]:
+                        src_name = f"Chunk: {(record['src_data'] or '')[:20]}..."
+
+                tgt_name = record["tgt_name"]
+                if not tgt_name:
+                    if "Page" in record["tgt_labels"]:
+                        tgt_name = f"Page {record['tgt_num']}"
+                    elif "Episode" in record["tgt_labels"]:
+                        tgt_name = f"Chunk: {(record['tgt_data'] or '')[:20]}..."
+
+                ed["source_node_name"] = src_name or ""
+                ed["target_node_name"] = tgt_name or ""
+
                 # Legacy alias
                 ed["episodes"] = ed.get("episode_ids", [])
                 edges.append(ed)
@@ -606,6 +769,12 @@ class Neo4jStorage(GraphStorage):
     def _node_to_dict(node, labels: List[str]) -> Dict[str, Any]:
         """Convert Neo4j node to the standard node dict format."""
         props = dict(node)
+
+        # Convert Neo4j DateTime to string
+        for k, v in props.items():
+            if hasattr(v, "isoformat"):
+                props[k] = v.isoformat()
+
         attrs_json = props.pop("attributes_json", "{}")
         try:
             attributes = json.loads(attrs_json) if attrs_json else {}
@@ -629,6 +798,12 @@ class Neo4jStorage(GraphStorage):
     def _edge_to_dict(rel, source_uuid: str, target_uuid: str) -> Dict[str, Any]:
         """Convert Neo4j relationship to the standard edge dict format."""
         props = dict(rel)
+
+        # Convert Neo4j DateTime to string
+        for k, v in props.items():
+            if hasattr(v, "isoformat"):
+                props[k] = v.isoformat()
+
         attrs_json = props.pop("attributes_json", "{}")
         try:
             attributes = json.loads(attrs_json) if attrs_json else {}

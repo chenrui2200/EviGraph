@@ -33,10 +33,10 @@ class GraphStorage(ABC):
     # --- Add data ---
 
     @abstractmethod
-    def add_text(self, graph_id: str, text: str) -> str:
+    def add_text(self, graph_id: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
         """
         Process text: NER/RE → create nodes/edges → return episode_id.
-        This is synchronous (unlike Zep Cloud's async episodes).
+        Optional metadata for traceability.
         """
 
     @abstractmethod
@@ -85,6 +85,10 @@ class GraphStorage(ABC):
     @abstractmethod
     def get_all_edges(self, graph_id: str) -> List[Dict[str, Any]]:
         """Get all edges in a graph."""
+
+    @abstractmethod
+    def get_episodes(self, episode_uuids: List[str]) -> List[Dict[str, Any]]:
+        """Get episode details (text + metadata) by UUIDs."""
 
     # --- Search ---
 

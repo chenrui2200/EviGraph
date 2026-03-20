@@ -30,18 +30,19 @@ const routes = [
     component: SimulationRunView,
     props: true
   },
-  {
-    path: '/report/:reportId',
-    name: 'Report',
-    component: ReportView,
-    props: true
-  },
-  {
-    path: '/interaction/:reportId',
-    name: 'Interaction',
-    component: InteractionView,
-    props: true
-  }
+  // Report功能暂时隐藏
+  // {
+  //   path: '/report/:reportId',
+  //   name: 'Report',
+  //   component: ReportView,
+  //   props: true
+  // },
+  // {
+  //   path: '/interaction/:reportId',
+  //   name: 'Interaction',
+  //   component: InteractionView,
+  //   props: true
+  // }
 ]
 
 const router = createRouter({

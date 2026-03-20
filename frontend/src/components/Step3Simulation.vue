@@ -90,17 +90,18 @@
         </div>
       </div>
 
-      <div class="action-controls">
-        <button 
+      <!-- Report功能暂时隐藏 -->
+      <!-- <div class="action-controls">
+        <button
           class="action-btn primary"
           :disabled="phase !== 2 || isGeneratingReport"
           @click="handleNextStep"
         >
           <span v-if="isGeneratingReport" class="loading-spinner-small"></span>
-          {{ isGeneratingReport ? 'Starting...' : 'Start Generating Report' }} 
+          {{ isGeneratingReport ? 'Starting...' : 'Start Generating Report' }}
           <span v-if="!isGeneratingReport" class="arrow-icon">→</span>
         </button>
-      </div>
+      </div> -->
     </div>
 
     <!-- Main Content: Dual Timeline -->

@@ -386,18 +386,42 @@ def stream_console_log(report_id: str):
 
 @report_bp.route('/tools/search', methods=['POST'])
 def search_graph_tool():
+    """
+    Graph search tool - supports both single and multi-graph search
+
+    Request body:
+        - graph_id: str (single graph) OR graph_ids: List[str] (multiple graphs)
+        - query: str (required)
+        - limit: int (optional, default 10)
+    """
     try:
         data = request.get_json() or {}
         graph_id = data.get('graph_id')
+        graph_ids = data.get('graph_ids')
         query = data.get('query')
         limit = data.get('limit', 10)
-        if not graph_id or not query:
-            return jsonify({"success": False, "error": "Please provide graph_id and query"}), 400
+
+        if not query:
+            return jsonify({"success": False, "error": "Please provide query"}), 400
+
+        if not graph_id and not graph_ids:
+            return jsonify({"success": False, "error": "Please provide graph_id or graph_ids"}), 400
+
         storage = current_app.extensions.get('neo4j_storage')
         if not storage:
             raise ValueError("GraphStorage not initialized — check Neo4j connection")
+
         tools = GraphToolsService(storage=storage)
-        result = tools.search_graph(graph_id=graph_id, query=query, limit=limit)
+
+        # Multi-graph search
+        if graph_ids:
+            if not isinstance(graph_ids, list):
+                return jsonify({"success": False, "error": "graph_ids must be a list"}), 400
+            result = tools.search_multi_graphs(graph_ids=graph_ids, query=query, limit=limit)
+        # Single graph search (backward compatible)
+        else:
+            result = tools.search_graph(graph_id=graph_id, query=query, limit=limit)
+
         return jsonify({"success": True, "data": result.to_dict()})
     except Exception as e:
         logger.error(f"Graph search failed: {str(e)}")

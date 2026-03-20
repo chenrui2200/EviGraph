@@ -21,19 +21,14 @@
 
           <h1 class="main-title" :style="s.mainTitle">
             Upload Any Document<br>
-            <span class="gradient-text" :style="s.gradientText">Predict What Happens Next</span>
+            <span class="gradient-text" :style="s.gradientText">Ask What you want to know</span>
           </h1>
 
           <div class="hero-desc" :style="s.heroDesc">
             <p :style="s.heroDescP">
-              From a single document, <span :style="s.highlightBold">MiroFish Offline</span> extracts reality seeds and builds a parallel world of <span :style="s.highlightOrange">autonomous AI agents</span> — running entirely on your machine. Inject variables, observe emergent behavior, and find <span :style="s.highlightCode">"local optima"</span> in complex social dynamics.
-            </p>
-            <p class="slogan-text" :style="s.sloganText">
-              Your data never leaves your machine. The future is simulated locally<span :style="s.blinkingCursor">_</span>
+              From a single document, <span :style="s.highlightBold">MiroFish Offline</span> extracts reality seeds and builds a parallel world of <span :style="s.highlightOrange">autonomous AI agents</span>. Inject variables, observe emergent behavior, and find <span :style="s.highlightCode">"local optima"</span> in complex social dynamics.
             </p>
           </div>
-
-          <div class="decoration-square" :style="s.decorationSquare"></div>
         </div>
 
         <div class="hero-right" :style="s.heroRight">
@@ -49,22 +44,22 @@
         <!-- Left Column: Status & Steps -->
         <div class="left-panel" :style="s.leftPanel">
           <div class="panel-header" :style="s.panelHeader">
-            <span :style="s.statusDot">■</span> System Status
+            <span :style="{ color: systemStatus === 'ok' ? '#00FF00' : '#FF4500' }">■</span> System Status: {{ systemStatus === 'ok' ? 'Ready' : 'Checking...' }}
           </div>
 
-          <h2 class="section-title" :style="s.sectionTitle">Ready</h2>
+          <h2 class="section-title" :style="s.sectionTitle">{{ systemStatus === 'ok' ? 'Ready' : 'Initializing' }}</h2>
           <p class="section-desc" :style="s.sectionDesc">
-            Local prediction engine on standby. Upload unstructured data to initialize a simulation.
+            {{ systemStatus === 'ok' ? 'Local prediction engine on standby. Upload unstructured data to initialize a simulation.' : 'Connecting to local services and online models...' }}
           </p>
 
           <div class="metrics-row" :style="s.metricsRow">
             <div class="metric-card" :style="s.metricCard">
-              <div class="metric-value" :style="s.metricValue">Free</div>
-              <div class="metric-label" :style="s.metricLabel">Runs on your hardware</div>
+              <div class="metric-value" :style="s.metricValue">{{ neo4jStatus === 'ok' ? 'Local' : 'Offline' }}</div>
+              <div class="metric-label" :style="s.metricLabel">Neo4j Database</div>
             </div>
             <div class="metric-card" :style="s.metricCard">
-              <div class="metric-value" :style="s.metricValue">Private</div>
-              <div class="metric-label" :style="s.metricLabel">100% offline, no cloud</div>
+              <div class="metric-value" :style="s.metricValue">{{ embeddingProvider === 'ollama' ? 'Local' : 'Online' }}</div>
+              <div class="metric-label" :style="s.metricLabel">Embedding ({{ embeddingModel }})</div>
             </div>
           </div>
 
@@ -115,22 +110,21 @@
               </div>
             </div>
 
-            <div :style="s.consoleDivider"><span :style="s.consoleDividerText">Parameters</span></div>
-
             <div :style="s.consoleSection">
               <div class="console-header" :style="s.consoleHeader">
-                <span>>_ 02 / Simulation Prompt</span>
+                <span>>_ 02 / Ready to Build</span>
               </div>
-              <div :style="s.inputWrapper">
-                <textarea v-model="formData.simulationRequirement" :style="s.codeInput" placeholder="// Describe your simulation or prediction goal in natural language" rows="6" :disabled="loading"></textarea>
-                <div :style="s.modelBadge">Engine: Ollama + Neo4j (local)</div>
+              <div :style="s.readyStatus">
+                <div :style="s.readyIcon">⚙️</div>
+                <div :style="s.readyTitle">Ready to process {{ files.length }} document{{ files.length > 1 ? 's' : '' }}</div>
+                <div :style="s.readyDesc">MiroFish will extract entities, relations, and create a searchable knowledge graph with PDF location mapping.</div>
               </div>
             </div>
 
             <div :style="s.btnSection">
               <button :style="s.startEngineBtn" @click="startSimulation" :disabled="!canSubmit || loading">
-                <span v-if="!loading">Start Engine</span>
-                <span v-else>Initializing...</span>
+                <span v-if="!loading">Build Knowledge Base</span>
+                <span v-else>Processing...</span>
                 <span>→</span>
               </button>
             </div>
@@ -138,18 +132,27 @@
         </div>
       </section>
 
+      <ProjectList />
       <HistoryDatabase />
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import ProjectList from '../components/ProjectList.vue'
 import HistoryDatabase from '../components/HistoryDatabase.vue'
+import { getHealth } from '../api/graph'
 
 const mono = 'JetBrains Mono, monospace'
 const sans = 'Space Grotesk, Noto Sans SC, system-ui, sans-serif'
+
+// System status state
+const systemStatus = ref('loading')
+const neo4jStatus = ref('unknown')
+const embeddingProvider = ref('unknown')
+const embeddingModel = ref('unknown')
 
 const s = reactive({
   navbar: { height: '60px', background: '#000', color: '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 40px' },
@@ -213,16 +216,20 @@ const s = reactive({
   inputWrapper: { position: 'relative', border: '1px solid #DDD', background: '#FAFAFA' },
   codeInput: { width: '100%', border: 'none', background: 'transparent', padding: '20px', fontFamily: mono, fontSize: '0.9rem', lineHeight: '1.6', resize: 'vertical', outline: 'none', minHeight: '150px' },
   modelBadge: { position: 'absolute', bottom: '10px', right: '15px', fontFamily: mono, fontSize: '0.7rem', color: '#AAA' },
+  readyStatus: { border: '1px solid #DDD', background: '#FAFAFA', padding: '30px', textAlign: 'center' },
+  readyIcon: { fontSize: '2rem', marginBottom: '15px' },
+  readyTitle: { fontWeight: '700', marginBottom: '8px' },
+  readyDesc: { fontSize: '0.85rem', color: '#666', lineHeight: '1.5' },
   btnSection: { padding: '0 20px 20px' },
   startEngineBtn: { width: '100%', background: '#000', color: '#fff', border: 'none', padding: '20px', fontFamily: mono, fontWeight: '700', fontSize: '1.1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', letterSpacing: '1px' },
 })
 
 const steps = [
-  { num: '01', title: 'Graph Build', desc: 'Extract reality seeds from your document, build knowledge graph with Neo4j + GraphRAG' },
-  { num: '02', title: 'Env Setup', desc: 'Generate agent personas, configure simulation parameters via local Ollama LLM' },
-  { num: '03', title: 'Simulation', desc: 'Run multi-agent simulation locally with dynamic memory updates and emergent behavior' },
-  { num: '04', title: 'Report', desc: 'ReportAgent analyzes the simulation results and generates a detailed prediction report' },
-  { num: '05', title: 'Interaction', desc: 'Chat with any agent from the simulated world or discuss findings with ReportAgent' },
+  { num: '01', title: 'Knowledge Base Building', desc: 'Process documents through GraphRAG pipeline to build high-fidelity knowledge graph.' },
+  { num: '02', title: 'Entity Extraction', desc: 'Extract key actors, concepts and relations with PDF coordinate mapping.' },
+  { num: '03', title: 'Neo4j Graphing', desc: 'Transform unstructured data into structured nodes and relationships for complex reasoning.' },
+  { num: '04', title: 'Traceability Search', desc: 'Perform deep queries and trace every piece of information back to the original PDF location.' },
+  { num: '05', title: 'Interaction', desc: 'Query your knowledge base with natural language and get evidence-backed answers.' },
 ]
 
 const router = useRouter()
@@ -235,7 +242,7 @@ const isDragOver = ref(false)
 const fileInput = ref(null)
 
 const canSubmit = computed(() => {
-  return formData.value.simulationRequirement.trim() !== '' && files.value.length > 0
+  return files.value.length > 0
 })
 
 const triggerFileInput = () => { if (!loading.value) fileInput.value?.click() }
@@ -251,6 +258,25 @@ const addFiles = (newFiles) => {
 }
 
 const removeFile = (index) => { files.value.splice(index, 1) }
+
+const checkSystemStatus = async () => {
+  try {
+    const res = await getHealth()
+    if (res.status === 'ok') {
+      systemStatus.value = 'ok'
+      neo4jStatus.value = res.dependencies.neo4j.status
+      embeddingProvider.value = res.dependencies.embedding.provider
+      embeddingModel.value = res.dependencies.embedding.model
+    }
+  } catch (err) {
+    console.error('Failed to check system status:', err)
+    systemStatus.value = 'error'
+  }
+}
+
+onMounted(() => {
+  checkSystemStatus()
+})
 
 const scrollToBottom = () => { window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }) }
 

@@ -7,7 +7,7 @@ import uuid
 import threading
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
 
@@ -33,6 +33,7 @@ class Task:
     error: Optional[str] = None    # Error message
     metadata: Dict = field(default_factory=dict)  # Additional metadata
     progress_detail: Dict = field(default_factory=dict)  # Detailed progress information
+    logs: List[Dict[str, str]] = field(default_factory=list) # Task execution logs
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
@@ -45,6 +46,7 @@ class Task:
             "progress": self.progress,
             "message": self.message,
             "progress_detail": self.progress_detail,
+            "logs": self.logs,
             "result": self.result,
             "error": self.error,
             "metadata": self.metadata,
@@ -111,7 +113,8 @@ class TaskManager:
         message: Optional[str] = None,
         result: Optional[Dict] = None,
         error: Optional[str] = None,
-        progress_detail: Optional[Dict] = None
+        progress_detail: Optional[Dict] = None,
+        log: Optional[str] = None
     ):
         """
         Update task status
@@ -124,6 +127,7 @@ class TaskManager:
             result: Result
             error: Error message
             progress_detail: Detailed progress information
+            log: Append a new log message
         """
         with self._task_lock:
             task = self._tasks.get(task_id)
@@ -135,12 +139,30 @@ class TaskManager:
                     task.progress = progress
                 if message is not None:
                     task.message = message
+                    # Also append message to logs if provided
+                    task.logs.append({
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                        "message": message
+                    })
+                if log is not None:
+                    task.logs.append({
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                        "message": log
+                    })
                 if result is not None:
                     task.result = result
                 if error is not None:
                     task.error = error
+                    task.logs.append({
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                        "message": f"ERROR: {error}"
+                    })
                 if progress_detail is not None:
                     task.progress_detail = progress_detail
+
+                # Limit logs to last 100 entries to prevent memory issues
+                if len(task.logs) > 100:
+                    task.logs = task.logs[-100:]
 
     def complete_task(self, task_id: str, result: Dict):
         """Mark task as completed"""

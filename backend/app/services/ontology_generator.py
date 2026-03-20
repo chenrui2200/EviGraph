@@ -4,8 +4,13 @@ Interface 1: Analyze text content and generate entity and relationship type defi
 """
 
 import json
+import logging
+import traceback
 from typing import Dict, Any, List, Optional
 from ..utils.llm_client import LLMClient
+from ..utils.logger import get_logger
+
+logger = get_logger('mirofish.ontology_generator')
 
 
 # System prompt for ontology generation
@@ -194,11 +199,16 @@ class OntologyGenerator:
         ]
 
         # Call LLM
-        result = self.llm_client.chat_json(
-            messages=messages,
-            temperature=0.3,
-            max_tokens=4096
-        )
+        try:
+            logger.info(f"Calling LLM ({self.llm_client.model}) for ontology generation...")
+            result = self.llm_client.chat_json(
+                messages=messages,
+                temperature=0.3,
+                max_tokens=4096
+            )
+        except Exception as e:
+            logger.error(f"Ontology LLM call failed: {str(e)}\n{traceback.format_exc()}")
+            raise RuntimeError(f"LLM analysis failed: {str(e)}. Please check your API key and model configuration.")
 
         # Validate and post-process
         result = self._validate_and_process(result)
@@ -214,16 +224,41 @@ class OntologyGenerator:
         simulation_requirement: str,
         additional_context: Optional[str]
     ) -> str:
-        """Build user message"""
+        """Build user message with smart sampling for long texts"""
 
         # Combine texts
         combined_text = "\n\n---\n\n".join(document_texts)
         original_length = len(combined_text)
 
-        # If text exceeds 50,000 characters, truncate (only affects LLM input, not graph construction)
-        if len(combined_text) > self.MAX_TEXT_LENGTH_FOR_LLM:
-            combined_text = combined_text[:self.MAX_TEXT_LENGTH_FOR_LLM]
-            combined_text += f"\n\n...(Original text has {original_length} characters, first {self.MAX_TEXT_LENGTH_FOR_LLM} characters extracted for ontology analysis)..."
+        # Smart sampling if text exceeds limit
+        if original_length > self.MAX_TEXT_LENGTH_FOR_LLM:
+            logger.info(f"Text length {original_length} exceeds limit {self.MAX_TEXT_LENGTH_FOR_LLM}. Applying smart sampling...")
+
+            # Divide budget: 30% head, 30% tail, 40% middle samples
+            head_size = int(self.MAX_TEXT_LENGTH_FOR_LLM * 0.3)
+            tail_size = int(self.MAX_TEXT_LENGTH_FOR_LLM * 0.3)
+            middle_budget = self.MAX_TEXT_LENGTH_FOR_LLM - head_size - tail_size
+
+            head_text = combined_text[:head_size]
+            tail_text = combined_text[-tail_size:]
+
+            # Sample from the middle
+            middle_part = combined_text[head_size:-tail_size]
+            num_samples = 10
+            sample_size = middle_budget // num_samples
+            step = len(middle_part) // num_samples
+
+            middle_samples = []
+            for i in range(num_samples):
+                start = i * step
+                middle_samples.append(middle_part[start : start + sample_size])
+
+            sampled_text = head_text + "\n\n...[Middle Content Sampled]...\n\n" + \
+                          "\n\n...".join(middle_samples) + \
+                          "\n\n...[End Content]...\n\n" + tail_text
+
+            combined_text = sampled_text
+            logger.info(f"Smart sampling completed. Reduced {original_length} to ~{len(combined_text)} chars.")
 
         message = f"""## Simulation Requirements
 

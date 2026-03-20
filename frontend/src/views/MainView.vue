@@ -49,7 +49,7 @@
       <!-- Right Panel: Step Components -->
       <div class="panel-wrapper right" :style="rightPanelStyle">
         <!-- Step 1: Graph Build -->
-        <Step1GraphBuild 
+        <Step1GraphBuild
           v-if="currentStep === 1"
           :currentPhase="currentPhase"
           :projectData="projectData"
@@ -59,14 +59,10 @@
           :systemLogs="systemLogs"
           @next-step="handleNextStep"
         />
-        <!-- Step 2: Env Setup -->
-        <Step2EnvSetup
-          v-else-if="currentStep === 2"
-          :projectData="projectData"
-          :graphData="graphData"
-          :systemLogs="systemLogs"
-          @go-back="handleGoBack"
-          @next-step="handleNextStep"
+        <!-- Step 5: Interaction (Analysis) -->
+        <Step5Interaction
+          v-else-if="currentStep === 5"
+          :simulationId="simulationId"
           @add-log="addLog"
         />
       </div>
@@ -80,6 +76,7 @@ import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step1GraphBuild from '../components/Step1GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
+import Step5Interaction from '../components/Step5Interaction.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 
@@ -90,11 +87,12 @@ const router = useRouter()
 const viewMode = ref('split') // graph | split | workbench
 
 // Step State
-const currentStep = ref(1) // 1: Graph Build, 2: Env Setup, 3: Simulation, 4: Report, 5: Interaction
-const stepNames = ['Graph Build', 'Env Setup', 'Simulation', 'Report', 'Interaction']
+const currentStep = ref(1) // 1: Graph Build, 5: Interaction
+const stepNames = ['Graph Build', '', '', '', 'Interaction']
 
 // Data State
 const currentProjectId = ref(route.params.projectId)
+const simulationId = ref(null)
 const loading = ref(false)
 const graphLoading = ref(false)
 const error = ref('')
@@ -157,14 +155,20 @@ const toggleMaximize = (target) => {
 }
 
 const handleNextStep = (params = {}) => {
+  if (params.simulationId) {
+    simulationId.value = params.simulationId
+  }
+
+  // If coming from Step 1 (Graph Build), skip to Step 5 (Interaction/Analysis)
+  if (currentStep.value === 1) {
+    currentStep.value = 5
+    addLog(`Jumping to Step 5: ${stepNames[currentStep.value - 1]}`)
+    return
+  }
+
   if (currentStep.value < 5) {
     currentStep.value++
     addLog(`Entering Step ${currentStep.value}: ${stepNames[currentStep.value - 1]}`)
-
-    // If entering Step 3 from Step 2, log simulation round config
-    if (currentStep.value === 3 && params.maxRounds) {
-      addLog(`Custom simulation rounds: ${params.maxRounds}`)
-    }
   }
 }
 
@@ -323,20 +327,20 @@ const pollTaskStatus = async (taskId) => {
     const res = await getTaskStatus(taskId)
     if (res.success) {
       const task = res.data
-      
+
       // Log progress message if it changed
       if (task.message && task.message !== buildProgress.value?.message) {
         addLog(task.message)
       }
-      
+
       buildProgress.value = { progress: task.progress || 0, message: task.message }
-      
+
       if (task.status === 'completed') {
         addLog('Graph build task completed.')
         stopPolling()
         stopGraphPolling() // Stop polling, do final load
         currentPhase.value = 2
-        
+
         // Final load
         const projRes = await getProject(currentProjectId.value)
         if (projRes.success && projRes.data.graph_id) {
@@ -350,7 +354,15 @@ const pollTaskStatus = async (taskId) => {
       }
     }
   } catch (e) {
-    console.error(e)
+    console.error('Polling task error:', e)
+    // If task not found (404), stop polling to avoid infinite loops
+    if (e.response?.status === 404) {
+      addLog(`Task ${taskId} not found. Stopping polling.`)
+      stopPolling()
+
+      // Attempt to reload project to see if it auto-fixes status on backend
+      await loadProject()
+    }
   }
 }
 

@@ -130,6 +130,11 @@ class ProjectManager:
         return os.path.join(cls._get_project_dir(project_id), 'extracted_text.txt')
 
     @classmethod
+    def _get_project_chunks_path(cls, project_id: str) -> str:
+        """Get project chunks storage path (JSON)"""
+        return os.path.join(cls._get_project_dir(project_id), 'chunks.json')
+
+    @classmethod
     def create_project(cls, name: str = "Unnamed Project") -> Project:
         """
         Create new project
@@ -241,22 +246,26 @@ class ProjectManager:
     def save_file_to_project(cls, project_id: str, file_storage, original_filename: str) -> Dict[str, str]:
         """
         Save uploaded file to project directory
-
-        Args:
-            project_id: Project ID
-            file_storage: Flask FileStorage object
-            original_filename: Original filename
-
-        Returns:
-            File information dictionary {filename, path, size}
         """
+        from werkzeug.utils import secure_filename
         files_dir = cls._get_project_files_dir(project_id)
         os.makedirs(files_dir, exist_ok=True)
 
-        # Generate safe filename
-        ext = os.path.splitext(original_filename)[1].lower()
-        safe_filename = f"{uuid.uuid4().hex[:8]}{ext}"
+        # Use sanitized original filename
+        safe_filename = secure_filename(original_filename)
+
+        # If sanitized name is empty or just dots, use a fallback
+        if not safe_filename or safe_filename.startswith('.'):
+            ext = os.path.splitext(original_filename)[1].lower()
+            safe_filename = f"upload_{uuid.uuid4().hex[:8]}{ext}"
+
         file_path = os.path.join(files_dir, safe_filename)
+
+        # Handle collisions (rare but possible with identical names)
+        if os.path.exists(file_path):
+            base, ext = os.path.splitext(safe_filename)
+            safe_filename = f"{base}_{uuid.uuid4().hex[:4]}{ext}"
+            file_path = os.path.join(files_dir, safe_filename)
 
         # Save file
         file_storage.save(file_path)
@@ -288,6 +297,22 @@ class ProjectManager:
 
         with open(text_path, 'r', encoding='utf-8') as f:
             return f.read()
+
+    @classmethod
+    def save_chunks(cls, project_id: str, chunks: List[Dict[str, Any]]) -> None:
+        """Save text chunks with metadata"""
+        path = cls._get_project_chunks_path(project_id)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(chunks, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def get_chunks(cls, project_id: str) -> Optional[List[Dict[str, Any]]]:
+        """Get text chunks with metadata"""
+        path = cls._get_project_chunks_path(project_id)
+        if not os.path.exists(path):
+            return None
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
 
     @classmethod
     def get_project_files(cls, project_id: str) -> List[str]:

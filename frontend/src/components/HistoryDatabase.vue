@@ -169,7 +169,8 @@
                 <span class="btn-icon">◈</span>
                 <span class="btn-text">Environment Setup</span>
               </button>
-              <button
+              <!-- Report功能暂时隐藏 -->
+              <!-- <button
                 class="modal-btn btn-report"
                 @click="goToReport"
                 :disabled="!selectedProject.report_id"
@@ -177,7 +178,7 @@
                 <span class="btn-step">Step4</span>
                 <span class="btn-icon">◆</span>
                 <span class="btn-text">Analysis Report</span>
-              </button>
+              </button> -->
             </div>
             <!-- Playback unavailable notice -->
             <div class="modal-playback-hint">

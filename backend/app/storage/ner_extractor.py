@@ -7,6 +7,7 @@ entities and relations from text chunks, guided by the graph's ontology.
 """
 
 import logging
+import traceback
 from typing import Dict, Any, List, Optional
 
 from ..utils.llm_client import LLMClient
@@ -14,19 +15,19 @@ from ..utils.llm_client import LLMClient
 logger = logging.getLogger('mirofish.ner_extractor')
 
 # System prompt template for NER/RE extraction
-_SYSTEM_PROMPT = """You are a Named Entity Recognition and Relation Extraction system.
-Given a text and an ontology (entity types + relation types), extract all entities and relations.
+_SYSTEM_PROMPT = """You are a precision-oriented Named Entity Recognition (NER) and Relation Extraction (RE) system.
+Your goal is to extract structured knowledge from a text chunk that is part of a larger document.
 
 ONTOLOGY:
 {ontology_description}
 
 RULES:
-1. Only extract entity types and relation types defined in the ontology.
-2. Normalize entity names: strip whitespace, use canonical form (e.g., "Jack Ma" not "ma jack").
-3. Each entity must have: name, type (from ontology), and optional attributes.
-4. Each relation must have: source entity name, target entity name, type (from ontology), and a fact sentence describing the relationship.
-5. If no entities or relations are found, return empty lists.
-6. Be precise — only extract what is explicitly stated or strongly implied in the text.
+1. **Entity Selection**: Only extract entities that fit the types defined in the ONTOLOGY.
+2. **Canonical Names**: Use the most formal, full name for entities (e.g., "MiroFish Corp" instead of "the company"). Avoid pronouns.
+3. **Attributes**: For each entity, extract relevant details as attributes (e.g., "title", "status", "technical_spec") if present in text.
+4. **Relations**: Extract relationships only between the entities you identified. Each relation must have a concise 'fact' sentence.
+5. **Consistency**: Ensure extracted types strictly match the provided ONTOLOGY. If an entity doesn't fit specific types, use the fallback types (e.g., 'Person' or 'Organization') if available.
+6. **No Noise**: Do not extract common nouns or abstract concepts unless they are explicit entities in the ontology.
 
 Return ONLY valid JSON in this exact format:
 {{
@@ -69,6 +70,7 @@ class NERExtractor:
             return {"entities": [], "relations": []}
 
         ontology_desc = self._format_ontology(ontology)
+        logger.debug(f"Ontology description for LLM: {ontology_desc}")
         system_msg = _SYSTEM_PROMPT.format(ontology_description=ontology_desc)
         user_msg = _USER_PROMPT.format(text=text.strip())
 
@@ -80,12 +82,16 @@ class NERExtractor:
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
+                logger.info(f"Calling LLM for NER extraction (attempt {attempt + 1})...")
                 result = self.llm.chat_json(
                     messages=messages,
                     temperature=0.1,  # Low temp for extraction precision
                     max_tokens=4096,
                 )
-                return self._validate_and_clean(result, ontology)
+                logger.debug(f"LLM raw response for extraction: {result}")
+                cleaned_result = self._validate_and_clean(result, ontology)
+                logger.info(f"Extracted {len(cleaned_result.get('entities', []))} entities and {len(cleaned_result.get('relations', []))} relations.")
+                return cleaned_result
 
             except ValueError as e:
                 last_error = e
@@ -94,7 +100,7 @@ class NERExtractor:
                 )
             except Exception as e:
                 last_error = e
-                logger.error(f"NER extraction error: {e}")
+                logger.error(f"NER extraction error: {str(e)}\n{traceback.format_exc()}")
                 if attempt >= self.max_retries:
                     break
 
@@ -103,8 +109,11 @@ class NERExtractor:
         )
         return {"entities": [], "relations": []}
 
-    def _format_ontology(self, ontology: Dict[str, Any]) -> str:
+    def _format_ontology(self, ontology: Optional[Dict[str, Any]]) -> str:
         """Format ontology dict into readable text for the LLM prompt."""
+        if not ontology:
+            return "No specific ontology defined. Extract all entities and relations you find."
+
         parts = []
 
         entity_types = ontology.get("entity_types", [])
@@ -149,9 +158,13 @@ class NERExtractor:
         return "\n".join(parts)
 
     def _validate_and_clean(
-        self, result: Dict[str, Any], ontology: Dict[str, Any]
+        self, result: Optional[Dict[str, Any]], ontology: Optional[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """Validate and normalize LLM output."""
+        if not result:
+            return {"entities": [], "relations": []}
+
+        ontology = ontology or {}
         entities = result.get("entities", [])
         relations = result.get("relations", [])
 
