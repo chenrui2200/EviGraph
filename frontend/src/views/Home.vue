@@ -3,11 +3,6 @@
     <!-- Top Navigation Bar -->
     <nav class="navbar" :style="s.navbar">
       <div class="nav-brand" :style="s.navBrand">MIROFISH OFFLINE</div>
-      <div class="nav-links" :style="s.navLinks">
-        <a href="https://github.com/nikmcfly/MiroFish-Offline" target="_blank" class="github-link" :style="s.githubLink">
-          Visit our Github <span>↗</span>
-        </a>
-      </div>
     </nav>
 
     <div class="main-content" :style="s.mainContent">
@@ -15,18 +10,18 @@
       <section class="hero-section" :style="s.heroSection">
         <div class="hero-left" :style="s.heroLeft">
           <div class="tag-row" :style="s.tagRow">
-            <span class="orange-tag" :style="s.orangeTag">Offline Multi-Agent Simulation Engine</span>
-            <span class="version-text" :style="s.versionText">/ v0.1-preview</span>
+            <span class="orange-tag" :style="s.orangeTag">离线多智能体仿真引擎</span>
+            <span class="version-text" :style="s.versionText">/ v0.1-预览版</span>
           </div>
 
           <h1 class="main-title" :style="s.mainTitle">
-            Upload Any Document<br>
-            <span class="gradient-text" :style="s.gradientText">Ask What you want to know</span>
+            上传任何文档<br>
+            <span class="gradient-text" :style="s.gradientText">探索您想知道的一切</span>
           </h1>
 
           <div class="hero-desc" :style="s.heroDesc">
             <p :style="s.heroDescP">
-              From a single document, <span :style="s.highlightBold">MiroFish Offline</span> extracts reality seeds and builds a parallel world of <span :style="s.highlightOrange">autonomous AI agents</span>. Inject variables, observe emergent behavior, and find <span :style="s.highlightCode">"local optima"</span> in complex social dynamics.
+              通过单一文档，<span :style="s.highlightBold">MiroFish Offline</span> 提取现实种子并构建一个由 <span :style="s.highlightOrange">自主 AI 智能体</span> 组成的平行世界。注入变量，观察涌现行为，并在复杂的社会动态中寻找 <span :style="s.highlightCode">"局部最优解"</span>。
             </p>
           </div>
         </div>
@@ -44,28 +39,28 @@
         <!-- Left Column: Status & Steps -->
         <div class="left-panel" :style="s.leftPanel">
           <div class="panel-header" :style="s.panelHeader">
-            <span :style="{ color: systemStatus === 'ok' ? '#00FF00' : '#FF4500' }">■</span> System Status: {{ systemStatus === 'ok' ? 'Ready' : 'Checking...' }}
+            <span :style="{ color: systemStatus === 'ok' ? '#00FF00' : '#FF4500' }">■</span> 系统状态: {{ systemStatus === 'ok' ? '就绪' : '检查中...' }}
           </div>
 
-          <h2 class="section-title" :style="s.sectionTitle">{{ systemStatus === 'ok' ? 'Ready' : 'Initializing' }}</h2>
+          <h2 class="section-title" :style="s.sectionTitle">{{ systemStatus === 'ok' ? '准备就绪' : '正在初始化' }}</h2>
           <p class="section-desc" :style="s.sectionDesc">
-            {{ systemStatus === 'ok' ? 'Local prediction engine on standby. Upload unstructured data to initialize a simulation.' : 'Connecting to local services and online models...' }}
+            {{ systemStatus === 'ok' ? '本地预测引擎已待命。请上传非结构化数据以初始化仿真。' : '正在连接本地服务和在线模型...' }}
           </p>
 
           <div class="metrics-row" :style="s.metricsRow">
             <div class="metric-card" :style="s.metricCard">
-              <div class="metric-value" :style="s.metricValue">{{ neo4jStatus === 'ok' ? 'Local' : 'Offline' }}</div>
-              <div class="metric-label" :style="s.metricLabel">Neo4j Database</div>
+              <div class="metric-value" :style="s.metricValue">{{ neo4jStatus === 'ok' ? '本地连接' : '离线' }}</div>
+              <div class="metric-label" :style="s.metricLabel">Neo4j 数据库</div>
             </div>
             <div class="metric-card" :style="s.metricCard">
-              <div class="metric-value" :style="s.metricValue">{{ embeddingProvider === 'ollama' ? 'Local' : 'Online' }}</div>
-              <div class="metric-label" :style="s.metricLabel">Embedding ({{ embeddingModel }})</div>
+              <div class="metric-value" :style="s.metricValue">{{ embeddingProvider === 'ollama' ? '本地' : '在线' }}</div>
+              <div class="metric-label" :style="s.metricLabel">嵌入模型 ({{ embeddingModel }})</div>
             </div>
           </div>
 
           <div class="steps-container" :style="s.stepsContainer">
             <div class="steps-header" :style="s.stepsHeader">
-               <span :style="s.diamondIcon">◇</span> Workflow Sequence
+               <span :style="s.diamondIcon">◇</span> 工作流序列
             </div>
             <div :style="s.workflowList">
               <div v-for="(step, i) in steps" :key="i" :style="s.workflowItem">
@@ -84,8 +79,8 @@
           <div class="console-box" :style="s.consoleBox">
             <div :style="s.consoleSection">
               <div class="console-header" :style="s.consoleHeader">
-                <span>01 / Reality Seeds</span>
-                <span>Supported: PDF, MD, TXT</span>
+                <span>01 / 现实种子</span>
+                <span>支持格式: PDF, MD, TXT</span>
               </div>
               <div
                 :style="s.uploadZone"
@@ -97,8 +92,8 @@
                 <input ref="fileInput" type="file" multiple accept=".pdf,.md,.txt" @change="handleFileSelect" style="display: none" :disabled="loading" />
                 <div v-if="files.length === 0" :style="s.uploadPlaceholder">
                   <div :style="s.uploadIcon">↑</div>
-                  <div :style="s.uploadTitle">Drag & drop files here</div>
-                  <div :style="s.uploadHint">or click to browse</div>
+                  <div :style="s.uploadTitle">将文件拖放到此处</div>
+                  <div :style="s.uploadHint">或点击进行浏览</div>
                 </div>
                 <div v-else :style="s.fileList">
                   <div v-for="(file, index) in files" :key="index" :style="s.fileItem">
@@ -112,19 +107,19 @@
 
             <div :style="s.consoleSection">
               <div class="console-header" :style="s.consoleHeader">
-                <span>>_ 02 / Ready to Build</span>
+                <span>>_ 02 / 准备构建</span>
               </div>
               <div :style="s.readyStatus">
                 <div :style="s.readyIcon">⚙️</div>
-                <div :style="s.readyTitle">Ready to process {{ files.length }} document{{ files.length > 1 ? 's' : '' }}</div>
-                <div :style="s.readyDesc">MiroFish will extract entities, relations, and create a searchable knowledge graph with PDF location mapping.</div>
+                <div :style="s.readyTitle">准备处理 {{ files.length }} 份文档</div>
+                <div :style="s.readyDesc">MiroFish 将提取实体、关系，并创建一个支持 PDF 位置映射的可搜索知识图谱。</div>
               </div>
             </div>
 
             <div :style="s.btnSection">
               <button :style="s.startEngineBtn" @click="startSimulation" :disabled="!canSubmit || loading">
-                <span v-if="!loading">Build Knowledge Base</span>
-                <span v-else>Processing...</span>
+                <span v-if="!loading">开始构建知识库</span>
+                <span v-else>正在处理...</span>
                 <span>→</span>
               </button>
             </div>
@@ -133,6 +128,7 @@
       </section>
 
       <ProjectList />
+      <AiAppList />
       <HistoryDatabase />
     </div>
   </div>
@@ -142,6 +138,7 @@
 import { ref, computed, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import ProjectList from '../components/ProjectList.vue'
+import AiAppList from '../components/AiAppList.vue'
 import HistoryDatabase from '../components/HistoryDatabase.vue'
 import { getHealth } from '../api/graph'
 
@@ -225,11 +222,11 @@ const s = reactive({
 })
 
 const steps = [
-  { num: '01', title: 'Knowledge Base Building', desc: 'Process documents through GraphRAG pipeline to build high-fidelity knowledge graph.' },
-  { num: '02', title: 'Entity Extraction', desc: 'Extract key actors, concepts and relations with PDF coordinate mapping.' },
-  { num: '03', title: 'Neo4j Graphing', desc: 'Transform unstructured data into structured nodes and relationships for complex reasoning.' },
-  { num: '04', title: 'Traceability Search', desc: 'Perform deep queries and trace every piece of information back to the original PDF location.' },
-  { num: '05', title: 'Interaction', desc: 'Query your knowledge base with natural language and get evidence-backed answers.' },
+  { num: '01', title: '知识库构建', desc: '通过 GraphRAG 流水线处理文档，构建高保真知识图谱。' },
+  { num: '02', title: '实体提取', desc: '提取关键角色、概念及关系，并进行 PDF 坐标映射。' },
+  { num: '03', title: 'Neo4j 图谱化', desc: '将非结构化数据转化为结构化节点和关系，用于复杂推理。' },
+  { num: '04', title: '可追溯检索', desc: '执行深度查询，并将每一条信息追溯到原始 PDF 位置。' },
+  { num: '05', title: '交互应用', desc: '使用自然语言查询知识库，获取有证据支撑的回答。' },
 ]
 
 const router = useRouter()

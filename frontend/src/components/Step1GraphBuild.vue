@@ -6,25 +6,25 @@
         <div class="card-header">
           <div class="step-info">
             <span class="step-num">01</span>
-            <span class="step-title">Ontology Generation</span>
+            <span class="step-title">本体建模 (Ontology)</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase > 0" class="badge success">Completed</span>
-            <span v-else-if="currentPhase === 0" class="badge processing">Generating</span>
-            <span v-else class="badge pending">Waiting</span>
+            <span v-if="currentPhase > 0" class="badge success">已完成</span>
+            <span v-else-if="currentPhase === 0" class="badge processing">生成中</span>
+            <span v-else class="badge pending">等待中</span>
           </div>
         </div>
-        
+
         <div class="card-content">
           <p class="api-note">POST /api/graph/ontology/generate</p>
           <p class="description">
-            LLM analyzes document content and simulation requirements, extracts reality seeds, and automatically generates appropriate ontology structures
+            LLM 分析文档内容和仿真需求，提取现实种子，并自动生成合适的本体结构。
           </p>
 
           <!-- Loading / Progress -->
           <div v-if="currentPhase === 0 && ontologyProgress" class="progress-section">
             <div class="spinner-sm"></div>
-            <span>{{ ontologyProgress.message || 'Analyzing documents...' }}</span>
+            <span>{{ ontologyProgress.message || '正在分析文档...' }}</span>
           </div>
 
           <!-- Detail Overlay -->
@@ -75,11 +75,11 @@
 
           <!-- Generated Entity Tags -->
           <div v-if="projectData?.ontology?.entity_types" class="tags-container" :class="{ 'dimmed': selectedOntologyItem }">
-            <span class="tag-label">GENERATED ENTITY TYPES</span>
+            <span class="tag-label">已生成的实体类型</span>
             <div class="tags-list">
-              <span 
-                v-for="entity in projectData.ontology.entity_types" 
-                :key="entity.name" 
+              <span
+                v-for="entity in projectData.ontology.entity_types"
+                :key="entity.name"
                 class="entity-tag clickable"
                 @click="selectOntologyItem(entity, 'entity')"
               >
@@ -90,11 +90,11 @@
 
           <!-- Generated Relation Tags -->
           <div v-if="projectData?.ontology?.edge_types" class="tags-container" :class="{ 'dimmed': selectedOntologyItem }">
-            <span class="tag-label">GENERATED RELATION TYPES</span>
+            <span class="tag-label">已生成的关系类型</span>
             <div class="tags-list">
-              <span 
-                v-for="rel in projectData.ontology.edge_types" 
-                :key="rel.name" 
+              <span
+                v-for="rel in projectData.ontology.edge_types"
+                :key="rel.name"
                 class="entity-tag clickable"
                 @click="selectOntologyItem(rel, 'relation')"
               >
@@ -110,34 +110,34 @@
         <div class="card-header">
           <div class="step-info">
             <span class="step-num">02</span>
-            <span class="step-title">GraphRAG Build</span>
+            <span class="step-title">知识图谱构建 (GraphRAG)</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase > 1" class="badge success">Completed</span>
+            <span v-if="currentPhase > 1" class="badge success">已完成</span>
             <span v-else-if="currentPhase === 1" class="badge processing">{{ buildProgress?.progress || 0 }}%</span>
-            <span v-else class="badge pending">Waiting</span>
+            <span v-else class="badge pending">等待中</span>
           </div>
         </div>
 
         <div class="card-content">
           <p class="api-note">POST /api/graph/build</p>
           <p class="description">
-            Based on the generated ontology, automatically chunk documents and invoke Neo4j to build knowledge graphs, extract entities and relationships, and form temporal memory and community summaries
+            基于生成的本体，系统会自动对文档进行切片，并调用 Neo4j 构建知识图谱，提取实体和关系，形成记忆摘要。
           </p>
-          
+
           <!-- Stats Cards -->
           <div class="stats-grid">
             <div class="stat-card">
               <span class="stat-value">{{ graphStats.nodes }}</span>
-              <span class="stat-label">Entity Nodes</span>
+              <span class="stat-label">实体节点</span>
             </div>
             <div class="stat-card">
               <span class="stat-value">{{ graphStats.edges }}</span>
-              <span class="stat-label">Relation Edges</span>
+              <span class="stat-label">关系事实</span>
             </div>
             <div class="stat-card">
               <span class="stat-value">{{ graphStats.types }}</span>
-              <span class="stat-label">SCHEMA Types</span>
+              <span class="stat-label">图谱 Schema 类型</span>
             </div>
           </div>
         </div>
@@ -148,23 +148,23 @@
         <div class="card-header">
           <div class="step-info">
             <span class="step-num">03</span>
-            <span class="step-title">Knowledge Recall Hit Test</span>
+            <span class="step-title">知识召回命中测试 (Hit Test)</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase >= 2" class="badge accent">Active</span>
-            <span v-else class="badge pending">Waiting</span>
+            <span v-if="currentPhase >= 2" class="badge accent">运行中</span>
+            <span v-else class="badge pending">等待中</span>
           </div>
         </div>
 
         <div class="card-content">
-          <p class="api-note">Test GraphRAG retrieval accuracy</p>
-          <p class="description">Graph build is complete. You can now test the knowledge recall capability by asking questions.</p>
+          <p class="api-note">测试 GraphRAG 检索准确性</p>
+          <p class="description">图谱构建已完成。您现在可以通过提问来测试知识库的召回能力。</p>
 
           <div v-if="currentPhase >= 2" class="hit-test-box">
             <div class="search-input-wrapper">
               <input
                 v-model="hitTestQuery"
-                placeholder="Enter a question to test knowledge recall..."
+                placeholder="输入一个问题以测试知识召回..."
                 @keyup.enter="runHitTest"
                 :disabled="hitTestLoading"
               />
@@ -175,13 +175,13 @@
 
             <div v-if="hitTestResults" class="hit-test-results">
               <div class="results-header">
-                <span>Found {{ hitTestResults.facts?.length || 0 }} relevant facts</span>
+                <span>找到了 {{ hitTestResults.facts?.length || 0 }} 条相关事实</span>
               </div>
               <div class="facts-scroll-area">
                 <div v-for="(fact, idx) in hitTestResults.facts" :key="idx" class="fact-item">
                   <p class="fact-text">{{ parseFactText(fact).content }}</p>
                   <div v-if="parseFactText(fact).source" class="fact-source">
-                    <span class="source-label">LOCATION</span>
+                    <span class="source-label">原文位置</span>
                     <span class="source-tag">{{ parseFactText(fact).source }}</span>
                   </div>
                 </div>
@@ -194,7 +194,7 @@
             class="action-btn next-btn"
             @click="router.push({ name: 'AiQa', params: { projectId: projectData.project_id } })"
           >
-            AI 问答 ➝
+            创建 AI 知识库应用 ➝
           </button>
         </div>
       </div>
@@ -203,8 +203,8 @@
     <!-- Bottom Info / Logs -->
     <div class="system-logs">
       <div class="log-header">
-        <span class="log-title">SYSTEM DASHBOARD</span>
-        <span class="log-id">{{ projectData?.project_id || 'NO_PROJECT' }}</span>
+        <span class="log-title">系统看板</span>
+        <span class="log-id">{{ projectData?.project_id || '未关联项目' }}</span>
       </div>
       <div class="log-content" ref="logContent">
         <div class="log-line" v-for="(log, idx) in systemLogs" :key="idx">

@@ -3,14 +3,14 @@
     <!-- Title section -->
     <div class="section-header">
       <div class="section-line"></div>
-      <span class="section-title">Knowledge Base Projects</span>
+      <span class="section-title">知识库项目列表</span>
       <div class="section-line"></div>
     </div>
 
     <!-- Loading state -->
     <div v-if="loading" class="loading-state">
       <span class="loading-spinner"></span>
-      <span class="loading-text">Loading projects...</span>
+      <span class="loading-text">正在加载项目...</span>
     </div>
 
     <!-- Project list -->
@@ -51,15 +51,15 @@
         <!-- Project info -->
         <div class="project-info">
           <div class="info-row" v-if="project.ontology">
-            <span class="info-label">Entities:</span>
+            <span class="info-label">实体类型:</span>
             <span class="info-value">{{ project.ontology.entity_types?.length || 0 }}</span>
           </div>
           <div class="info-row" v-if="project.graph_id">
-            <span class="info-label">Graph ID:</span>
+            <span class="info-label">图谱 ID:</span>
             <span class="info-value code">{{ project.graph_id.slice(0, 12) }}...</span>
           </div>
           <div class="info-row">
-            <span class="info-label">Created:</span>
+            <span class="info-label">创建日期:</span>
             <span class="info-value">{{ formatDate(project.created_at) }}</span>
           </div>
         </div>
@@ -165,11 +165,11 @@ const formatProjectId = (projectId) => {
 // Format status
 const formatStatus = (status) => {
   const statusMap = {
-    'created': 'Created',
-    'ontology_generated': 'Ontology Ready',
-    'graph_building': 'Building',
-    'graph_completed': 'Completed',
-    'failed': 'Failed'
+    'created': '已创建',
+    'ontology_generated': '本体已就绪',
+    'graph_building': '图谱构建中',
+    'graph_completed': '构建完成',
+    'failed': '失败'
   }
   return statusMap[status] || status
 }

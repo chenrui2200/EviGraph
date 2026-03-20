@@ -3,11 +3,11 @@
     <!-- Top navigation bar -->
     <nav class="navbar">
       <div class="nav-brand" @click="goHome">MIROFISH OFFLINE</div>
-      
+
       <!-- Center step indicator -->
       <div class="nav-center">
-        <div class="step-badge">STEP 01</div>
-        <div class="step-name">Graph Build</div>
+        <div class="step-badge">步骤 01</div>
+        <div class="step-name">知识图谱构建</div>
       </div>
 
       <div class="nav-status">
@@ -23,20 +23,20 @@
         <div class="panel-header">
           <div class="header-left">
             <span class="header-deco">◆</span>
-            <span class="header-title">Live Knowledge Graph</span>
+            <span class="header-title">实时知识图谱</span>
           </div>
           <div class="header-right">
             <template v-if="graphData">
-              <span class="stat-item">{{ graphData.node_count || graphData.nodes?.length || 0 }} Nodes</span>
+              <span class="stat-item">{{ graphData.node_count || graphData.nodes?.length || 0 }} 节点</span>
               <span class="stat-divider">|</span>
-              <span class="stat-item">{{ graphData.edge_count || graphData.edges?.length || 0 }} Edges</span>
+              <span class="stat-item">{{ graphData.edge_count || graphData.edges?.length || 0 }} 关系</span>
               <span class="stat-divider">|</span>
             </template>
             <div class="action-buttons">
-                <button class="action-btn" @click="refreshGraph" :disabled="graphLoading" title="Refresh Graph">
+                <button class="action-btn" @click="refreshGraph" :disabled="graphLoading" title="刷新图谱">
                   <span class="icon-refresh" :class="{ 'spinning': graphLoading }">↻</span>
                 </button>
-                <button class="action-btn" @click="toggleFullScreen" :title="isFullScreen ? 'Exit Fullscreen' : 'Fullscreen'">
+                <button class="action-btn" @click="toggleFullScreen" :title="isFullScreen ? '退出全屏' : '全屏显示'">
                   <span class="icon-fullscreen">{{ isFullScreen ? '↙' : '↗' }}</span>
                 </button>
             </div>
@@ -225,7 +225,7 @@
       <div class="right-panel" :class="{ 'hidden': isFullScreen }">
         <div class="panel-header dark-header">
           <span class="header-icon">▣</span>
-          <span class="header-title">Build Process</span>
+          <span class="header-title">构建流程详情</span>
         </div>
 
         <div class="process-content">
@@ -234,19 +234,19 @@
             <div class="phase-header">
               <span class="phase-num">01</span>
               <div class="phase-info">
-                <div class="phase-title">Ontology Generation</div>
+                <div class="phase-title">本体建模 (Ontology)</div>
                 <div class="phase-api">/api/graph/ontology/generate</div>
               </div>
               <span class="phase-status" :class="getPhaseStatusClass(0)">
                 {{ getPhaseStatusText(0) }}
               </span>
             </div>
-            
+
             <div class="phase-detail">
               <div class="detail-section">
-                <div class="detail-label">Description</div>
+                <div class="detail-label">阶段描述</div>
                 <div class="detail-content">
-                  After uploading documents, LLM analyzes the content and automatically generates an ontology structure suitable for knowledge graph simulation (entity types + relationship types)
+                  上传文档后，LLM 会分析内容并自动生成适用于知识图谱仿真的本体结构（包括实体类型和关系类型）。
                 </div>
               </div>
               
@@ -305,25 +305,25 @@
             <div class="phase-header">
               <span class="phase-num">02</span>
               <div class="phase-info">
-                <div class="phase-title">Graph Build</div>
+                <div class="phase-title">知识图谱构建 (GraphRAG)</div>
                 <div class="phase-api">/api/graph/build</div>
               </div>
               <span class="phase-status" :class="getPhaseStatusClass(1)">
                 {{ getPhaseStatusText(1) }}
               </span>
             </div>
-            
+
             <div class="phase-detail">
               <div class="detail-section">
-                <div class="detail-label">Description</div>
+                <div class="detail-label">阶段描述</div>
                 <div class="detail-content">
-                  Based on the generated ontology, the documents are chunked and the Neo4j API is called to build the knowledge graph, extracting entities and relationships
+                  基于生成的本体，系统会自动对文档进行切片，并调用 Neo4j 构建知识图谱，提取实体和关系。
                 </div>
               </div>
-              
+
               <!-- Waiting for ontology completion -->
               <div class="detail-section waiting-state" v-if="currentPhase < 1">
-                <div class="waiting-hint">Waiting for ontology generation to complete...</div>
+                <div class="waiting-hint">等待本体生成完成...</div>
               </div>
               
               <!-- Build progress -->
@@ -363,22 +363,22 @@
             <div class="phase-header">
               <span class="phase-num">03</span>
               <div class="phase-info">
-                <div class="phase-title">Knowledge Recall Hit Test</div>
-                <div class="phase-api">Test GraphRAG retrieval accuracy</div>
+                <div class="phase-title">知识召回测试 (Hit Test)</div>
+                <div class="phase-api">测试 GraphRAG 检索准确性</div>
               </div>
               <span class="phase-status" :class="getPhaseStatusClass(2)">
-                {{ currentPhase === 2 ? 'Active' : (currentPhase > 2 ? 'Completed' : 'Waiting') }}
+                {{ currentPhase === 2 ? '运行中' : (currentPhase > 2 ? '已完成' : '等待中') }}
               </span>
             </div>
 
             <div class="phase-detail" v-if="currentPhase >= 2">
               <div class="detail-section">
-                <div class="detail-label">Recall Test</div>
+                <div class="detail-label">召回测试</div>
                 <div class="hit-test-box">
                   <div class="search-input-wrapper">
                     <input
                       v-model="hitTestQuery"
-                      placeholder="Enter a question to test knowledge recall..."
+                      placeholder="输入一个问题以测试知识召回..."
                       @keyup.enter="runHitTest"
                       :disabled="hitTestLoading"
                     />
@@ -389,13 +389,13 @@
 
                   <div v-if="hitTestResults" class="hit-test-results">
                     <div class="results-header">
-                      <span>Found {{ hitTestResults.facts?.length || 0 }} relevant facts</span>
+                      <span>找到了 {{ hitTestResults.facts?.length || 0 }} 条相关事实</span>
                     </div>
                     <div class="facts-scroll-area">
                       <div v-for="(fact, idx) in hitTestResults.facts" :key="idx" class="fact-item">
                         <p class="fact-text">{{ parseFactText(fact).content }}</p>
                         <div v-if="parseFactText(fact).source" class="fact-source">
-                          <span class="source-label">LOCATION</span>
+                          <span class="source-label">原文位置</span>
                           <span class="source-tag">{{ parseFactText(fact).source }}</span>
                         </div>
                       </div>
@@ -409,7 +409,7 @@
           <!-- Next step button -->
           <div class="next-step-section" v-if="currentPhase >= 2">
             <button class="next-step-btn" @click="goToNextStep" :disabled="currentPhase < 2">
-              Finalize & View Analysis
+              完成并查看分析报告
               <span class="btn-arrow">→</span>
             </button>
           </div>
@@ -419,11 +419,11 @@
         <div class="project-panel">
           <div class="project-header">
             <span class="project-icon">◇</span>
-            <span class="project-title">Project Information</span>
+            <span class="project-title">项目基本信息</span>
           </div>
           <div class="project-details" v-if="projectData">
             <div class="project-item">
-              <span class="item-label">Project Name</span>
+              <span class="item-label">项目名称</span>
               <div v-if="isEditingName" class="edit-name-wrapper">
                 <input
                   v-model="editingName"
@@ -440,15 +440,15 @@
               </span>
             </div>
             <div class="project-item">
-              <span class="item-label">Project ID</span>
+              <span class="item-label">项目 ID</span>
               <span class="item-value code">{{ projectData.project_id }}</span>
             </div>
             <div class="project-item" v-if="projectData.graph_id">
-              <span class="item-label">Graph ID</span>
+              <span class="item-label">图谱 ID</span>
               <span class="item-value code">{{ projectData.graph_id }}</span>
             </div>
             <div class="project-item">
-              <span class="item-label">Simulation Requirement</span>
+              <span class="item-label">业务仿真需求</span>
               <span class="item-value">{{ projectData.simulation_requirement || '-' }}</span>
             </div>
           </div>
@@ -460,13 +460,13 @@
     <div class="system-logs" :class="{ 'minimized': isFullScreen }">
       <div class="log-header">
         <div class="header-left">
-          <span class="log-title">SYSTEM DASHBOARD</span>
-          <span class="log-id">{{ currentProjectId || 'NO_PROJECT' }}</span>
+          <span class="log-title">系统看板</span>
+          <span class="log-id">{{ currentProjectId || '未关联项目' }}</span>
         </div>
         <div class="header-right">
-          <span v-if="currentPhase === 0" class="log-status pulse">ONTOLOGY_GENERATION</span>
-          <span v-else-if="currentPhase === 1" class="log-status pulse">GRAPH_BUILDING</span>
-          <span v-else-if="currentPhase === 2" class="log-status success">COMPLETED</span>
+          <span v-if="currentPhase === 0" class="log-status pulse">本体生成中</span>
+          <span v-else-if="currentPhase === 1" class="log-status pulse">图谱构建中</span>
+          <span v-else-if="currentPhase === 2" class="log-status success">已完成</span>
         </div>
       </div>
       <div class="log-content" ref="logContent">
@@ -475,7 +475,7 @@
           <span class="log-msg">{{ log.msg }}</span>
         </div>
         <div v-if="systemLogs.length === 0" class="log-empty">
-          Waiting for task signals...
+          等待任务信号中...
         </div>
       </div>
     </div>

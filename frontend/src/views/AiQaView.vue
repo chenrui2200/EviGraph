@@ -4,9 +4,25 @@
     <header class="qa-header">
       <div class="header-left">
         <button class="back-btn" @click="router.back()">←</button>
-        <span class="view-title">AI 问答工作流</span>
+        <div class="app-name-editor">
+          <input
+            v-if="isEditingAppName"
+            v-model="appName"
+            ref="appNameInput"
+            @blur="isEditingAppName = false"
+            @keyup.enter="isEditingAppName = false"
+            class="app-name-input"
+          />
+          <span v-else class="view-title" @click="toggleEditAppName">
+            {{ appName }} <span class="edit-hint">✏️</span>
+          </span>
+        </div>
       </div>
       <div class="header-right">
+        <button class="action-btn save-btn" :disabled="saving" @click="saveWorkflowApp">
+          <span v-if="!saving">💾 保存应用</span>
+          <span v-else class="spinner-sm"></span>
+        </button>
         <button class="action-btn run-btn" :disabled="running" @click="runWorkflow">
           <span v-if="!running">运行流程</span>
           <span v-else class="spinner-sm"></span>
@@ -48,7 +64,7 @@
             <div v-if="node.type === 'retrieval'" class="retrieval-content">
               <div class="kb-tools-header">
                 <button class="kb-tools-btn" @click="showKbTools = true">
-                  ⚙️ Knowledge Base Tools
+                  ⚙️ 知识库配置
                 </button>
                 <span class="kb-count">已选 {{ workflowData.selectedGraphIds.length }} 个库</span>
               </div>
@@ -184,16 +200,24 @@
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { getProjectList, aiQa, updateProject } from '../api/graph'
+import { saveApp, getApp } from '../api/ai_app'
 
 const router = useRouter()
 const route = useRoute()
 
 // Workflow State
 const running = ref(false)
+const saving = ref(false)
 const showKbTools = ref(false)
 const projectListLoading = ref(false)
 const projects = ref([])
 const activeNodeId = ref(null)
+
+// App State
+const appId = ref(route.query.appId || null)
+const appName = ref('新 AI 知识库应用')
+const isEditingAppName = ref(false)
+const appNameInput = ref(null)
 
 // Document Viewer State
 const showDocViewer = ref(false)
@@ -295,10 +319,10 @@ const results = ref({
 
 // Node Positions and Config
 const nodes = ref([
-  { id: 'n1', type: 'input', title: '输入 (Input)', icon: '📝', x: 50, y: 150, status: 'pending' },
+  { id: 'n1', type: 'input', title: '用户输入 (Input)', icon: '📝', x: 50, y: 150, status: 'pending' },
   { id: 'n2', type: 'retrieval', title: '知识库检索 (Retrieval)', icon: '🔍', x: 350, y: 150, status: 'pending' },
   { id: 'n3', type: 'llm', title: '大模型推理 (LLM)', icon: '🧠', x: 650, y: 150, status: 'pending' },
-  { id: 'n4', type: 'output', title: '输出 (Output)', icon: '✨', x: 950, y: 150, status: 'pending' }
+  { id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 950, y: 150, status: 'pending' }
 ])
 
 const connections = [
@@ -440,8 +464,64 @@ const runWorkflow = async () => {
   }
 }
 
-onMounted(() => {
-  loadProjects()
+const saveWorkflowApp = async () => {
+  saving.value = true
+  try {
+    const payload = {
+      app_id: appId.value,
+      name: appName.value,
+      nodes: nodes.value,
+      workflow_data: workflowData.value
+    }
+    const res = await saveApp(payload)
+    if (res.success) {
+      appId.value = res.data.app_id
+      // Update URL with appId if it's new, without reload
+      if (!route.query.appId) {
+        router.replace({ query: { ...route.query, appId: res.data.app_id } })
+      }
+      alert('应用保存成功')
+    } else {
+      alert('保存失败: ' + res.error)
+    }
+  } catch (err) {
+    console.error('Save app error:', err)
+    alert('保存出错')
+  } finally {
+    saving.value = false
+  }
+}
+
+const loadAppConfig = async (id) => {
+  try {
+    const res = await getApp(id)
+    if (res.success) {
+      const app = res.data
+      appName.value = app.name
+      if (app.nodes && app.nodes.length > 0) {
+        nodes.value = app.nodes
+      }
+      if (app.workflow_data) {
+        workflowData.value = { ...workflowData.value, ...app.workflow_data }
+      }
+    }
+  } catch (err) {
+    console.error('Load app error:', err)
+  }
+}
+
+const toggleEditAppName = () => {
+  isEditingAppName.value = true
+  nextTick(() => {
+    if (appNameInput.value) appNameInput.value.focus()
+  })
+}
+
+onMounted(async () => {
+  await loadProjects()
+  if (appId.value) {
+    await loadAppConfig(appId.value)
+  }
 })
 
 onUnmounted(() => {
@@ -492,6 +572,36 @@ onUnmounted(() => {
 .view-title {
   font-weight: 700;
   font-size: 18px;
+  cursor: pointer;
+}
+
+.edit-hint {
+  font-size: 14px;
+  opacity: 0.3;
+}
+
+.view-title:hover .edit-hint {
+  opacity: 1;
+}
+
+.app-name-input {
+  font-size: 18px;
+  font-weight: 700;
+  border: 1px solid #000;
+  padding: 2px 8px;
+  border-radius: 4px;
+  outline: none;
+  font-family: inherit;
+}
+
+.save-btn {
+  background: #fff;
+  border: 1px solid #000;
+  color: #000;
+}
+
+.save-btn:hover {
+  background: #f0f0f0;
 }
 
 .header-right {

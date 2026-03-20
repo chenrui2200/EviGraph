@@ -10,13 +10,6 @@
       <div class="gradient-overlay"></div>
     </div>
 
-    <!-- Title section -->
-    <div class="section-header">
-      <div class="section-line"></div>
-      <span class="section-title">Simulation Records</span>
-      <div class="section-line"></div>
-    </div>
-
     <!-- Card container (only shown when there are projects) -->
     <div v-if="projects.length > 0" class="cards-container" :class="{ expanded: isExpanded }" :style="containerStyle">
       <div 
@@ -36,16 +29,16 @@
             <span
               class="status-icon"
               :class="{ available: project.project_id, unavailable: !project.project_id }"
-              title="Graph Construction"
+              title="知识图谱构建"
             >◇</span>
             <span
               class="status-icon available"
-              title="Environment Setup"
+              title="业务仿真设置"
             >◈</span>
             <span
               class="status-icon"
               :class="{ available: project.report_id, unavailable: !project.report_id }"
-              title="Analysis Report"
+              title="分析报告"
             >◆</span>
           </div>
         </div>
@@ -67,13 +60,13 @@
             </div>
             <!-- If there are more files, show indicator -->
             <div v-if="project.files.length > 3" class="files-more">
-              +{{ project.files.length - 3 }} files
+              还有 {{ project.files.length - 3 }} 个文件
             </div>
           </div>
           <!-- Placeholder when no files -->
           <div class="files-empty" v-else>
             <span class="empty-file-icon">◇</span>
-            <span class="empty-file-text">No Files</span>
+            <span class="empty-file-text">暂无文件</span>
           </div>
         </div>
 
@@ -102,7 +95,7 @@
     <!-- Loading state -->
     <div v-if="loading" class="loading-state">
       <span class="loading-spinner"></span>
-      <span class="loading-text">Loading...</span>
+      <span class="loading-text">正在加载...</span>
     </div>
 
     <!-- Simulation playback details modal -->
@@ -126,27 +119,27 @@
             <div class="modal-body">
               <!-- Simulation requirement -->
               <div class="modal-section">
-                <div class="modal-label">Simulation Requirement</div>
-                <div class="modal-requirement">{{ selectedProject.simulation_requirement || 'None' }}</div>
+                <div class="modal-label">仿真需求</div>
+                <div class="modal-requirement">{{ selectedProject.simulation_requirement || '无' }}</div>
               </div>
 
               <!-- File list -->
               <div class="modal-section">
-                <div class="modal-label">Associated Files</div>
+                <div class="modal-label">关联文件</div>
                 <div class="modal-files" v-if="selectedProject.files && selectedProject.files.length > 0">
                   <div v-for="(file, index) in selectedProject.files" :key="index" class="modal-file-item">
                     <span class="file-tag" :class="getFileType(file.filename)">{{ getFileTypeLabel(file.filename) }}</span>
                     <span class="modal-file-name">{{ file.filename }}</span>
                   </div>
                 </div>
-                <div class="modal-empty" v-else>No Associated Files</div>
+                <div class="modal-empty" v-else>暂无关联文件</div>
               </div>
             </div>
 
             <!-- Simulation playback divider -->
             <div class="modal-divider">
               <span class="divider-line"></span>
-              <span class="divider-text">Simulation Playback</span>
+              <span class="divider-text">仿真记录回溯</span>
               <span class="divider-line"></span>
             </div>
 
@@ -157,32 +150,22 @@
                 @click="goToProject"
                 :disabled="!selectedProject.project_id"
               >
-                <span class="btn-step">Step1</span>
+                <span class="btn-step">步骤 1</span>
                 <span class="btn-icon">◇</span>
-                <span class="btn-text">Graph Construction</span>
+                <span class="btn-text">知识图谱构建</span>
               </button>
               <button
                 class="modal-btn btn-simulation"
                 @click="goToSimulation"
               >
-                <span class="btn-step">Step2</span>
+                <span class="btn-step">步骤 2</span>
                 <span class="btn-icon">◈</span>
-                <span class="btn-text">Environment Setup</span>
+                <span class="btn-text">业务仿真设置</span>
               </button>
-              <!-- Report功能暂时隐藏 -->
-              <!-- <button
-                class="modal-btn btn-report"
-                @click="goToReport"
-                :disabled="!selectedProject.report_id"
-              >
-                <span class="btn-step">Step4</span>
-                <span class="btn-icon">◆</span>
-                <span class="btn-text">Analysis Report</span>
-              </button> -->
             </div>
             <!-- Playback unavailable notice -->
             <div class="modal-playback-hint">
-              <span class="hint-text">Step3 "Start Simulation" and Step5 "Deep Interaction" must be launched during execution and do not support history playback</span>
+              <span class="hint-text">步骤 3“开始仿真”和步骤 5“深度交互”必须在运行时启动，不支持历史记录回放。</span>
             </div>
           </div>
         </div>
@@ -338,24 +321,24 @@ const truncateText = (text, maxLength) => {
 
 // Generate title from simulation requirement (first 20 characters)
 const getSimulationTitle = (requirement) => {
-  if (!requirement) return 'Unnamed Simulation'
+  if (!requirement) return '未命名仿真'
   const title = requirement.slice(0, 20)
   return requirement.length > 20 ? title + '...' : title
 }
 
 // Format simulation_id display (first 6 characters)
 const formatSimulationId = (simulationId) => {
-  if (!simulationId) return 'SIM_UNKNOWN'
+  if (!simulationId) return '未知仿真 ID'
   const prefix = simulationId.replace('sim_', '').slice(0, 6)
-  return `SIM_${prefix.toUpperCase()}`
+  return `仿真_${prefix.toUpperCase()}`
 }
 
 // Format round display (current round/total rounds)
 const formatRounds = (simulation) => {
   const current = simulation.current_round || 0
   const total = simulation.total_rounds || 0
-  if (total === 0) return 'Not Started'
-  return `${current}/${total} rounds`
+  if (total === 0) return '未开始'
+  return `已运行 ${current}/${total} 轮`
 }
 
 // Get file type (for styling)
