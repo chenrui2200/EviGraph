@@ -181,7 +181,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { getProjectList, aiQa, updateProject } from '../api/graph'
 
@@ -203,23 +203,40 @@ const currentDoc = ref({
   page: 1
 })
 
-const viewDocument = (fact) => {
+const viewDocument = async (fact) => {
   if (!fact.source || fact.source === 'Unknown') return
 
-  const identifier = fact.graph_id // Pass graph_id or project_id, backend will handle lookup
+  const identifier = fact.graph_id
   const filename = fact.source
   const page = fact.page || 1
 
-  // Construct URL for the backend route
-  const baseUrl = window.location.origin
-  const fileUrl = `${baseUrl}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}#page=${page}`
+  // Use Blob-based preview to shield from the download bug
+  try {
+    // 1. Clear previous Object URL to free memory
+    if (currentDoc.value.url && currentDoc.value.url.startsWith('blob:')) {
+      URL.revokeObjectURL(currentDoc.value.url)
+    }
 
-  currentDoc.value = {
-    filename,
-    url: fileUrl,
-    page
+    showDocViewer.value = false
+    const apiUrl = `${window.location.origin}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}`
+
+    // 2. Fetch file as blob
+    const response = await fetch(apiUrl)
+    if (!response.ok) throw new Error('Failed to fetch document')
+    const blob = await response.blob()
+
+    // 3. Create Local Object URL and append page fragment
+    const blobUrl = URL.createObjectURL(blob)
+    const finalUrl = `${blobUrl}#page=${page}`
+
+    nextTick(() => {
+      currentDoc.value = { filename, url: finalUrl, page }
+      showDocViewer.value = true
+    })
+  } catch (err) {
+    console.error('Document preview error:', err)
+    alert('无法加载文档，请重试')
   }
-  showDocViewer.value = true
 }
 
 // Project Editing State
@@ -426,6 +443,12 @@ const runWorkflow = async () => {
 onMounted(() => {
   loadProjects()
 })
+
+onUnmounted(() => {
+  if (currentDoc.value.url && currentDoc.value.url.startsWith('blob:')) {
+    URL.revokeObjectURL(currentDoc.value.url)
+  }
+})
 </script>
 
 <style scoped>
@@ -579,11 +602,14 @@ onMounted(() => {
 .viewer-content {
   flex: 1;
   position: relative;
+  background: #fff;
 }
 
 .pdf-iframe {
   width: 100%;
   height: 100%;
+  border: none;
+  display: block;
 }
 
 .viewer-empty {

@@ -237,7 +237,23 @@ def get_project_document(project_id: str, filename: str):
         }), 404
 
     logger.info(f"Serving document: {found_filename} from {target_dir}")
-    return send_from_directory(target_dir, found_filename)
+
+    from flask import send_file, make_response
+
+    # Send file without any attachment/filename metadata to prevent download triggers
+    response = make_response(send_file(target_file_path, mimetype='application/pdf'))
+
+    # Force pure inline mode
+    response.headers['Content-Disposition'] = 'inline'
+    response.headers['Content-Type'] = 'application/pdf'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'ALLOWALL'
+
+    # Remove any headers that might suggest a file download
+    if 'Content-Transfer-Encoding' in response.headers:
+        del response.headers['Content-Transfer-Encoding']
+
+    return response
 
 
 # ============== Interface 1: Upload Files and Generate Ontology ==============
