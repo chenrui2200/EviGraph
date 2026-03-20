@@ -5,6 +5,7 @@ import SimulationView from '../views/SimulationView.vue'
 import SimulationRunView from '../views/SimulationRunView.vue'
 import ReportView from '../views/ReportView.vue'
 import InteractionView from '../views/InteractionView.vue'
+import AiQaView from '../views/AiQaView.vue'
 
 const routes = [
   {
@@ -16,6 +17,12 @@ const routes = [
     path: '/process/:projectId',
     name: 'Process',
     component: Process,
+    props: true
+  },
+  {
+    path: '/ai-qa/:projectId',
+    name: 'AiQa',
+    component: AiQaView,
     props: true
   },
   {

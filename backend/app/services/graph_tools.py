@@ -24,7 +24,7 @@ logger = get_logger('mirofish.graph_tools')
 @dataclass
 class SearchResult:
     """Search Result"""
-    facts: List[str]
+    facts: List[Dict[str, Any]]  # List of {text, source, page, graph_id}
     edges: List[Dict[str, Any]]
     nodes: List[Dict[str, Any]]
     query: str
@@ -45,9 +45,12 @@ class SearchResult:
 
         if self.facts:
             text_parts.append("\n### Related Facts (with evidence tracing):")
-            for i, fact in enumerate(self.facts, 1):
-                # Ensure fact string includes its source if available from edges/nodes
-                text_parts.append(f"{i}. {fact}")
+            for i, fact_obj in enumerate(self.facts, 1):
+                text = fact_obj.get("text", "")
+                source = fact_obj.get("source", "Unknown")
+                page = fact_obj.get("page", "")
+                source_str = f" [Source: {source}{f', Page {page}' if page else ''}]"
+                text_parts.append(f"{i}. {text}{source_str}")
 
         return "\n".join(text_parts)
 
@@ -460,8 +463,11 @@ class GraphToolsService:
                 if isinstance(edge, dict):
                     fact = edge.get('fact', '')
                     if fact:
-                        # Append source info if found in episodes
-                        source_info = ""
+                        # Extract source info if found in episodes
+                        source = "Unknown"
+                        page = None
+                        total_pages = None
+
                         edge_ep_ids = edge.get('episode_ids', [])
                         if not isinstance(edge_ep_ids, list):
                             edge_ep_ids = [str(edge_ep_ids)]
@@ -470,20 +476,19 @@ class GraphToolsService:
                             ep = episode_map.get(ep_id)
                             if ep and ep.get("metadata"):
                                 meta = ep["metadata"]
-                                src = meta.get("source", "Unknown")
+                                source = meta.get("source", "Unknown")
                                 page = meta.get("page")
-
-                                # Enhanced traceability: check if we have total_pages to show "Page X of Y"
-                                total = meta.get("total_pages")
-                                page_info = f", Page {page}" if page else ""
-                                if page and total:
-                                    page_info = f", Page {page}/{total}"
-
-                                source_info = f" [Source: {src}{page_info}]"
+                                total_pages = meta.get("total_pages")
                                 break # Use first found source info
 
-                        fact_with_source = f"{fact}{source_info}"
-                        facts.append(fact_with_source)
+                        fact_obj = {
+                            "text": fact,
+                            "source": source,
+                            "page": page,
+                            "total_pages": total_pages,
+                            "graph_id": graph_id
+                        }
+                        facts.append(fact_obj)
 
                     edges.append({
                         "uuid": edge.get('uuid', ''),
@@ -512,7 +517,13 @@ class GraphToolsService:
                     })
                     summary = node.get('summary', '')
                     if summary:
-                        facts.append(f"[{node.get('name', '')}]: {summary}")
+                        facts.append({
+                            "text": summary,
+                            "source": "Graph Knowledge",
+                            "page": None,
+                            "graph_id": graph_id,
+                            "entity_name": node.get('name', '')
+                        })
 
             logger.info(f"Search complete: Found {len(facts)} related facts")
 
@@ -573,11 +584,12 @@ class GraphToolsService:
                     scope=scope
                 )
 
-                # Merge facts (deduplicate)
-                for fact in result.facts:
-                    if fact not in seen_facts:
-                        all_facts.append(fact)
-                        seen_facts.add(fact)
+                # Merge facts (deduplicate by text content)
+                for fact_obj in result.facts:
+                    fact_text = fact_obj.get("text", "")
+                    if fact_text and fact_text not in seen_facts:
+                        all_facts.append(fact_obj)
+                        seen_facts.add(fact_text)
 
                 # Merge edges (deduplicate by uuid)
                 for edge in result.edges:
@@ -657,7 +669,12 @@ class GraphToolsService:
                 for score, edge in scored_edges[:limit]:
                     fact = edge.get("fact", "")
                     if fact:
-                        facts.append(fact)
+                        facts.append({
+                            "text": fact,
+                            "source": "Local Search",
+                            "page": None,
+                            "graph_id": graph_id
+                        })
                     edges_result.append({
                         "uuid": edge.get("uuid", ""),
                         "name": edge.get("name", ""),

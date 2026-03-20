@@ -81,6 +81,20 @@ export function getProject(projectId) {
 }
 
 /**
+ * Update project information (e.g. name)
+ * @param {String} projectId - Project ID
+ * @param {Object} data - Contains name, etc.
+ * @returns {Promise}
+ */
+export function updateProject(projectId, data) {
+  return service({
+    url: `/api/graph/project/${projectId}`,
+    method: 'patch',
+    data
+  })
+}
+
+/**
  * Get project list
  * @param {Number} limit - Maximum number of projects to return
  * @returns {Promise}
@@ -101,6 +115,19 @@ export function getProjectList(limit = 50) {
 export function searchGraph(data) {
   return service({
     url: '/api/report/tools/search',
+    method: 'post',
+    data
+  })
+}
+
+/**
+ * AI Q&A - retrieval from multiple graphs + LLM answering
+ * @param {Object} data - Contains graph_ids, query
+ * @returns {Promise}
+ */
+export function aiQa(data) {
+  return service({
+    url: '/api/graph/ai-qa',
     method: 'post',
     data
   })

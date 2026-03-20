@@ -424,7 +424,20 @@
           <div class="project-details" v-if="projectData">
             <div class="project-item">
               <span class="item-label">Project Name</span>
-              <span class="item-value">{{ projectData.name }}</span>
+              <div v-if="isEditingName" class="edit-name-wrapper">
+                <input
+                  v-model="editingName"
+                  class="edit-name-input"
+                  @keyup.enter="saveProjectName"
+                  @keyup.esc="cancelEditName"
+                  @blur="cancelEditName"
+                  ref="nameInput"
+                />
+              </div>
+              <span v-else class="item-value name-display" @click="toggleEditName">
+                {{ projectData.name }}
+                <span class="edit-icon">✏️</span>
+              </span>
             </div>
             <div class="project-item">
               <span class="item-label">Project ID</span>
@@ -472,7 +485,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, searchGraph } from '../api/graph'
+import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, searchGraph, updateProject } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 import * as d3 from 'd3'
 
@@ -495,8 +508,48 @@ const selectedItem = ref(null) // Selected node or edge
 const isFullScreen = ref(false)
 const systemLogs = ref([]) // Real-time system logs for dashboard
 
+// Edit Name State
+const isEditingName = ref(false)
+const editingName = ref('')
+
 // Hit Test state
 const hitTestQuery = ref('')
+
+const nameInput = ref(null)
+
+const toggleEditName = () => {
+  if (!projectData.value) return
+  editingName.value = projectData.value.name
+  isEditingName.value = true
+  nextTick(() => {
+    if (nameInput.value) nameInput.value.focus()
+  })
+}
+
+const saveProjectName = async () => {
+  if (!editingName.value || editingName.value === projectData.value.name) {
+    isEditingName.value = false
+    return
+  }
+
+  try {
+    const response = await updateProject(currentProjectId.value, { name: editingName.value })
+    if (response.success) {
+      projectData.value.name = editingName.value
+    }
+  } catch (err) {
+    console.error('Failed to update project name:', err)
+  } finally {
+    isEditingName.value = false
+  }
+}
+
+const cancelEditName = () => {
+  // Add a small delay to allow enter key to trigger saveProjectName before blur triggers cancelEditName
+  setTimeout(() => {
+    isEditingName.value = false
+  }, 100)
+}
 const hitTestLoading = ref(false)
 const hitTestResults = ref(null)
 
@@ -2282,6 +2335,45 @@ onUnmounted(() => {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.75rem;
   color: #666;
+}
+
+/* Edit Name Styles */
+.name-display {
+  cursor: pointer;
+  position: relative;
+  padding-right: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.edit-icon {
+  opacity: 0;
+  font-size: 0.8rem;
+  transition: opacity 0.2s;
+  position: absolute;
+  right: 0;
+}
+
+.name-display:hover .edit-icon {
+  opacity: 1;
+}
+
+.edit-name-wrapper {
+  flex: 1;
+  max-width: 60%;
+}
+
+.edit-name-input {
+  width: 100%;
+  padding: 2px 8px;
+  font-size: 0.8rem;
+  border: 1px solid #FF6B35;
+  background: #fff;
+  outline: none;
+  font-family: inherit;
+  color: #000;
+  text-align: right;
 }
 
 /* Responsive */

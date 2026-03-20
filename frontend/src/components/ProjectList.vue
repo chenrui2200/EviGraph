@@ -31,7 +31,22 @@
         </div>
 
         <!-- Project name -->
-        <h3 class="project-name">{{ project.name || 'Unnamed Project' }}</h3>
+        <div class="project-name-container" @click.stop>
+          <div v-if="editingProjectId === project.project_id" class="edit-name-form">
+            <input
+              v-model="editingName"
+              ref="nameInput"
+              class="edit-name-input"
+              @keyup.enter="saveProjectName($event, project)"
+              @keyup.esc="cancelEdit($event)"
+              @blur="cancelEdit($event)"
+            />
+          </div>
+          <h3 v-else class="project-name" @click.stop="toggleEdit($event, project)">
+            {{ project.name || 'Unnamed Project' }}
+            <span class="edit-icon">✏️</span>
+          </h3>
+        </div>
 
         <!-- Project info -->
         <div class="project-info">
@@ -65,13 +80,56 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { getProjectList } from '../api/graph'
+import { getProjectList, updateProject } from '../api/graph'
 
 const router = useRouter()
 const projects = ref([])
 const loading = ref(true)
+
+// Edit State
+const editingProjectId = ref(null)
+const editingName = ref('')
+const nameInput = ref(null)
+
+const toggleEdit = (event, project) => {
+  event.stopPropagation()
+  editingProjectId.value = project.project_id
+  editingName.value = project.name || ''
+  nextTick(() => {
+    if (nameInput.value && nameInput.value[0]) {
+      nameInput.value[0].focus()
+    }
+  })
+}
+
+const saveProjectName = async (event, project) => {
+  event.stopPropagation()
+  if (!editingName.value || editingName.value === project.name) {
+    editingProjectId.value = null
+    return
+  }
+
+  try {
+    const response = await updateProject(project.project_id, { name: editingName.value })
+    if (response.success) {
+      project.name = editingName.value
+    }
+  } catch (err) {
+    console.error('Failed to update project name:', err)
+  } finally {
+    editingProjectId.value = null
+  }
+}
+
+const cancelEdit = (event) => {
+  if (event) event.stopPropagation()
+  // Add delay to allow enter key to trigger save
+  setTimeout(() => {
+    editingProjectId.value = null
+  }, 100)
+}
 
 // Load project list
 const loadProjects = async () => {
@@ -296,17 +354,53 @@ onMounted(() => {
   color: #9CA3AF;
 }
 
-/* Project name */
 .project-name {
   font-family: 'Inter', sans-serif;
   font-size: 0.95rem;
   font-weight: 600;
   color: #111827;
-  margin: 0 0 12px 0;
+  margin: 0;
   line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  position: relative;
+  padding-right: 24px;
+}
+
+.edit-icon {
+  opacity: 0;
+  font-size: 0.8rem;
+  transition: opacity 0.2s;
+  position: absolute;
+  right: 0;
+}
+
+.project-name:hover .edit-icon {
+  opacity: 1;
+}
+
+.project-name-container {
+  margin-bottom: 12px;
+}
+
+.edit-name-form {
+  width: 100%;
+}
+
+.edit-name-input {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border: 1px solid #000;
+  border-radius: 4px;
+  outline: none;
+  font-family: inherit;
 }
 
 /* Project info */

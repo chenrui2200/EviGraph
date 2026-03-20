@@ -6,12 +6,13 @@ Uses project context mechanism with server-side state persistence
 import os
 import traceback
 import threading
-from flask import request, jsonify, current_app
+from flask import request, jsonify, current_app, send_from_directory
 
 from . import graph_bp
 from ..config import Config
 from ..services.ontology_generator import OntologyGenerator
 from ..services.graph_builder import GraphBuilderService
+from ..services.graph_tools import GraphToolsService
 from ..services.text_processor import TextProcessor
 from ..utils.file_parser import FileParser, TextChunk
 from ..utils.logger import get_logger
@@ -103,6 +104,36 @@ def delete_project(project_id: str):
     })
 
 
+@graph_bp.route('/project/<project_id>', methods=['PATCH'])
+def update_project(project_id: str):
+    """
+    Update project details (e.g., name)
+    """
+    try:
+        data = request.get_json() or {}
+        project = ProjectManager.get_project(project_id)
+
+        if not project:
+            return jsonify({
+                "success": False,
+                "error": f"Project does not exist: {project_id}"
+            }), 404
+
+        if 'name' in data:
+            project.name = data['name']
+
+        ProjectManager.save_project(project)
+
+        return jsonify({
+            "success": True,
+            "message": "Project updated",
+            "data": project.to_dict()
+        })
+    except Exception as e:
+        logger.error(f"Failed to update project: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @graph_bp.route('/project/<project_id>/reset', methods=['POST'])
 def reset_project(project_id: str):
     """
@@ -132,6 +163,81 @@ def reset_project(project_id: str):
         "message": f"Project reset: {project_id}",
         "data": project.to_dict()
     })
+
+
+@graph_bp.route('/project/<project_id>/document/<path:filename>', methods=['GET'])
+def get_project_document(project_id: str, filename: str):
+    """
+    Get a specific document (e.g. PDF) associated with a project for preview.
+    Supports both project_id and graph_id as the first parameter.
+    """
+    # 1. Try to find the actual project object to map IDs
+    project = ProjectManager.get_project(project_id)
+
+    # 2. If not found by ID, search all projects for a matching graph_id
+    if not project:
+        all_projects = ProjectManager.list_projects(limit=500) # Increase limit to be safe
+        for p in all_projects:
+            if p.graph_id == project_id:
+                project = p
+                break
+
+    # Determine the actual folder name on disk
+    actual_folder_id = project.project_id if project else project_id
+    base_dir = os.path.abspath(os.path.join(current_app.root_path, '../uploads/projects', actual_folder_id))
+
+    logger.info(f"Looking for document '{filename}' in project folder: {base_dir}")
+
+    if not os.path.exists(base_dir):
+        return jsonify({
+            "success": False,
+            "error": f"Project directory not found: {base_dir}"
+        }), 404
+
+    # 3. Robust search for the file (recursive and fuzzy)
+    target_file_path = None
+    target_dir = None
+    found_filename = None
+
+    # Normalize search filename for comparison
+    search_name = filename.lower().strip()
+
+    logger.info(f"Searching for '{search_name}' in {base_dir}...")
+
+    for root, dirs, files in os.walk(base_dir):
+        for f in files:
+            # Try multiple matching strategies
+            f_lower = f.lower().strip()
+
+            # Strategy A: Exact match
+            # Strategy B: Search name is part of found file (or vice versa)
+            # Strategy C: Ignore common issues with Chinese punctuation
+            if f_lower == search_name or search_name in f_lower or f_lower in search_name:
+                target_file_path = os.path.join(root, f)
+                target_dir = root
+                found_filename = f
+                break
+        if target_file_path:
+            break
+
+    if not target_file_path:
+        # Debug: list what we DID find to help diagnose
+        all_files = []
+        for root, dirs, files in os.walk(base_dir):
+            for f in files:
+                all_files.append(f)
+
+        logger.warning(f"File lookup failed. Files present in project: {all_files}")
+
+        return jsonify({
+            "success": False,
+            "error": f"Document not found: {filename}. Searched {base_dir}. Found files: {all_files[:10]}...",
+            "searched_id": project_id,
+            "mapped_id": actual_folder_id
+        }), 404
+
+    logger.info(f"Serving document: {found_filename} from {target_dir}")
+    return send_from_directory(target_dir, found_filename)
 
 
 # ============== Interface 1: Upload Files and Generate Ontology ==============
@@ -635,6 +741,63 @@ def delete_graph(graph_id: str):
 
     except Exception as e:
         logger.error(f"API Error: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@graph_bp.route('/ai-qa', methods=['POST'])
+def ai_qa():
+    """
+    AI Q&A Interface: retrieval from multiple graphs + LLM answering
+    """
+    try:
+        data = request.get_json() or {}
+        query = data.get('query')
+        graph_ids = data.get('graph_ids', [])
+
+        if not query:
+            return jsonify({"success": False, "error": "Please provide query"}), 400
+
+        if not graph_ids:
+            return jsonify({"success": False, "error": "Please select at least one knowledge base (graph)"}), 400
+
+        storage = _get_storage()
+        tools = GraphToolsService(storage=storage)
+
+        # 1. Retrieval
+        logger.info(f"AI Q&A Retrieval: {query[:50]}... from {len(graph_ids)} graphs")
+        search_result = tools.search_multi_graphs(graph_ids=graph_ids, query=query, limit=20)
+
+        # 2. LLM Answer
+        facts_text = search_result.to_text()
+
+        system_prompt = "你是一个专业的知识库问答助手。请基于提供的知识库内容（事实和实体）回答用户的问题。如果知识库中没有相关信息，请明确告知用户。请保持回答的专业性、准确性和简洁性。"
+        user_prompt = f"### 知识库内容：\n{facts_text}\n\n### 用户问题：\n{query}\n\n请基于上述知识库内容进行回答："
+
+        from ..utils.llm_client import LLMClient
+        llm = LLMClient()
+
+        logger.info("Calling LLM for AI Q&A answer...")
+        answer = llm.chat(messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ])
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "query": query,
+                "answer": answer,
+                "retrieved_facts": search_result.facts,
+                "graph_ids": graph_ids
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"AI Q&A failed: {str(e)}\n{traceback.format_exc()}")
         return jsonify({
             "success": False,
             "error": str(e),

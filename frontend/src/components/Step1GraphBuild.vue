@@ -192,9 +192,9 @@
           <button
             v-if="currentPhase >= 2"
             class="action-btn next-btn"
-            @click="$emit('next-step')"
+            @click="router.push({ name: 'AiQa', params: { projectId: projectData.project_id } })"
           >
-            Finalize & View Analysis ➝
+            AI 问答 ➝
           </button>
         </div>
       </div>
