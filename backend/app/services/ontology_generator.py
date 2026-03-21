@@ -14,149 +14,71 @@ logger = get_logger('mirofish.ontology_generator')
 
 
 # System prompt for ontology generation
-ONTOLOGY_SYSTEM_PROMPT = """You are a professional knowledge graph ontology design expert. Your task is to analyze given text content and simulation requirements, and design entity types and relationship types suitable for **social media opinion simulation**.
+ONTOLOGY_SYSTEM_PROMPT = """You are a professional knowledge graph ontology design expert specializing in **Social Media Simulation and Digital Twins**.
+
+Your task is to analyze text content and design a schema (Ontology) that will be used to extract entities and relationships. This schema is the foundation for creating AI Agents that simulate real-world behavior on social media.
 
 **Important: You must output valid JSON format data, do not output anything else.**
 
-## Core Task Background
+## 🎯 Design Goal: Creating a "Simulatable" World
 
-We are building a **social media opinion simulation system**. In this system:
-- Each entity is an "account" or "subject" that can voice, interact, and spread information on social media
-- Entities influence each other, retweet, comment, and respond
-- We need to simulate the reactions of various parties in opinion events and information dissemination paths
+We are building a **Social Media Opinion Simulation System**. To make this effective, your ontology must focus on **ACTORS**—entities that can post, respond, influence, and be influenced.
 
-Therefore, **entities must be real-world entities that can voice and interact on social media**:
+### 1. Entity Guidelines
+- **Real-World Subjects Only**: Every entity must be a subject capable of voicing opinions or being a stakeholder.
+- **Hierarchical Thinking**: Design specific roles (e.g., `GraduateStudent`, `TechCEO`, `StateMedia`) instead of just broad categories.
+- **NO Abstract Concepts**: Do not define "Public Opinion", "Emotion", or "Event" as entities. These are properties or contexts, not actors.
 
-**Can be**:
-- Specific individuals (public figures, stakeholders, opinion leaders, experts, ordinary people)
-- Companies and enterprises (including their official accounts)
-- Organizations (universities, associations, NGOs, unions, etc.)
-- Government departments and regulatory agencies
-- Media institutions (newspapers, TV stations, self-media, websites)
-- Social media platforms themselves
-- Specific group representatives (such as alumni associations, fan groups, rights protection groups, etc.)
+### 2. Relationship Guidelines
+- **Structural Links**: Employment, affiliation, family (e.g., `WORKS_FOR`, `MEMBER_OF`).
+- **Interaction/Attitude Links**: Support, opposition, regulation, reporting (e.g., `SUPPORTS`, `CRITICIZES`, `REGULATES`).
+- **Information Flow**: Who influences whom, who provides information to whom.
 
-**Cannot be**:
-- Abstract concepts (such as "public opinion", "emotion", "trend")
-- Topics/subjects (such as "academic integrity", "education reform")
-- Views/attitudes (such as "supporters", "opponents")
+### 3. Attribute Guidelines (For Persona Creation)
+- Attributes should help define an AI Agent's "Personality" and "Social Identity".
+- Recommended: `vulnerability`, `political_stance`, `social_influence`, `expertise_area`.
+- **System Reserved Words (DO NOT USE as attribute names)**: `name`, `uuid`, `group_id`, `created_at`, `summary`.
 
-## Output Format
-
-Please output JSON format with the following structure:
+## 📋 Output Format (JSON)
 
 ```json
 {
     "entity_types": [
         {
-            "name": "Entity type name (English, PascalCase)",
-            "description": "Brief description (English, no more than 100 characters)",
+            "name": "EntityTypeName (PascalCase)",
+            "description": "Definition focusing on their role in social media (English, <100 chars)",
             "attributes": [
                 {
-                    "name": "Attribute name (English, snake_case)",
+                    "name": "attribute_name (snake_case)",
                     "type": "text",
-                    "description": "Attribute description"
+                    "description": "How this affects their behavior or opinions"
                 }
             ],
-            "examples": ["Example entity 1", "Example entity 2"]
+            "examples": ["Real names or specific roles"]
         }
     ],
     "edge_types": [
         {
-            "name": "Relationship type name (English, UPPER_SNAKE_CASE)",
-            "description": "Brief description (English, no more than 100 characters)",
+            "name": "RELATIONSHIP_NAME (UPPER_SNAKE_CASE)",
+            "description": "The nature of the connection (English, <100 chars)",
             "source_targets": [
-                {"source": "Source entity type", "target": "Target entity type"}
+                {"source": "SourceType", "target": "TargetType"}
             ],
             "attributes": []
         }
     ],
-    "analysis_summary": "Brief analysis and explanation of text content"
+    "analysis_summary": "Analysis of the core conflicts and key actors in the text"
 }
 ```
 
-## Design Guidelines (Extremely Important!)
+## 📏 Strict Design Constraints
 
-### 1. Entity Type Design - Must Strictly Follow
-
-**Quantity requirement: Must have exactly 10 entity types**
-
-**Hierarchical structure requirement (must include both specific types and fallback types)**:
-
-Your 10 entity types must include the following hierarchy:
-
-A. **Fallback types (must include, place in last 2 of list)**:
-   - `Person`: Fallback type for any natural person. When a person does not fit other more specific person types, use this.
-   - `Organization`: Fallback type for any organization. When an organization does not fit other more specific organization types, use this.
-
-B. **Specific types (8, designed based on text content)**:
-   - Design more specific types for main characters appearing in the text
-   - Example: If text involves academic events, can have `Student`, `Professor`, `University`
-   - Example: If text involves business events, can have `Company`, `CEO`, `Employee`
-
-**Why fallback types are needed**:
-- Various people will appear in the text, such as "primary/secondary teachers", "random person", "some netizen"
-- If no specific type matches, they should be classified as `Person`
-- Similarly, small organizations and temporary groups should be classified as `Organization`
-
-**Design principles for specific types**:
-- Identify high-frequency or key role types from the text
-- Each specific type should have clear boundaries, avoid overlap
-- Description must clearly explain the difference between this type and the fallback type
-
-### 2. Relationship Type Design
-
-- Quantity: 6-10
-- Relationships should reflect real connections in social media interactions
-- Ensure relationship source_targets cover your defined entity types
-
-### 3. Attribute Design
-
-- 1-3 key attributes per entity type
-- **Note**: Attribute names cannot use `name`, `uuid`, `group_id`, `created_at`, `summary` (these are system reserved words)
-- Recommended: `full_name`, `title`, `role`, `position`, `location`, `description`, etc.
-
-## Entity Type Reference
-
-**Individual types (specific)**:
-- Student: Student
-- Professor: Professor/Scholar
-- Journalist: Journalist
-- Celebrity: Celebrity/Internet celebrity
-- Executive: Executive
-- Official: Government official
-- Lawyer: Lawyer
-- Doctor: Doctor
-
-**Individual types (fallback)**:
-- Person: Any natural person (use when not fitting other specific types)
-
-**Organization types (specific)**:
-- University: University
-- Company: Company/Enterprise
-- GovernmentAgency: Government agency
-- MediaOutlet: Media institution
-- Hospital: Hospital
-- School: Primary/Secondary school
-- NGO: Non-governmental organization
-
-**Organization types (fallback)**:
-- Organization: Any organization (use when not fitting other specific types)
-
-## Relationship Type Reference
-
-- WORKS_FOR: Works for
-- STUDIES_AT: Studies at
-- AFFILIATED_WITH: Affiliated with
-- REPRESENTS: Represents
-- REGULATES: Regulates
-- REPORTS_ON: Reports on
-- COMMENTS_ON: Comments on
-- RESPONDS_TO: Responds to
-- SUPPORTS: Supports
-- OPPOSES: Opposes
-- COLLABORATES_WITH: Collaborates with
-- COMPETES_WITH: Competes with
+1. **Exact Quantity**: You must define **exactly 10 entity types**.
+2. **Fallback Strategy**: The last 2 types in your list MUST be:
+   - `Person`: Fallback for any natural person not fitting other categories.
+   - `Organization`: Fallback for any group or institution not fitting other categories.
+3. **Actor Focus**: At least 8 of your 10 entities should be types that can "own" a social media account.
+4. **Relationship Quantity**: Define 8-10 meaningful relationship types.
 """
 
 
@@ -292,6 +214,10 @@ Based on the above content, design entity types and relationship types suitable 
     def _validate_and_process(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Validate and post-process result"""
 
+        # Normalize relationship field names
+        if "relation_types" in result and "edge_types" not in result:
+            result["edge_types"] = result.pop("relation_types")
+
         # Ensure necessary fields exist
         if "entity_types" not in result:
             result["entity_types"] = []
@@ -300,10 +226,21 @@ Based on the above content, design entity types and relationship types suitable 
         if "analysis_summary" not in result:
             result["analysis_summary"] = ""
 
+        # System reserved words for attributes
+        RESERVED_ATTRS = {"name", "uuid", "group_id", "created_at", "summary", "embedding", "attributes_json", "graph_id"}
+
         # Validate entity types
         for entity in result["entity_types"]:
             if "attributes" not in entity:
                 entity["attributes"] = []
+
+            # Filter out reserved words from attributes
+            entity["attributes"] = [
+                a for a in entity["attributes"]
+                if (isinstance(a, dict) and a.get("name") not in RESERVED_ATTRS) or
+                   (isinstance(a, str) and a not in RESERVED_ATTRS)
+            ]
+
             if "examples" not in entity:
                 entity["examples"] = []
             # Ensure description doesn't exceed 100 characters
@@ -316,6 +253,14 @@ Based on the above content, design entity types and relationship types suitable 
                 edge["source_targets"] = []
             if "attributes" not in edge:
                 edge["attributes"] = []
+
+            # Filter reserved words from edge attributes too
+            edge["attributes"] = [
+                a for a in edge["attributes"]
+                if (isinstance(a, dict) and a.get("name") not in RESERVED_ATTRS) or
+                   (isinstance(a, str) and a not in RESERVED_ATTRS)
+            ]
+
             if len(edge.get("description", "")) > 100:
                 edge["description"] = edge["description"][:97] + "..."
 

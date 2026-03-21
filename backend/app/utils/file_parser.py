@@ -392,9 +392,10 @@ class FileParser:
             try:
                 text = cls.extract_text(file_path)
                 filename = Path(file_path).name
-                all_texts.append(f"=== Document {i}: {filename} ===\n{text}")
+                # Use a less prominent separator to avoid LLM misinterpreting it as an entity
+                all_texts.append(f"Source Document {i} ({filename}):\n{text}")
             except Exception as e:
-                all_texts.append(f"=== Document {i}: {file_path} (extraction failed: {str(e)}) ===")
+                all_texts.append(f"Source Document {i} ({file_path}) [Extraction failed: {str(e)}]")
         return "\n\n".join(all_texts)
 
 

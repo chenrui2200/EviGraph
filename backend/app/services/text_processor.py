@@ -41,8 +41,8 @@ class TextProcessor:
     @staticmethod
     def split_chunks(
         chunks: List[TextChunk],
-        chunk_size: int = 800,
-        overlap: int = 80,
+        chunk_size: int = 1000,
+        overlap: int = 100,
         semantic: bool = False
     ) -> List[TextChunk]:
         """

@@ -394,9 +394,19 @@
                     <div class="facts-scroll-area">
                       <div v-for="(fact, idx) in hitTestResults.facts" :key="idx" class="fact-item">
                         <p class="fact-text">{{ parseFactText(fact).content }}</p>
-                        <div v-if="parseFactText(fact).source" class="fact-source">
-                          <span class="source-label">原文位置</span>
-                          <span class="source-tag">{{ parseFactText(fact).source }}</span>
+                        <div class="fact-meta-row">
+                          <div v-if="parseFactText(fact).source" class="fact-source">
+                            <span class="source-label">原文位置</span>
+                            <span class="source-tag">{{ parseFactText(fact).source }}</span>
+                          </div>
+                          <div v-if="parseFactText(fact).page" class="fact-page">
+                            <span class="source-label">页码</span>
+                            <span class="page-tag">P.{{ parseFactText(fact).page }}</span>
+                          </div>
+                          <div v-if="parseFactText(fact).bbox" class="fact-bbox" :title="'坐标: ' + JSON.stringify(parseFactText(fact).bbox)">
+                            <span class="source-label">精确位置</span>
+                            <span class="bbox-tag">📍 定位</span>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -628,17 +638,27 @@ const runHitTest = async () => {
 }
 
 const parseFactText = (factStr) => {
-  if (!factStr) return { content: '', source: '' }
+  if (!factStr) return { content: '', source: '', page: null, bbox: null }
+
+  // Handle object format from backend
+  if (typeof factStr === 'object') {
+    return {
+      content: factStr.text || '',
+      source: factStr.source || '',
+      page: factStr.page,
+      bbox: factStr.bbox
+    }
+  }
 
   // Look for [Source: ..., Page: ...] or [Source: ...]
   const sourceMatch = factStr.match(/\[Source: [^\]]+\]$/)
   if (sourceMatch) {
     const source = sourceMatch[0].replace('[Source: ', '').replace(']', '')
     const content = factStr.substring(0, sourceMatch.index).trim()
-    return { content, source }
+    return { content, source, page: null, bbox: null }
   }
 
-  return { content: factStr, source: '' }
+  return { content: factStr, source: '', page: null, bbox: null }
 }
 
 const goToNextStep = () => {
@@ -2226,7 +2246,14 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
-.fact-source {
+.fact-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.fact-source, .fact-page, .fact-bbox {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2236,15 +2263,32 @@ onUnmounted(() => {
   font-size: 0.65rem;
   color: #999;
   font-weight: 600;
+  white-space: nowrap;
+}
+
+.source-tag, .page-tag, .bbox-tag {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  font-family: 'JetBrains Mono', monospace;
+  border-radius: 4px;
 }
 
 .source-tag {
-  font-size: 0.7rem;
-  padding: 2px 8px;
   background: #FFF5F2;
   border: 1px solid #FFE0D6;
   color: #FF6B35;
-  font-family: 'JetBrains Mono', monospace;
+}
+
+.page-tag {
+  background: #E3F2FD;
+  border: 1px solid #BBDEFB;
+  color: #1976D2;
+}
+
+.bbox-tag {
+  background: #F3E5F5;
+  border: 1px solid #E1BEE7;
+  color: #7B1FA2;
 }
 
 /* Next Step Button */
