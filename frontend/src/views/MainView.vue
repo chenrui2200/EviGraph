@@ -239,16 +239,19 @@ const loadProject = async () => {
       projectData.value = res.data
       updatePhaseByStatus(res.data.status)
       addLog(`Project loaded. Status: ${res.data.status}`)
-      
+
       if (res.data.status === 'ontology_generated' && !res.data.graph_id) {
         await startBuildGraph()
-      } else if (res.data.status === 'graph_building' && res.data.graph_build_task_id) {
-        currentPhase.value = 1
-        startPollingTask(res.data.graph_build_task_id)
-        startGraphPolling()
-      } else if (res.data.status === 'graph_completed' && res.data.graph_id) {
-        currentPhase.value = 2
-        await loadGraph(res.data.graph_id)
+      } else {
+        const buildStatuses = ['graph_building', 'graph_chunking', 'graph_embedding', 'graph_indexing']
+        if (buildStatuses.includes(res.data.status) && res.data.graph_build_task_id) {
+          currentPhase.value = 1
+          startPollingTask(res.data.graph_build_task_id)
+          startGraphPolling()
+        } else if (res.data.status === 'graph_completed' && res.data.graph_id) {
+          currentPhase.value = 2
+          await loadGraph(res.data.graph_id)
+        }
       }
     } else {
       error.value = res.error
@@ -265,10 +268,17 @@ const loadProject = async () => {
 const updatePhaseByStatus = (status) => {
   switch (status) {
     case 'created':
-    case 'ontology_generated': currentPhase.value = 0; break;
-    case 'graph_building': currentPhase.value = 1; break;
-    case 'graph_completed': currentPhase.value = 2; break;
-    case 'failed': error.value = 'Project failed'; break;
+      currentPhase.value = 0; break;
+    case 'ontology_generated':
+    case 'graph_building':
+    case 'graph_chunking':
+    case 'graph_embedding':
+    case 'graph_indexing':
+      currentPhase.value = 1; break; // Ontology done, graph build in progress
+    case 'graph_completed':
+      currentPhase.value = 2; break;
+    case 'failed':
+      error.value = 'Project failed'; break;
   }
 }
 

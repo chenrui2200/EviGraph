@@ -95,7 +95,7 @@ class FileParser:
 
     @staticmethod
     def _extract_chunks_from_pdf(file_path: str, filename: str) -> List[TextChunk]:
-        """Extract text from PDF page by page with multiple fallback methods"""
+        """Extract text from PDF page by page with coordinates and table support"""
         import logging
         logger = logging.getLogger('mirofish.file_parser')
 
@@ -114,37 +114,109 @@ class FileParser:
                     return []
 
                 for i, page in enumerate(doc):
-                    # Method 1: Standard text extraction
-                    text = page.get_text("text").strip()
+                    page_num = i + 1
 
-                    # Method 2: If standard failed, try blocks (handles some complex layouts)
-                    if not text:
-                        blocks = page.get_text("blocks")
-                        text = "\n".join([b[4] for b in blocks if isinstance(b[4], str) and b[4].strip()]).strip()
+                    # --- Table Extraction ---
+                    table_bboxes = []
+                    try:
+                        # Find tables on the current page
+                        tabs = page.find_tables()
+                        for tab in tabs:
+                            # Use bounding box of the table to filter out overlapping text blocks
+                            table_bboxes.append(tab.bbox)
+
+                            # Extract table data and convert to Markdown
+                            # table.extract() returns a list of lists of strings
+                            table_data = tab.extract()
+                            if not table_data:
+                                continue
+
+                            # Convert to simple Markdown format
+                            md_rows = []
+                            for row_idx, row in enumerate(table_data):
+                                # Clean cells
+                                clean_row = [str(cell).replace('\n', ' ').strip() if cell is not None else "" for cell in row]
+                                md_rows.append("| " + " | ".join(clean_row) + " |")
+
+                                # Add header separator after first row
+                                if row_idx == 0:
+                                    md_rows.append("| " + " | ".join(["---"] * len(clean_row)) + " |")
+
+                            table_markdown = "\n".join(md_rows)
+                            if table_markdown.strip():
+                                chunks.append(TextChunk(
+                                    text=table_markdown,
+                                    metadata={
+                                        "source": filename,
+                                        "page": page_num,
+                                        "total_pages": total_pages,
+                                        "type": "table",
+                                        "method": "fitz_tables",
+                                        "bbox": list(tab.bbox)
+                                    }
+                                ))
+                    except Exception as te:
+                        logger.warning(f"Table extraction failed on page {page_num} of {filename}: {str(te)}")
+
+                    # --- Text Block Extraction ---
+                    # Method 1 & 2 combined: Use blocks to get coordinates
+                    # blocks format: (x0, y0, x1, y1, "text", block_no, block_type)
+                    blocks = page.get_text("blocks")
+
+                    page_chunks = []
+                    for b in blocks:
+                        if len(b) < 5 or not isinstance(b[4], str):
+                            continue
+
+                        text = b[4].strip()
+                        if not text:
+                            continue
+
+                        # Check if this block's bounding box is inside any extracted table
+                        # b[0:4] are x0, y0, x1, y1
+                        bbox = list(b[0:4])
+
+                        # Use a simple intersection check - if block is mostly inside table, skip it
+                        is_inside_table = False
+                        for t_bbox in table_bboxes:
+                            # If the block's center is inside the table bbox, it's probably part of it
+                            bx_center = (bbox[0] + bbox[2]) / 2
+                            by_center = (bbox[1] + bbox[3]) / 2
+                            if (t_bbox[0] <= bx_center <= t_bbox[2] and
+                                t_bbox[1] <= by_center <= t_bbox[3]):
+                                is_inside_table = True
+                                break
+
+                        if is_inside_table:
+                            continue
+
+                        page_chunks.append(TextChunk(
+                            text=text,
+                            metadata={
+                                "source": filename,
+                                "page": page_num,
+                                "total_pages": total_pages,
+                                "type": "pdf",
+                                "method": "fitz_blocks",
+                                "bbox": bbox  # [x0, y0, x1, y1]
+                            }
+                        ))
 
                     # Method 3: OCR fallback if suspicious (too little text on a page that has images)
-                    if not text or len(text) < 20:
+                    # We check the aggregate text from blocks
+                    aggregate_text = "".join([c.text for c in page_chunks])
+                    if not aggregate_text or len(aggregate_text) < 20:
                         images = page.get_images()
                         if images:
-                            logger.info(f"Attempting OCR on page {i+1} of {filename}...")
-                            ocr_text = FileParser._perform_ocr(page)
-                            if ocr_text:
-                                text = ocr_text
-                                logger.info(f"OCR successful on page {i+1}")
+                            logger.info(f"Attempting OCR on page {page_num} of {filename}...")
+                            ocr_chunks = FileParser._perform_ocr_with_bboxes(page, filename, page_num, total_pages)
+                            if ocr_chunks:
+                                page_chunks = ocr_chunks
+                                logger.info(f"OCR successful on page {page_num}, found {len(ocr_chunks)} blocks")
 
-                    if not text:
-                        continue
+                    if page_chunks:
+                        chunks.extend(page_chunks)
 
-                    chunks.append(TextChunk(
-                        text=text,
-                        metadata={
-                            "source": filename,
-                            "page": i + 1,
-                            "total_pages": total_pages,
-                            "type": "pdf",
-                            "method": "fitz" + ("+ocr" if "ocr_text" in locals() and ocr_text else "")
-                        }
-                    ))
         except Exception as e:
             import traceback
             logger.error(f"PyMuPDF extraction failed for {filename}: {str(e)}\n{traceback.format_exc()}")
@@ -153,85 +225,116 @@ class FileParser:
         return chunks
 
     @staticmethod
-    def _perform_ocr(page) -> Optional[str]:
-        """Perform OCR on a single page using pytesseract if possible"""
+    def _perform_ocr_with_bboxes(page, filename: str, page_num: int, total_pages: int) -> List[TextChunk]:
+        """Perform OCR and return chunks with bounding boxes"""
         import logging
         from ..config import Config
         logger = logging.getLogger('mirofish.file_parser')
         try:
             import pytesseract
+            from pytesseract import Output
             from PIL import Image
             import io
             import fitz
 
-            # Set tesseract path from config
             if Config.TESSERACT_CMD:
                 pytesseract.pytesseract.tesseract_cmd = Config.TESSERACT_CMD
 
-            # Check if tesseract is installed
-            try:
-                # This call will raise an exception if tesseract binary is not found
-                tess_version = pytesseract.get_tesseract_version()
-                logger.debug(f"Tesseract version found: {tess_version}")
-            except Exception:
-                # Try a few more common locations before giving up
-                fallback_paths = [
-                    r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-                    r'C:\Users\\' + os.getlogin() + r'\AppData\Local\Tesseract-OCR\tesseract.exe',
-                    'tesseract' # Assume in PATH
-                ]
-                found = False
-                for path in fallback_paths:
-                    if os.path.exists(path):
-                        pytesseract.pytesseract.tesseract_cmd = path
-                        try:
-                            pytesseract.get_tesseract_version()
-                            found = True
-                            logger.info(f"Tesseract found at fallback path: {path}")
-                            break
-                        except:
-                            continue
-
-                if not found:
-                    logger.error("Tesseract engine not found. Please install Tesseract-OCR and ensure it is in PATH or Config.TESSERACT_CMD.")
-                    return None
-
-            # Render page to image with higher resolution for better OCR
-            matrix = fitz.Matrix(2, 2)  # 2x zoom
+            # Render page to image (2x zoom for better OCR)
+            zoom = 2
+            matrix = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=matrix)
             img_data = pix.tobytes("png")
             img = Image.open(io.BytesIO(img_data))
 
-            # OCR
-            # Try both Chinese and English.
-            # Note: requires tesseract-ocr binary and chi_sim data installed on system.
-            # Use project-provided tessdata if available
-            tessdata_dir = os.path.abspath(Config.TESSDATA_DIR)
-            if os.path.exists(tessdata_dir):
-                # Use forward slashes for better Tesseract compatibility on Windows
-                tessdata_dir_clean = tessdata_dir.replace('\\', '/')
-                # Set TESSDATA_PREFIX as it's more robust than command line args in some cases
-                os.environ['TESSDATA_PREFIX'] = tessdata_dir_clean
-                # Still pass it in config to be sure, but remove quotes if no spaces
-                # Note: Tesseract on Windows often misinterprets quotes in --tessdata-dir
-                if ' ' in tessdata_dir_clean:
-                    config = f'--tessdata-dir "{tessdata_dir_clean}"'
+            # OCR with data output
+            tess_data = pytesseract.image_to_data(img, lang='chi_sim+eng', output_type=Output.DICT)
+
+            # Map OCR results to blocks/lines
+            chunks = []
+            n_boxes = len(tess_data['text'])
+
+            # Group by 'block_num' or 'line_num' provided by Tesseract
+            current_block_id = -1
+            current_text = []
+            current_bbox = None # [x0, y0, x1, y1]
+
+            for i in range(n_boxes):
+                text = tess_data['text'][i].strip()
+                if not text:
+                    continue
+
+                # Filter out low confidence results (noise)
+                try:
+                    conf = int(tess_data['conf'][i])
+                    if conf < 30:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+                block_id = tess_data['block_num'][i]
+
+                # Tesseract coordinates are in pixels on the rendered image
+                x, y, w, h = tess_data['left'][i], tess_data['top'][i], tess_data['width'][i], tess_data['height'][i]
+
+                # Convert to PDF coordinates
+                # PDF_coord = Image_coord / zoom
+                tx0, ty0, tx1, ty1 = x/zoom, y/zoom, (x+w)/zoom, (y+h)/zoom
+
+                if block_id != current_block_id and current_text:
+                    # Save previous block
+                    if current_bbox:
+                        chunks.append(TextChunk(
+                            text=" ".join(current_text),
+                            metadata={
+                                "source": filename,
+                                "page": page_num,
+                                "total_pages": total_pages,
+                                "type": "pdf",
+                                "method": "ocr_tesseract",
+                                "bbox": current_bbox
+                            }
+                        ))
+                    current_text = []
+                    current_bbox = None
+
+                current_block_id = block_id
+                current_text.append(text)
+
+                if current_bbox is None:
+                    current_bbox = [tx0, ty0, tx1, ty1]
                 else:
-                    config = f'--tessdata-dir {tessdata_dir_clean}'
-            else:
-                config = ''
+                    current_bbox[0] = min(current_bbox[0], tx0)
+                    current_bbox[1] = min(current_bbox[1], ty0)
+                    current_bbox[2] = max(current_bbox[2], tx1)
+                    current_bbox[3] = max(current_bbox[3], ty1)
 
-            text = pytesseract.image_to_string(img, lang='chi_sim+eng', config=config)
+            # Add last block
+            if current_text and current_bbox:
+                chunks.append(TextChunk(
+                    text=" ".join(current_text),
+                    metadata={
+                        "source": filename,
+                        "page": page_num,
+                        "total_pages": total_pages,
+                        "type": "pdf",
+                        "method": "ocr_tesseract",
+                        "bbox": current_bbox
+                    }
+                ))
 
-            if text and text.strip():
-                logger.info(f"OCR successful: extracted {len(text)} characters.")
-                return text.strip()
-            else:
-                logger.warning("OCR returned empty text. Page might be too blurry or contain no text.")
-                return None
+            return chunks
         except Exception as e:
-            logger.error(f"OCR execution failed: {str(e)}")
+            logger.error(f"OCR with bboxes failed: {str(e)}")
+            return []
+
+    @staticmethod
+    def _perform_ocr(page) -> Optional[str]:
+        """Legacy OCR method - returns just text"""
+        chunks = FileParser._perform_ocr_with_bboxes(page, "unknown", 0, 0)
+        if not chunks:
             return None
+        return "\n".join([c.text for c in chunks])
 
     @staticmethod
     def _extract_chunks_with_pypdf(file_path: str, filename: str) -> List[TextChunk]:

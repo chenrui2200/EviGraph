@@ -479,6 +479,7 @@ class GraphToolsService:
                                 source = meta.get("source", "Unknown")
                                 page = meta.get("page")
                                 total_pages = meta.get("total_pages")
+                                bbox = meta.get("bbox") # Extract new bbox field
                                 break # Use first found source info
 
                         fact_obj = {
@@ -486,6 +487,7 @@ class GraphToolsService:
                             "source": source,
                             "page": page,
                             "total_pages": total_pages,
+                            "bbox": bbox, # Pass bbox to response
                             "graph_id": graph_id
                         }
                         facts.append(fact_obj)

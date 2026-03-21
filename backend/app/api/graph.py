@@ -489,6 +489,7 @@ def build_graph():
         graph_name = data.get('graph_name', project.name or 'MiroFish Graph')
         chunk_size = data.get('chunk_size', project.chunk_size or Config.DEFAULT_CHUNK_SIZE)
         chunk_overlap = data.get('chunk_overlap', project.chunk_overlap or Config.DEFAULT_CHUNK_OVERLAP)
+        use_semantic = data.get('semantic', False) # New: option for semantic chunking
 
         # Update project configuration
         project.chunk_size = chunk_size
@@ -546,7 +547,8 @@ def build_graph():
                     chunks = TextProcessor.split_chunks(
                         initial_chunks,
                         chunk_size=chunk_size,
-                        overlap=chunk_overlap
+                        overlap=chunk_overlap,
+                        semantic=use_semantic
                     )
                     build_logger.info(f"Using {len(chunks)} chunks with metadata from chunks.json")
                 else:
@@ -572,7 +574,10 @@ def build_graph():
                 project.graph_id = graph_id
                 ProjectManager.save_project(project)
 
-                # Set ontology
+                # Update status to chunking and set ontology
+                project.status = ProjectStatus.GRAPH_CHUNKING
+                ProjectManager.save_project(project)
+                
                 task_manager.update_task(
                     task_id,
                     message="Setting ontology definition...",
@@ -603,6 +608,10 @@ def build_graph():
                     progress_callback=add_progress_callback
                 )
 
+                # Update status to embedding generation
+                project.status = ProjectStatus.GRAPH_EMBEDDING
+                ProjectManager.save_project(project)
+                
                 # Neo4j processing is synchronous, no need to wait
                 task_manager.update_task(
                     task_id,
@@ -610,6 +619,10 @@ def build_graph():
                     progress=90
                 )
 
+                # Update status to indexing
+                project.status = ProjectStatus.GRAPH_INDEXING
+                ProjectManager.save_project(project)
+                
                 # Get graph data
                 task_manager.update_task(
                     task_id,

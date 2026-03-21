@@ -797,10 +797,12 @@ const loadProject = async () => {
         await startBuildGraph()
       }
 
-      // Continue polling running build tasks
-      if (response.data.status === 'graph_building' && response.data.graph_build_task_id) {
+      // Continue polling running build tasks (including intermediate states)
+      const buildStatuses = ['graph_building', 'graph_chunking', 'graph_embedding', 'graph_indexing']
+      if (buildStatuses.includes(response.data.status) && response.data.graph_build_task_id) {
         currentPhase.value = 1
         startPollingTask(response.data.graph_build_task_id)
+        startGraphPolling() // Also ensure graph data is being polled
       }
 
       // Load completed graphs
@@ -822,11 +824,14 @@ const loadProject = async () => {
 const updatePhaseByStatus = (status) => {
   switch (status) {
     case 'created':
-    case 'ontology_generated':
       currentPhase.value = 0
       break
+    case 'ontology_generated':
     case 'graph_building':
-      currentPhase.value = 1
+    case 'graph_chunking':
+    case 'graph_embedding':
+    case 'graph_indexing':
+      currentPhase.value = 1 // Already generated ontology, building graph
       break
     case 'graph_completed':
       currentPhase.value = 2

@@ -1305,6 +1305,10 @@ class SimulationRunner:
             _cleanup_registered = True  # Mark as registered, prevent child process from trying again
             return
         
+        # Ensure cleanup on Windows when Python interpreter shuts down
+        if IS_WINDOWS:
+            atexit.register(cls.cleanup_all_simulations)
+        
         # Save original signal handler
         original_sigint = signal.getsignal(signal.SIGINT)
         original_sigterm = signal.getsignal(signal.SIGTERM)

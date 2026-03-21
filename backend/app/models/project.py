@@ -18,8 +18,11 @@ class ProjectStatus(str, Enum):
     """Project status"""
     CREATED = "created"              # Just created, files uploaded
     ONTOLOGY_GENERATED = "ontology_generated"  # Ontology generated
-    GRAPH_BUILDING = "graph_building"    # Graph building in progress
-    GRAPH_COMPLETED = "graph_completed"  # Graph build completed
+    GRAPH_CHUNKING = "graph_chunking"        # Text chunking in progress
+    GRAPH_EMBEDDING = "graph_embedding"      # Embedding generation in progress
+    GRAPH_INDEXING = "graph_indexing"        # Index creation in progress
+    GRAPH_BUILDING = "graph_building"         # Graph building in progress
+    GRAPH_COMPLETED = "graph_completed"       # Graph build completed
     FAILED = "failed"                # Failed
 
 
