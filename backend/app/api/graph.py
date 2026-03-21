@@ -56,8 +56,18 @@ def get_project(project_id: str):
 
     # Check if project is building but task is lost (e.g. server restart)
     from ..models.project import ProjectStatus
+    from ..models.task import TaskManager
+
+    # Check ontology task
+    if project.status == ProjectStatus.ONTOLOGY_GENERATION and project.ontology_task_id:
+        if not TaskManager().get_task(project.ontology_task_id):
+            logger.warning(f"Project {project_id} is in ontology generation but task {project.ontology_task_id} is missing. Auto-fixing.")
+            project.status = ProjectStatus.FAILED
+            project.error = "Ontology generation task lost. Please retry."
+            ProjectManager.save_project(project)
+
+    # Check build task
     if project.status == ProjectStatus.GRAPH_BUILDING and project.graph_build_task_id:
-        from ..models.task import TaskManager
         if not TaskManager().get_task(project.graph_build_task_id):
             logger.warning(f"Project {project_id} is in building status but task {project.graph_build_task_id} is missing (restarted?). Auto-fixing status.")
             project.status = ProjectStatus.FAILED
@@ -121,6 +131,12 @@ def update_project(project_id: str):
 
         if 'name' in data:
             project.name = data['name']
+
+        if 'current_step' in data:
+            try:
+                project.current_step = int(data['current_step'])
+            except:
+                pass
 
         ProjectManager.save_project(project)
 
@@ -310,6 +326,11 @@ def generate_ontology():
             task_type="ontology_generation",
             metadata={"project_id": project.project_id}
         )
+
+        # Update project status and task ID
+        project.status = ProjectStatus.ONTOLOGY_GENERATION
+        project.ontology_task_id = task_id
+        ProjectManager.save_project(project)
 
         # Start background thread
         def ontology_task():

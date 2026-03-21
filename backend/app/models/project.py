@@ -17,6 +17,7 @@ from ..config import Config
 class ProjectStatus(str, Enum):
     """Project status"""
     CREATED = "created"              # Just created, files uploaded
+    ONTOLOGY_GENERATION = "ontology_generation" # Ontology generation in progress
     ONTOLOGY_GENERATED = "ontology_generated"  # Ontology generated
     GRAPH_CHUNKING = "graph_chunking"        # Text chunking in progress
     GRAPH_EMBEDDING = "graph_embedding"      # Embedding generation in progress
@@ -35,6 +36,9 @@ class Project:
     created_at: str
     updated_at: str
 
+    # Workflow state
+    current_step: int = 1            # Current step (1-5)
+
     # File information
     files: List[Dict[str, str]] = field(default_factory=list)  # [{filename, path, size}]
     total_text_length: int = 0
@@ -42,6 +46,7 @@ class Project:
     # Ontology information (populated after interface 1 generates)
     ontology: Optional[Dict[str, Any]] = None
     analysis_summary: Optional[str] = None
+    ontology_task_id: Optional[str] = None
 
     # Graph information (populated after interface 2 completes)
     graph_id: Optional[str] = None
@@ -63,10 +68,12 @@ class Project:
             "status": self.status.value if isinstance(self.status, ProjectStatus) else self.status,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "current_step": self.current_step,
             "files": self.files,
             "total_text_length": self.total_text_length,
             "ontology": self.ontology,
             "analysis_summary": self.analysis_summary,
+            "ontology_task_id": self.ontology_task_id,
             "graph_id": self.graph_id,
             "graph_build_task_id": self.graph_build_task_id,
             "simulation_requirement": self.simulation_requirement,
@@ -74,24 +81,26 @@ class Project:
             "chunk_overlap": self.chunk_overlap,
             "error": self.error
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Project':
         """Create from dictionary"""
         status = data.get('status', 'created')
         if isinstance(status, str):
             status = ProjectStatus(status)
-        
+
         return cls(
             project_id=data['project_id'],
             name=data.get('name', 'Unnamed Project'),
             status=status,
             created_at=data.get('created_at', ''),
             updated_at=data.get('updated_at', ''),
+            current_step=data.get('current_step', 1),
             files=data.get('files', []),
             total_text_length=data.get('total_text_length', 0),
             ontology=data.get('ontology'),
             analysis_summary=data.get('analysis_summary'),
+            ontology_task_id=data.get('ontology_task_id'),
             graph_id=data.get('graph_id'),
             graph_build_task_id=data.get('graph_build_task_id'),
             simulation_requirement=data.get('simulation_requirement'),

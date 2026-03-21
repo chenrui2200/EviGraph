@@ -177,6 +177,14 @@ export const interviewAgents = (data) => {
 }
 
 /**
+ * Get interview historical records
+ * @param {Object} data - { simulation_id, platform?, agent_id?, limit? }
+ */
+export const getInterviewHistory = (data) => {
+  return service.post('/api/simulation/interview/history', data)
+}
+
+/**
  * Get simulation history list (with project details)
  * Used to display historical projects on home page
  * @param {number} limit - Return count limit

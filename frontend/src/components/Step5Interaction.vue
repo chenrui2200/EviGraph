@@ -405,7 +405,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { chatWithReport, getReport, getAgentLog } from '../api/report'
-import { interviewAgents, getSimulationProfilesRealtime } from '../api/simulation'
+import { interviewAgents, getSimulationProfilesRealtime, getInterviewHistory } from '../api/simulation'
 import { getProjectList } from '../api/graph'
 
 const props = defineProps({
@@ -918,9 +918,69 @@ const loadProfiles = async () => {
     if (res.success && res.data) {
       profiles.value = res.data.profiles || []
       addLog(`Loaded ${profiles.value.length} simulated individuals`)
+
+      // After profiles are loaded, we can map history to names if needed,
+      // but for now just load the history
+      await loadInterviewHistory()
     }
   } catch (err) {
     addLog(`Failed to load simulated individuals: ${err.message}`)
+  }
+}
+
+const loadInterviewHistory = async () => {
+  if (!props.simulationId) return
+
+  try {
+    const res = await getInterviewHistory({
+      simulation_id: props.simulationId,
+      limit: 100
+    })
+
+    if (res.success && res.data.history) {
+      // Group history by agent or just keep it global
+      // Step5Interaction uses chatHistory for current active chat
+      // and chatHistoryCache for other targets.
+
+      const history = res.data.history
+      const cache = {}
+
+      history.forEach(item => {
+        const key = `agent_${item.agent_id}`
+        if (!cache[key]) cache[key] = []
+
+        cache[key].push({
+          role: 'user',
+          content: item.prompt,
+          timestamp: item.timestamp
+        })
+
+        cache[key].push({
+          role: 'assistant',
+          content: item.response,
+          timestamp: item.timestamp
+        })
+      })
+
+      // Sort messages in each agent's history by timestamp
+      Object.keys(cache).forEach(key => {
+        cache[key].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+      })
+
+      chatHistoryCache.value = {
+        ...chatHistoryCache.value,
+        ...cache
+      }
+
+      // If an agent is already selected, update current chatHistory
+      if (chatTarget.value === 'agent' && selectedAgentIndex.value !== null) {
+        chatHistory.value = chatHistoryCache.value[`agent_${selectedAgentIndex.value}`] || []
+      }
+
+      addLog(`Loaded ${history.length} historical interview records`)
+    }
+  } catch (err) {
+    console.error('Failed to load interview history:', err)
   }
 }
 
