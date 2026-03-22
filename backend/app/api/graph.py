@@ -824,8 +824,8 @@ def ai_qa():
         # 2. LLM Answer
         facts_text = search_result.to_text()
 
-        system_prompt = "你是一个专业的知识库问答助手。请基于提供的知识库内容（事实和实体）回答用户的问题。如果知识库中没有相关信息，请明确告知用户。请保持回答的专业性、准确性和简洁性。"
-        user_prompt = f"### 知识库内容：\n{facts_text}\n\n### 用户问题：\n{query}\n\n请基于上述知识库内容进行回答："
+        system_prompt = "你是一个专业的知识库问答助手。你的任务是基于提供的【结构化知识事实】和【原始文档片段】回答用户的问题。\n\n回答原则：\n1. 优先从结构化事实中提取核心信息。\n2. 如果结构化事实不够详细，请参考原始文档片段（Original PDF Context）进行补充。\n3. 如果提供的知识库内容中确实没有相关信息，请明确告知用户：'根据目前的知识库，无法回答该问题'，不要捏造事实。\n4. 请在回答时引用来源（如：'根据[文档名, 页码]显示...'）。\n5. 保持专业、准确和简洁。"
+        user_prompt = f"### 知识库上下文 (Knowledge Base Context):\n{facts_text}\n\n### 用户当前问题 (User Query):\n{query}\n\n请严格基于上述知识库内容进行回答："
 
         from ..utils.llm_client import LLMClient
         llm = LLMClient()

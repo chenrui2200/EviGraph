@@ -44,13 +44,24 @@ class SearchResult:
         text_parts = [f"Search Query: {self.query}", f"Found {self.total_count} related results"]
 
         if self.facts:
-            text_parts.append("\n### Related Facts (with evidence tracing):")
+            text_parts.append("\n### 检索到的知识参考详情 (Retrieved Knowledge References):")
+
+            # Show each fact followed immediately by its raw context
             for i, fact_obj in enumerate(self.facts, 1):
                 text = fact_obj.get("text", "")
                 source = fact_obj.get("source", "Unknown")
                 page = fact_obj.get("page", "")
-                source_str = f" [Source: {source}{f', Page {page}' if page else ''}]"
+                raw_text = fact_obj.get("original_text", "")
+
+                source_str = f" [来源: {source}{f', 页码 {page}' if page else ''}]"
+
+                # Header: Fact + Source info
                 text_parts.append(f"{i}. {text}{source_str}")
+
+                # Context: Raw PDF Text if available
+                if raw_text:
+                    # Provide raw text to LLM to verify fact accuracy
+                    text_parts.append(f"{raw_text.strip()}\n")
 
         return "\n".join(text_parts)
 
@@ -473,28 +484,28 @@ class GraphToolsService:
                         if not isinstance(edge_ep_ids, list):
                             edge_ep_ids = [str(edge_ep_ids)]
 
+                        # Use first found source info
+                        original_text = ""
                         for ep_id in edge_ep_ids:
                             ep = episode_map.get(ep_id)
-                            if ep and ep.get("metadata"):
-                                meta = ep["metadata"]
-                                source = meta.get("source", "Unknown")
-                                page = meta.get("page")
-                                total_pages = meta.get("total_pages")
-                                bbox = meta.get("bbox")
-                                page_width = meta.get("page_width")
-                                page_height = meta.get("page_height")
+                            if ep:
+                                if ep.get("metadata"):
+                                    meta = ep["metadata"]
+                                    source = meta.get("source", "Unknown")
+                                    page = meta.get("page")
+                                    total_pages = meta.get("total_pages")
+                                    bbox = meta.get("bbox")
+                                    page_width = meta.get("page_width")
+                                    page_height = meta.get("page_height")
 
-                                # Advanced Context Construction: Wrap current fact with neighbors
-                                prev_ctx = meta.get("prev_context", "")
-                                next_ctx = meta.get("next_context", "")
-                                if prev_ctx or next_ctx:
-                                    contextual_fact = f"{fact}\n[Context context from same section: ...{prev_ctx[-200:] if prev_ctx else ''} {fact} {next_ctx[:200] if next_ctx else ''}...]"
-                                    fact = contextual_fact
-
-                                break # Use first found source info
+                                # Store the actual raw text from PDF chunk
+                                if ep.get("text"):
+                                    original_text = ep["text"]
+                                break
 
                         fact_obj = {
                             "text": fact,
+                            "original_text": original_text, # Explicitly store raw text
                             "source": source,
                             "page": page,
                             "total_pages": total_pages,
