@@ -83,6 +83,11 @@ CREATE FULLTEXT INDEX fact_fulltext IF NOT EXISTS
 FOR ()-[r:RELATION]-() ON EACH [r.fact, r.name]
 """
 
+CREATE_ENTITY_NAME_LOWER_INDEX = """
+CREATE INDEX entity_name_lower IF NOT EXISTS
+FOR (n:Entity) ON (n.name_lower)
+"""
+
 # All schema queries (as functions or constants)
 def get_all_schema_queries(dimension: int = 768) -> list:
     return [
@@ -92,6 +97,7 @@ def get_all_schema_queries(dimension: int = 768) -> list:
         CREATE_DOCUMENT_UUID_CONSTRAINT,
         CREATE_PAGE_UUID_CONSTRAINT,
         CREATE_ENTITY_GRAPH_ID_INDEX,
+        CREATE_ENTITY_NAME_LOWER_INDEX,
         CREATE_DOC_GRAPH_ID_INDEX,
         CREATE_PAGE_GRAPH_ID_INDEX,
         CREATE_EPISODE_GRAPH_ID_INDEX,

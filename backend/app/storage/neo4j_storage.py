@@ -328,7 +328,22 @@ class Neo4jStorage(GraphStorage):
 
                 def _merge_knowledge(tx, _name=ename, _type=etype, _attrs=attrs,
                                     _emb=embedding, _summary=summary_text, _ep_id=episode_id):
-                    # Merge Entity
+                    # 1. First get existing attributes if any
+                    existing = tx.run(
+                        "MATCH (n:Entity {graph_id: $gid, name_lower: $name_lower}) RETURN n.attributes_json AS attrs",
+                        gid=graph_id, name_lower=_name.lower()
+                    ).single()
+
+                    final_attrs = _attrs
+                    if existing and existing["attrs"]:
+                        try:
+                            old_attrs = json.loads(existing["attrs"])
+                            # Merge: new attributes override old ones
+                            final_attrs = {**old_attrs, **_attrs}
+                        except:
+                            pass
+
+                    # 2. Merge Entity
                     res = tx.run(
                         """
                         MERGE (n:Entity {graph_id: $gid, name_lower: $name_lower})
@@ -346,18 +361,17 @@ class Neo4jStorage(GraphStorage):
                         RETURN n.uuid AS uuid
                         """,
                         gid=graph_id, name_lower=_name.lower(), name=_name,
-                        summary=_summary, attrs_json=json.dumps(_attrs, ensure_ascii=False),
+                        summary=_summary, attrs_json=json.dumps(final_attrs, ensure_ascii=False),
                         embedding=_emb
                     )
                     e_uuid = res.single()["uuid"]
 
-                    # Link Episode -> Entity
+                    # Link Episode -> Entity (for source tracking)
                     tx.run(
                         """
                         MATCH (n:Entity {uuid: $e_uuid}), (ep:Episode {uuid: $ep_id})
                         MERGE (ep)-[r:MENTIONS]->(n)
                         ON CREATE SET r.graph_id = $gid
-                        ON MATCH SET r.graph_id = $gid
                         """,
                         e_uuid=e_uuid, ep_id=_ep_id, gid=graph_id
                     )
@@ -371,7 +385,7 @@ class Neo4jStorage(GraphStorage):
                 actual_uuid = self._call_with_retry(session.execute_write, _merge_knowledge)
                 entity_uuid_map[ename.lower()] = actual_uuid
 
-            # Create relations
+            # Create or Merge relations
             for idx, relation in enumerate(relations):
                 s_name = relation["source"]
                 t_name = relation["target"]
@@ -383,24 +397,43 @@ class Neo4jStorage(GraphStorage):
                 if s_uuid and t_uuid:
                     fact_emb = relation_embeddings[idx] if idx < len(relation_embeddings) else []
 
-                    def _create_rel(tx, _suid=s_uuid, _tuid=t_uuid, _rt=r_type, _f=fact, _fe=fact_emb):
+                    def _merge_rel(tx, _suid=s_uuid, _tuid=t_uuid, _rt=r_type, _f=fact, _fe=fact_emb, _ep_id=episode_id):
+                        # 1. Check for existing relation to merge episode_ids
+                        existing_rel = tx.run(
+                            """
+                            MATCH (src:Entity {uuid: $suid})-[r:RELATION {graph_id: $gid, name: $name}]->(tgt:Entity {uuid: $tuid})
+                            RETURN r.episode_ids AS ep_ids
+                            """,
+                            suid=_suid, tuid=_tuid, gid=graph_id, name=_rt
+                        ).single()
+
+                        new_ep_ids = [_ep_id]
+                        if existing_rel and existing_rel["ep_ids"]:
+                            old_ep_ids = existing_rel["ep_ids"]
+                            if _ep_id not in old_ep_ids:
+                                new_ep_ids = old_ep_ids + [_ep_id]
+                            else:
+                                new_ep_ids = old_ep_ids
+
+                        # 2. MERGE relationship between entities based on type and graph
                         tx.run(
                             """
                             MATCH (src:Entity {uuid: $suid}), (tgt:Entity {uuid: $tuid})
-                            CREATE (src)-[r:RELATION {
-                                uuid: randomUUID(),
-                                graph_id: $gid,
-                                name: $name,
-                                fact: $fact,
-                                fact_embedding: $fact_embedding,
-                                episode_ids: [$ep_id],
-                                created_at: datetime()
-                            }]->(tgt)
+                            MERGE (src)-[r:RELATION {graph_id: $gid, name: $name}]->(tgt)
+                            ON CREATE SET
+                                r.uuid = randomUUID(),
+                                r.fact = $fact,
+                                r.fact_embedding = $fact_embedding,
+                                r.episode_ids = $ep_ids,
+                                r.created_at = datetime()
+                            ON MATCH SET
+                                r.episode_ids = $ep_ids,
+                                r.fact = CASE WHEN r.fact = '' OR r.fact IS NULL THEN $fact ELSE r.fact END
                             """,
                             suid=_suid, tuid=_tuid, gid=graph_id, name=_rt,
-                            fact=_f, fact_embedding=_fe, ep_id=episode_id
+                            fact=_f, fact_embedding=_fe, ep_ids=new_ep_ids
                         )
-                    self._call_with_retry(session.execute_write, _create_rel)
+                    self._call_with_retry(session.execute_write, _merge_rel)
 
         logger.info(f"[add_text] Knowledge update done for episode {episode_id[:8]}")
         return episode_id
@@ -679,14 +712,14 @@ class Neo4jStorage(GraphStorage):
     def get_graph_data(self, graph_id: str) -> Dict[str, Any]:
         """
         Full graph dump with enriched edge format (for frontend).
-        Includes Entity, Document, Page, and Episode nodes for a complete view.
+        Focuses on semantic Entities and their Relationships.
+        Structural nodes (Document, Page, Episode) are included only as context.
         """
         def _read(tx):
-            # Get all relevant nodes (Entities, Documents, Pages, Episodes)
+            # 1. Get semantic nodes (Entities) and their labels
             node_result = tx.run(
                 """
-                MATCH (n {graph_id: $gid})
-                WHERE n:Entity OR n:Document OR n:Page OR n:Episode
+                MATCH (n:Entity {graph_id: $gid})
                 RETURN n, labels(n) AS labels
                 """,
                 gid=graph_id,
@@ -695,28 +728,15 @@ class Neo4jStorage(GraphStorage):
             node_map: Dict[str, str] = {}  # uuid -> name
             for record in node_result:
                 nd = self._node_to_dict(record["n"], record["labels"])
-                # Fallback name for Page and Episode nodes
-                if "Page" in record["labels"] and not nd.get("name"):
-                    nd["name"] = f"Page {record['n'].get('number', '?')}"
-                elif "Episode" in record["labels"] and not nd.get("name"):
-                    # Use a short preview of the text for Episode name
-                    text_preview = (record['n'].get('data') or "")[:30].replace('\n', ' ')
-                    nd["name"] = f"Chunk: {text_preview}..."
-
                 nodes.append(nd)
                 node_map[nd["uuid"]] = nd.get("name") or "Unnamed"
 
-            # Get all edges with source/target node names (JOIN)
+            # 2. Get semantic relationships between entities
             edge_result = tx.run(
                 """
-                MATCH (src)-[r {graph_id: $gid}]->(tgt)
-                WHERE (src:Entity OR src:Document OR src:Page OR src:Episode)
-                  AND (tgt:Entity OR tgt:Document OR tgt:Page OR tgt:Episode)
+                MATCH (src:Entity {graph_id: $gid})-[r:RELATION]->(tgt:Entity {graph_id: $gid})
                 RETURN r, src.uuid AS src_uuid, tgt.uuid AS tgt_uuid,
                        src.name AS src_name, tgt.name AS tgt_name,
-                       labels(src) AS src_labels, labels(tgt) AS tgt_labels,
-                       src.number AS src_num, tgt.number AS tgt_num,
-                       src.data AS src_data, tgt.data AS tgt_data,
                        type(r) AS rel_type
                 """,
                 gid=graph_id,
@@ -724,29 +744,9 @@ class Neo4jStorage(GraphStorage):
             edges = []
             for record in edge_result:
                 ed = self._edge_to_dict(record["r"], record["src_uuid"], record["tgt_uuid"])
-
-                # Enriched fields for frontend
                 ed["fact_type"] = ed.get("name") or record["rel_type"]
-
-                # Handle names for structural nodes
-                src_name = record["src_name"]
-                if not src_name:
-                    if "Page" in record["src_labels"]:
-                        src_name = f"Page {record['src_num']}"
-                    elif "Episode" in record["src_labels"]:
-                        src_name = f"Chunk: {(record['src_data'] or '')[:20]}..."
-
-                tgt_name = record["tgt_name"]
-                if not tgt_name:
-                    if "Page" in record["tgt_labels"]:
-                        tgt_name = f"Page {record['tgt_num']}"
-                    elif "Episode" in record["tgt_labels"]:
-                        tgt_name = f"Chunk: {(record['tgt_data'] or '')[:20]}..."
-
-                ed["source_node_name"] = src_name or ""
-                ed["target_node_name"] = tgt_name or ""
-
-                # Legacy alias
+                ed["source_node_name"] = record["src_name"] or "Unnamed"
+                ed["target_node_name"] = record["tgt_name"] or "Unnamed"
                 ed["episodes"] = ed.get("episode_ids", [])
                 edges.append(ed)
 

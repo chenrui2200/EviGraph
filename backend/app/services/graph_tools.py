@@ -467,6 +467,7 @@ class GraphToolsService:
                         source = "Unknown"
                         page = None
                         total_pages = None
+                        bbox = None
 
                         edge_ep_ids = edge.get('episode_ids', [])
                         if not isinstance(edge_ep_ids, list):
@@ -479,7 +480,7 @@ class GraphToolsService:
                                 source = meta.get("source", "Unknown")
                                 page = meta.get("page")
                                 total_pages = meta.get("total_pages")
-                                bbox = meta.get("bbox") # Extract new bbox field
+                                bbox = meta.get("bbox")
                                 break # Use first found source info
 
                         fact_obj = {
@@ -487,7 +488,7 @@ class GraphToolsService:
                             "source": source,
                             "page": page,
                             "total_pages": total_pages,
-                            "bbox": bbox, # Pass bbox to response
+                            "bbox": bbox,
                             "graph_id": graph_id
                         }
                         facts.append(fact_obj)
@@ -511,8 +512,9 @@ class GraphToolsService:
 
             for node in node_list:
                 if isinstance(node, dict):
+                    node_uuid = node.get('uuid', '')
                     nodes.append({
-                        "uuid": node.get('uuid', ''),
+                        "uuid": node_uuid,
                         "name": node.get('name', ''),
                         "labels": node.get('labels', []),
                         "summary": node.get('summary', ''),
@@ -520,12 +522,27 @@ class GraphToolsService:
                     summary = node.get('summary', '')
                     if summary:
                         facts.append({
-                            "text": summary,
-                            "source": "Graph Knowledge",
+                            "text": f"Entity Knowledge: {node.get('name', '')} - {summary}",
+                            "source": "Knowledge Graph",
                             "page": None,
                             "graph_id": graph_id,
                             "entity_name": node.get('name', '')
                         })
+
+                    # Path Extension: Also pull some top relations for this node to provide context
+                    if node_uuid and len(facts) < limit * 2:
+                        try:
+                            node_rels = self.storage.get_node_edges(node_uuid)
+                            for rel in node_rels[:3]: # Add up to 3 context relations
+                                if rel.get('fact'):
+                                    facts.append({
+                                        "text": f"Contextual Fact: {rel['fact']}",
+                                        "source": "Graph Path Extension",
+                                        "page": None,
+                                        "graph_id": graph_id
+                                    })
+                        except:
+                            pass
 
             logger.info(f"Search complete: Found {len(facts)} related facts")
 
