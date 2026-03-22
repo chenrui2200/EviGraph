@@ -412,23 +412,54 @@ def split_text_into_chunks(
     overlap: int = 50
 ) -> List[str]:
     """
-    Legacy text splitter (string to string list)
+    Enhanced text splitter for engineering standards.
+    Priority:
+    1. Split by clause patterns (e.g., 3.1.1, 第x.x条)
+    2. Split by double newlines (paragraphs)
+    3. Split by standard sentence ends
     """
+    import re
+
+    # Pattern for clause headers: 1.1.1, 3.2, 第五条, etc.
+    # Matches digits at start of line or after double newline
+    clause_pattern = r'(?:\n\n|^)(\d+\.\d+(?:\.\d+)?)\s+'
+
     if len(text) <= chunk_size:
         return [text] if text.strip() else []
 
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        if end < len(text):
-            for sep in ['。', '！', '？', '.\n', '!\n', '?\n', '\n\n', '. ', '! ', '? ']:
-                last_sep = text[start:end].rfind(sep)
-                if last_sep != -1 and last_sep > chunk_size * 0.3:
-                    end = start + last_sep + len(sep)
-                    break
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        start = end - overlap if end < len(text) else len(text)
-    return chunks
+    # First, try to identify positions of clause headers
+    # We use these as "hard" break points to avoid cutting a rule in half
+    break_points = [0]
+    for match in re.finditer(clause_pattern, text):
+        break_points.append(match.start())
+    break_points.append(len(text))
+
+    # Refine break points to ensure chunks are within reasonable size
+    # If a section between two clause headers is too long, we use standard splitters
+    refined_chunks = []
+    for i in range(len(break_points) - 1):
+        section = text[break_points[i]:break_points[i+1]].strip()
+        if not section:
+            continue
+
+        if len(section) <= chunk_size * 1.5:
+            refined_chunks.append(section)
+        else:
+            # Section too long, split further using standard logic
+            start = 0
+            while start < len(section):
+                end = start + chunk_size
+                if end < len(section):
+                    # Try to find a good separator within the look-back window
+                    for sep in ['\n\n', '。', '！', '？', '.\n', '?\n', '. ']:
+                        last_sep = section[start:end].rfind(sep)
+                        if last_sep != -1 and last_sep > chunk_size * 0.4:
+                            end = start + last_sep + len(sep)
+                            break
+
+                chunk = section[start:end].strip()
+                if chunk:
+                    refined_chunks.append(chunk)
+                start = end - overlap if end < len(section) else len(section)
+
+    return refined_chunks

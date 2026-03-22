@@ -208,38 +208,46 @@ class SearchService:
         limit: int,
     ) -> List[Dict[str, Any]]:
         """
-        Merge vector and keyword results with weighted scoring.
-
-        Normalizes scores to [0, 1] range before combining.
+        Merge vector and keyword results using Reciprocal Rank Fusion (RRF).
+        RRF is robust against different score scales and prioritizes items
+        that appear high in both result sets.
         """
-        # Normalize vector scores
-        v_max = max((r["_score"] for r in vector_results), default=1.0) or 1.0
-        v_scores = {r[key]: r["_score"] / v_max for r in vector_results}
+        k_rrf = 60  # Standard constant for RRF
 
-        # Normalize keyword scores
-        k_max = max((r["_score"] for r in keyword_results), default=1.0) or 1.0
-        k_scores = {r[key]: r["_score"] / k_max for r in keyword_results}
+        # Map to store combined info and RRF score
+        combined_map: Dict[str, Dict[str, Any]] = {}
 
-        # Build combined result map
-        all_items: Dict[str, Dict[str, Any]] = {}
-        for r in vector_results:
-            all_items[r[key]] = {k: v for k, v in r.items() if k != "_score"}
-        for r in keyword_results:
-            if r[key] not in all_items:
-                all_items[r[key]] = {k: v for k, v in r.items() if k != "_score"}
+        # Process vector results (rank is index + 1)
+        for rank, res in enumerate(vector_results, 1):
+            uid = res[key]
+            if uid not in combined_map:
+                combined_map[uid] = {k: v for k, v in res.items() if k != "_score"}
+                combined_map[uid]["rrf_score"] = 0.0
+            combined_map[uid]["rrf_score"] += 1.0 / (k_rrf + rank)
 
-        # Calculate hybrid scores
-        scored = []
-        for uid, item in all_items.items():
-            v = v_scores.get(uid, 0.0)
-            k = k_scores.get(uid, 0.0)
-            combined = self.VECTOR_WEIGHT * v + self.KEYWORD_WEIGHT * k
-            item["score"] = combined
-            scored.append(item)
+        # Process keyword results
+        for rank, res in enumerate(keyword_results, 1):
+            uid = res[key]
+            if uid not in combined_map:
+                combined_map[uid] = {k: v for k, v in res.items() if k != "_score"}
+                combined_map[uid]["rrf_score"] = 0.0
+            combined_map[uid]["rrf_score"] += 1.0 / (k_rrf + rank)
 
-        # Sort by combined score descending
-        scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        # Sort by RRF score descending
+        sorted_items = sorted(
+            combined_map.values(),
+            key=lambda x: x["rrf_score"],
+            reverse=True
+        )
+
+        # Return top results with normalized score
+        results = sorted_items[:limit]
+        if results:
+            max_rrf = results[0]["rrf_score"]
+            for r in results:
+                r["score"] = r["rrf_score"] / max_rrf
+
+        return results
 
     @staticmethod
     def _escape_lucene(query: str) -> str:

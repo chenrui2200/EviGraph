@@ -261,8 +261,27 @@ class Neo4jStorage(GraphStorage):
                 if metadata:
                     filename = metadata.get("source")
                     page_num = metadata.get("page")
+                    chunk_idx = metadata.get("chunk_index", 0)
                     if filename:
                         doc_uuid = self._ensure_document(tx, graph_id, filename)
+
+                        # Sequential linking: Link current episode to the previous one in the same document
+                        if chunk_idx > 0:
+                            tx.run(
+                                """
+                                MATCH (prev:Episode {graph_id: $gid})
+                                WHERE prev.metadata_json CONTAINS $filename
+                                  AND prev.metadata_json CONTAINS $prev_idx_str
+                                MATCH (curr:Episode {uuid: $curr_uuid})
+                                MERGE (prev)-[r:NEXT_EPISODE]->(curr)
+                                ON CREATE SET r.graph_id = $gid
+                                """,
+                                gid=graph_id,
+                                filename=f'"source": "{filename}"',
+                                prev_idx_str=f'"chunk_index": {chunk_idx - 1}',
+                                curr_uuid=episode_id
+                            )
+
                         if page_num:
                             page_uuid = self._ensure_page(tx, graph_id, doc_uuid, page_num)
                             tx.run(
@@ -379,6 +398,28 @@ class Neo4jStorage(GraphStorage):
                     # Add label
                     if _type and _type != "Entity":
                         tx.run(f"MATCH (n:Entity {{uuid: $uuid}}) SET n:`{_type}`", uuid=e_uuid)
+
+                    # 3. Auto-Hierarchy for Clauses
+                    import re
+                    clause_match = re.match(r'^(\d+\.\d+)\.\d+$', _name) # matches 3.1.1
+                    if clause_match:
+                        parent_name = clause_match.group(1)
+                        # Create/Link to parent clause automatically
+                        tx.run(
+                            """
+                            MERGE (p:Entity {graph_id: $gid, name_lower: $p_name_lower})
+                            ON CREATE SET
+                                p.uuid = randomUUID(),
+                                p.name = $p_name,
+                                p.created_at = datetime()
+                            WITH p
+                            MATCH (c:Entity {uuid: $c_uuid})
+                            MERGE (c)-[r:SUB_CLAUSE_OF]->(p)
+                            ON CREATE SET r.graph_id = $gid
+                            """,
+                            gid=graph_id, p_name_lower=parent_name.lower(), p_name=parent_name,
+                            c_uuid=e_uuid
+                        )
 
                     return e_uuid
 
@@ -579,6 +620,7 @@ class Neo4jStorage(GraphStorage):
 
         def _read(tx):
             # Enriched query to get document and page info via relationships
+            # Also get adjacent episodes for context
             result = tx.run(
                 """
                 MATCH (ep:Episode)
@@ -586,8 +628,12 @@ class Neo4jStorage(GraphStorage):
                 OPTIONAL MATCH (p:Page)-[:HAS_EPISODE]->(ep)
                 OPTIONAL MATCH (d:Document)-[:HAS_PAGE]->(p)
                 OPTIONAL MATCH (d2:Document)-[:HAS_EPISODE]->(ep)
+                OPTIONAL MATCH (prev:Episode)-[:NEXT_EPISODE]->(ep)
+                OPTIONAL MATCH (ep)-[:NEXT_EPISODE]->(next:Episode)
                 RETURN ep, p.number AS page_num,
-                       coalesce(d.name, d2.name) AS doc_name
+                       coalesce(d.name, d2.name) AS doc_name,
+                       prev.data AS prev_text,
+                       next.data AS next_text
                 """,
                 uuids=episode_uuids,
             )
@@ -611,6 +657,10 @@ class Neo4jStorage(GraphStorage):
                     metadata["source"] = record["doc_name"]
                 if record["page_num"]:
                     metadata["page"] = record["page_num"]
+
+                # Include context in metadata
+                metadata["prev_context"] = record["prev_text"]
+                metadata["next_context"] = record["next_text"]
 
                 episodes.append({
                     "uuid": props.get("uuid"),

@@ -14,34 +14,37 @@ from ..utils.llm_client import LLMClient
 
 logger = logging.getLogger('mirofish.ner_extractor')
 
-# System prompt template for NER/RE extraction
-_SYSTEM_PROMPT = """You are a high-precision Knowledge Extraction Engine specializing in **Social Persona Reconstruction**.
-Your task is to transform unstructured text into a structured graph that represents a "Simulatable World".
+# Core system prompt components
+_BASE_INSTRUCTION = """You are a high-precision Knowledge Extraction Engine. Your task is to transform unstructured text into a structured graph based on the provided ontology.
 
 ## 📚 Context: The Ontology
 You MUST strictly adhere to the following ontology. If an entity or relation doesn't fit, use fallback types or discard it.
 {ontology_description}
 
 ## 🛠 Extraction Rules
+1. **Canonical Naming**: Use official full names. Instead of "the equipment", use "Circuit Breaker (Model X)".
+2. **Strict Relation Extraction**: Relationship `type` MUST be one of the names defined in the Relation Types list above.
+3. **High-Quality "Fact" Sentences**: The `fact` field must be a clear, self-contained sentence explaining the EXACT nature of the connection.
+4. **Resolution**: DO NOT use pronouns (he, she, they, it). Resolve them to full entity names.
+"""
 
-1. **Entity Reconstruction (Actors Only)**:
-   - Only extract entities that can be "Actors" (individuals, organizations, media, etc.).
-   - **Canonical Naming**: Use official full names. Instead of "the CEO", use "John Doe (CEO of X)".
-   - **Persona Attributes**: Focus on attributes that define their behavior: `social_status`, `bias`, `expertise`, `vulnerability`.
+_SOCIAL_MODE_PROMPT = """
+## 🎭 Domain Mode: Social Persona Reconstruction
+- **Focus**: Individuals, organizations, and their interactions.
+- **Actor Guideline**: Only extract entities that can be "Actors" (voice opinions, own accounts).
+- **Negative Constraints**: DO NOT extract abstract concepts like "Safety" or "Risk".
+"""
 
-2. **Strict Relation Extraction**:
-   - Relationship `type` MUST be one of the names defined in the Relation Types list above.
-   - **Attitudinal Facts**: If the text shows how one entity feels about another (support, hate, doubt), extract it using the corresponding relationship type.
+_ENGINEERING_MODE_PROMPT = """
+## ⚙️ Domain Mode: Engineering & Logic Specification
+- **Exhaustive Extraction**: Capture ALL technical entities mentioned. Do not group distinct components (e.g., "Transformer", "Switch") into a single "Equipment" type if the ontology allows for specificity.
+- **Structural Integrity**: Ensure clause numbers (e.g., "3.1.1") are captured as part of names or attributes.
+- **Hierarchy Detection**: If the text indicates a containment or parent-child relationship (e.g., "Section 3 includes Clause 3.1", "The panel contains a breaker"), EXPLICITLY extract this as a relationship (e.g., `SUB_CLAUSE_OF`, `PART_OF`).
+- **Logical Chaining**: Extract relationships like "REFERENCES", "CONSTRAINS", or "REQUIRES" even if they involve abstract concepts.
+- **Parameter Precision**: Capture units (A, V, m) and limit types (min/max) accurately.
+"""
 
-3. **High-Quality "Fact" Sentences**:
-   - The `fact` field must be a clear, self-contained English or Chinese sentence (depending on the source text) explaining the EXACT nature of the connection.
-   - Example: "John Doe publicly criticized MiroFish Corp for their data privacy policy."
-
-4. **Negative Constraints (Strictly Forbidden)**:
-   - DO NOT extract abstract concepts like "Safety", "Risk", or "Public Opinion" as entities.
-   - DO NOT extract structural metadata (e.g., "Page 5", "Document X").
-   - DO NOT use pronouns (he, she, they) in the graph. Resolve them to full names.
-
+_OUTPUT_FORMAT = """
 ## 📥 Output Format
 Return ONLY valid JSON:
 {{
@@ -49,7 +52,7 @@ Return ONLY valid JSON:
     {{"name": "Full Name", "type": "OntologyType", "attributes": {{"key": "value"}}}}
   ],
   "relations": [
-    {{"source": "Full Name", "target": "Full Name", "type": "ONTOLOGY_TYPE", "fact": "Detailed context of the relationship."}}
+    {{"source": "Full Name", "target": "Full Name", "type": "ONTOLOGY_TYPE", "fact": "Detailed context."}}
   ]
 }}"""
 
@@ -83,9 +86,17 @@ class NERExtractor:
         if not text or not text.strip():
             return {"entities": [], "relations": []}
 
+        # Detect mode based on ontology types
+        entity_names = [str(et.get('name') if isinstance(et, dict) else et).lower()
+                       for et in ontology.get('entity_types', [])]
+        is_engineering = any(name in entity_names for name in ['clause', 'parameter', 'equipment', 'requirement', 'component'])
+
         ontology_desc = self._format_ontology(ontology)
-        logger.debug(f"Ontology description for LLM: {ontology_desc}")
-        system_msg = _SYSTEM_PROMPT.format(ontology_description=ontology_desc)
+
+        # Assemble system prompt
+        domain_prompt = _ENGINEERING_MODE_PROMPT if is_engineering else _SOCIAL_MODE_PROMPT
+        system_msg = _BASE_INSTRUCTION.format(ontology_description=ontology_desc) + domain_prompt + _OUTPUT_FORMAT
+
         user_msg = _USER_PROMPT.format(text=text.strip())
 
         messages = [
@@ -96,7 +107,7 @@ class NERExtractor:
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
-                logger.info(f"Calling LLM for NER extraction (attempt {attempt + 1})...")
+                logger.info(f"Calling LLM for {'Engineering' if is_engineering else 'Social'} NER extraction (attempt {attempt + 1})...")
                 result = self.llm.chat_json(
                     messages=messages,
                     temperature=0.1,  # Low temp for extraction precision

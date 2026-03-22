@@ -82,6 +82,37 @@ We are building a **Social Media Opinion Simulation System**. To make this effec
 """
 
 
+# System prompt for ontology generation (Engineering Standard Mode)
+ENGINEERING_ONTOLOGY_PROMPT = """You are a professional knowledge graph ontology design expert specializing in **Industrial Engineering Standards and Technical Specifications**.
+
+Your task is to analyze engineering documents (like Power Distribution Codes) and design a schema (Ontology) that captures the rigorous logic of technical requirements.
+
+**Important: You must output valid JSON format data, do not output anything else.**
+
+## 🎯 Design Goal: Structural Knowledge for Reasoning
+We are building an **Engineering Design Assistant**. Every entity and relation must support logical deduction.
+
+**Exhaustive Extraction**: Aim for maximum granularity. Do not group distinct technical concepts into broad categories. If the text distinguishes between "Circuit Breaker" and "Fuse", define them as separate types if they have different logic.
+
+### 1. Entity Guidelines
+- **Structural Nodes**: `Clause`, `Section`, `Chapter`.
+- **Physical/Technical Entities**: Specific equipment types (e.g., `Switchgear`, `Transformer`), materials, specific components.
+- **Logic & Constraints**: `Parameter` (e.g., Voltage), `Condition`, `Scenario`, `Threshold`.
+- **Hierarchical Thinking**: Define entities at multiple levels.
+
+### 2. Relationship Guidelines
+- **Hierarchy (CRITICAL)**: Must include `SUB_CLAUSE_OF`, `PART_OF`, `MEMBER_OF`, `CHILD_OF`.
+- **Logical Flow**: `REFERENCES`, `APPLIES_TO`, `CONSTRAINS`, `DETERMINES`.
+
+## 📋 Output Format (JSON)
+[Same JSON structure as standard mode]
+
+## 📏 Strict Design Constraints
+1. **Quantity**: Define **at least 15 and up to 30** specific entity types to ensure no knowledge loss.
+2. **Standard Fallbacks**: Last 2 must be `Person` and `Organization`.
+3. **Hierarchy Focus**: At least 3 relationship types must represent hierarchical containment.
+"""
+
 class OntologyGenerator:
     """
     Ontology generator
@@ -98,17 +129,21 @@ class OntologyGenerator:
         additional_context: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Generate ontology definition
-
-        Args:
-            document_texts: List of document texts
-            simulation_requirement: Description of simulation requirements
-            additional_context: Additional context
-
-        Returns:
-            Ontology definition (entity_types, edge_types, etc.)
+        Generate ontology definition by first detecting the domain.
         """
-        # Build user message
+        # Step 1: Smart Domain Detection via LLM
+        domain = self._detect_domain(document_texts[:3], simulation_requirement)
+
+        # Step 2: Select Prompt Strategy
+        prompt_map = {
+            "engineering": ENGINEERING_ONTOLOGY_PROMPT,
+            "social": ONTOLOGY_SYSTEM_PROMPT
+        }
+
+        system_prompt = prompt_map.get(domain, ONTOLOGY_SYSTEM_PROMPT)
+        logger.info(f"Detected domain: {domain}. Selecting strategy with high granularity...")
+
+        # Step 3: Build user message
         user_message = self._build_user_message(
             document_texts,
             simulation_requirement,
@@ -116,13 +151,13 @@ class OntologyGenerator:
         )
 
         messages = [
-            {"role": "system", "content": ONTOLOGY_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message}
         ]
 
         # Call LLM
         try:
-            logger.info(f"Calling LLM ({self.llm_client.model}) for ontology generation...")
+            logger.info(f"Calling LLM ({self.llm_client.model}) for exhaustive {domain} ontology generation...")
             result = self.llm_client.chat_json(
                 messages=messages,
                 temperature=0.3,
@@ -136,6 +171,37 @@ class OntologyGenerator:
         result = self._validate_and_process(result)
 
         return result
+
+    def _detect_domain(self, samples: List[str], requirement: str) -> str:
+        """
+        Classify the document domain using a fast LLM call.
+        """
+        classification_prompt = """You are a document classifier. Identify the primary domain of this project based on the requirement and text samples.
+
+Choices:
+- 'engineering': Technical standards, codes, equipment, parameters, physical logic.
+- 'social': People, organizations, public opinion, interactions.
+
+Respond with ONLY the choice name.
+"""
+
+        sample_text = "\n".join(samples)[:2000]
+        user_msg = f"Requirement: {requirement}\n\nSample Text: {sample_text}"
+
+        try:
+            domain = self.llm_client.chat(
+                messages=[
+                    {"role": "system", "content": classification_prompt},
+                    {"role": "user", "content": user_msg}
+                ],
+                temperature=0,
+                max_tokens=10
+            ).strip().lower()
+
+            if "engineering" in domain: return "engineering"
+            return "social"
+        except:
+            return "social"
 
     # Maximum text length for LLM (50,000 characters)
     MAX_TEXT_LENGTH_FOR_LLM = 50000
@@ -199,18 +265,16 @@ class OntologyGenerator:
 """
 
         message += """
-Based on the above content, design entity types and relationship types suitable for social opinion simulation.
-
+Based on the above content, design entity types and relationship types.
 **Rules to follow**:
-1. Must output exactly 10 entity types
-2. Last 2 must be fallback types: Person (individual fallback) and Organization (organization fallback)
-3. First 8 are specific types designed based on text content
-4. All entity types must be real-world subjects that can voice opinions, not abstract concepts
-5. Attribute names cannot use reserved words like name, uuid, group_id, use full_name, org_name, etc. instead
+1. Define at least 15 specific entity types to capture details.
+2. Last 2 must be Person and Organization.
+3. Include relationship types for hierarchy (e.g., SUB_CLAUSE_OF, PART_OF).
+4. All types must be real subjects or logical concepts, not metadata.
 """
 
         return message
-    
+
     def _validate_and_process(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Validate and post-process result"""
 
@@ -264,9 +328,9 @@ Based on the above content, design entity types and relationship types suitable 
             if len(edge.get("description", "")) > 100:
                 edge["description"] = edge["description"][:97] + "..."
 
-        # Zep API limit: maximum 10 custom entity types, maximum 10 custom edge types
-        MAX_ENTITY_TYPES = 10
-        MAX_EDGE_TYPES = 10
+        # NEW LIMIT: Up to 30 custom entity types, maximum 20 custom edge types
+        MAX_ENTITY_TYPES = 30
+        MAX_EDGE_TYPES = 20
 
         # Fallback type definitions
         person_fallback = {
@@ -305,7 +369,7 @@ Based on the above content, design entity types and relationship types suitable 
             current_count = len(result["entity_types"])
             needed_slots = len(fallbacks_to_add)
 
-            # If adding would exceed 10, need to remove some existing types
+            # If adding would exceed max, need to remove some existing types
             if current_count + needed_slots > MAX_ENTITY_TYPES:
                 # Calculate how many to remove
                 to_remove = current_count + needed_slots - MAX_ENTITY_TYPES
@@ -315,7 +379,7 @@ Based on the above content, design entity types and relationship types suitable 
             # Add fallback types
             result["entity_types"].extend(fallbacks_to_add)
 
-        # Final check to ensure limits not exceeded (defensive programming)
+        # Final check to ensure limits not exceeded
         if len(result["entity_types"]) > MAX_ENTITY_TYPES:
             result["entity_types"] = result["entity_types"][:MAX_ENTITY_TYPES]
 
