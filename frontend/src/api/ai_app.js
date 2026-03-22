@@ -49,3 +49,31 @@ export function deleteApp(appId) {
     method: 'delete'
   })
 }
+
+/**
+ * Publish/Unpublish AI Application
+ * @param {String} appId
+ * @param {Boolean} published
+ * @returns {Promise}
+ */
+export function publishApp(appId, published = true) {
+  return service({
+    url: `/api/ai-app/publish/${appId}`,
+    method: 'post',
+    data: { published }
+  })
+}
+
+/**
+ * Execute AI Application via API (Mock/Test)
+ * @param {String} appId
+ * @param {String} query
+ * @returns {Promise}
+ */
+export function executeAppApi(appId, query) {
+  return service({
+    url: `/api/ai-app/execute/${appId}`,
+    method: 'post',
+    data: { query }
+  })
+}

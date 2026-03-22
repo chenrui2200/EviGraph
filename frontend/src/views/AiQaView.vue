@@ -9,8 +9,8 @@
             v-if="isEditingAppName"
             v-model="appName"
             ref="appNameInput"
-            @blur="isEditingAppName = false"
-            @keyup.enter="isEditingAppName = false"
+            @blur="handleAppNameBlur"
+            @keyup.enter="handleAppNameBlur"
             class="app-name-input"
           />
           <span v-else class="view-title" @click="toggleEditAppName">
@@ -19,6 +19,13 @@
         </div>
       </div>
       <div class="header-right">
+        <button class="action-btn publish-btn" :class="{ 'published': isPublished }" :disabled="publishing || !appId" @click="handlePublish">
+          <span v-if="!publishing">{{ isPublished ? '🌐 已发布' : '🚀 发布 API' }}</span>
+          <span v-else class="spinner-sm"></span>
+        </button>
+        <button v-if="isPublished" class="icon-btn info-btn" @click="showApiModal = true" title="查看 API 文档">
+          ℹ️
+        </button>
         <button class="action-btn save-btn" :disabled="saving" @click="saveWorkflowApp">
           <span v-if="!saving">💾 保存应用</span>
           <span v-else class="spinner-sm"></span>
@@ -324,6 +331,70 @@
         </div>
       </div>
     </div>
+
+    <!-- API Publish Details & Mock Test Modal -->
+    <div v-if="showApiModal" class="modal-overlay" @click.self="showApiModal = false">
+      <div class="api-modal">
+        <div class="modal-header">
+          <h3><span class="header-icon">🌐</span> API 服务发布详情</h3>
+          <button class="close-btn" @click="showApiModal = false">×</button>
+        </div>
+        <div class="modal-body api-modal-body">
+          <div class="api-tabs">
+            <div class="api-section">
+              <div class="section-title">接口调用说明</div>
+              <div class="api-info-card">
+                <div class="info-row">
+                  <span class="info-label">接口地址:</span>
+                  <code class="info-value">{{ apiBaseUrl }}</code>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">请求方法:</span>
+                  <span class="info-value method-tag">POST</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">Content-Type:</span>
+                  <code class="info-value">application/json</code>
+                </div>
+              </div>
+
+              <div class="code-block-wrapper">
+                <div class="code-header">请求参数示例 (JSON)</div>
+                <pre class="code-content">{
+  "query": "这里输入您的查询问题..."
+}</pre>
+              </div>
+
+              <div class="code-block-wrapper">
+                <div class="code-header">Curl 调用示例</div>
+                <pre class="code-content">curl -X POST {{ apiBaseUrl }} \
+     -H "Content-Type: application/json" \
+     -d '{"query": "您的问题"}'</pre>
+              </div>
+            </div>
+
+            <div class="api-section mock-test-section">
+              <div class="section-title">Mock 接口测试</div>
+              <div class="mock-input-group">
+                <textarea v-model="mockQuery" placeholder="输入测试问题..." class="mock-textarea"></textarea>
+                <button class="action-btn run-btn" :disabled="mockLoading || !mockQuery" @click="runMockTest">
+                  <span v-if="!mockLoading">发送请求</span>
+                  <span v-else class="spinner-sm"></span>
+                </button>
+              </div>
+
+              <div v-if="mockResult" class="mock-result-area">
+                <div class="code-header">响应结果 (Response)</div>
+                <pre class="code-content result-pre" :class="{ 'error': mockResult.error }">{{ JSON.stringify(mockResult, null, 2) }}</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="action-btn" @click="showApiModal = false">关闭</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -331,7 +402,7 @@
 import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { getProjectList, aiQa, updateProject } from '../api/graph'
-import { saveApp, getApp } from '../api/ai_app'
+import { saveApp, getApp, publishApp, executeAppApi } from '../api/ai_app'
 
 const router = useRouter()
 const route = useRoute()
@@ -339,7 +410,9 @@ const route = useRoute()
 // Workflow State
 const running = ref(false)
 const saving = ref(false)
+const publishing = ref(false)
 const showKbTools = ref(false)
+const showApiModal = ref(false)
 const projectListLoading = ref(false)
 const projects = ref([])
 const activeNodeId = ref(null)
@@ -351,6 +424,28 @@ const isEditingAppName = ref(false)
 const appNameInput = ref(null)
 const showThought = ref(true)
 const showFullResult = ref(false)
+const isPublished = ref(false)
+
+const toggleEditAppName = () => {
+  isEditingAppName.value = true
+  nextTick(() => {
+    if (appNameInput.value) appNameInput.value.focus()
+  })
+}
+
+const handleAppNameBlur = () => {
+  isEditingAppName.value = false
+  if (appId.value) {
+    saveWorkflowApp() // Auto-save name change if appId exists
+  }
+}
+
+// API Mock Test State
+const mockQuery = ref('')
+const mockResult = ref(null)
+const mockLoading = ref(false)
+
+const apiBaseUrl = computed(() => `${window.location.origin}/api/ai-app/execute/${appId.value}`)
 
 // Results parsing logic
 const parsedResult = computed(() => {
@@ -800,7 +895,8 @@ const saveWorkflowApp = async () => {
       app_id: appId.value,
       name: appName.value,
       nodes: nodes.value,
-      workflow_data: workflowData.value
+      workflow_data: workflowData.value,
+      is_published: isPublished.value
     }
     const res = await saveApp(payload)
     if (res.success) {
@@ -820,12 +916,56 @@ const saveWorkflowApp = async () => {
   }
 }
 
+const handlePublish = async () => {
+  if (!appId.value) {
+    alert('请先保存应用再发布')
+    return
+  }
+
+  publishing.value = true
+  try {
+    const res = await publishApp(appId.value, !isPublished.value)
+    if (res.success) {
+      isPublished.value = res.data.is_published
+      if (isPublished.value) {
+        showApiModal.value = true
+      }
+    } else {
+      alert('发布失败: ' + res.error)
+    }
+  } catch (err) {
+    console.error('Publish error:', err)
+    alert('发布操作出错')
+  } finally {
+    publishing.value = false
+  }
+}
+
+const runMockTest = async () => {
+  if (!mockQuery.value.trim()) return
+  mockLoading.value = true
+  mockResult.value = null
+  try {
+    const res = await executeAppApi(appId.value, mockQuery.value)
+    if (res.success) {
+      mockResult.value = res.data
+    } else {
+      mockResult.value = { error: res.error }
+    }
+  } catch (err) {
+    mockResult.value = { error: err.message }
+  } finally {
+    mockLoading.value = false
+  }
+}
+
 const loadAppConfig = async (id) => {
   try {
     const res = await getApp(id)
     if (res.success) {
       const app = res.data
       appName.value = app.name
+      isPublished.value = app.is_published || false
       if (app.nodes && app.nodes.length > 0) {
         nodes.value = app.nodes
       }
@@ -913,6 +1053,44 @@ onUnmounted(() => {
   border-radius: 4px;
   outline: none;
   font-family: inherit;
+}
+
+.publish-btn {
+  background: #fff;
+  border: 1px solid #409eff;
+  color: #409eff;
+}
+
+.publish-btn:hover {
+  background: #ecf5ff;
+}
+
+.publish-btn.published {
+  background: #67c23a;
+  border-color: #67c23a;
+  color: #fff;
+}
+
+.publish-btn.published:hover {
+  background: #85ce61;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.icon-btn:hover {
+  background: #f0f2f5;
+}
+
+.info-btn {
+  color: #909399;
 }
 
 .header-right {
@@ -1650,6 +1828,129 @@ onUnmounted(() => {
   border-radius: 12px;
   box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.06);
   white-space: pre-wrap;
+}
+
+/* API Modal Styles */
+.api-modal {
+  background: #fff;
+  width: 800px;
+  max-width: 90vw;
+  max-height: 85vh;
+  border-radius: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+}
+
+.api-modal-body {
+  padding: 25px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 25px;
+}
+
+.api-section {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.api-info-card {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 8px;
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.info-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.info-label {
+  color: #6c757d;
+  font-weight: 600;
+  width: 100px;
+}
+
+.info-value {
+  font-family: monospace;
+  color: #333;
+  word-break: break-all;
+}
+
+.method-tag {
+  background: #e1f3ff;
+  color: #409eff;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 700;
+}
+
+.code-block-wrapper {
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #333;
+}
+
+.code-header {
+  background: #333;
+  color: #fff;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.code-content {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 15px;
+  margin: 0;
+  font-family: 'Consolas', monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.mock-textarea {
+  width: 100%;
+  height: 80px;
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 13px;
+  resize: none;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.mock-textarea:focus {
+  border-color: #409eff;
+}
+
+.mock-input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.result-pre {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.result-pre.error {
+  color: #f56c6c;
 }
 
 .modal-overlay {

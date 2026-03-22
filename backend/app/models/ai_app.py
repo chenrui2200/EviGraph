@@ -16,6 +16,7 @@ class AiApp:
     created_at: str
     updated_at: str
     description: Optional[str] = ""
+    is_published: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -25,7 +26,8 @@ class AiApp:
             "workflow_data": self.workflow_data,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "description": self.description
+            "description": self.description,
+            "is_published": self.is_published
         }
 
     @classmethod
@@ -37,7 +39,8 @@ class AiApp:
             workflow_data=data.get('workflow_data', {}),
             created_at=data.get('created_at', ''),
             updated_at=data.get('updated_at', ''),
-            description=data.get('description', '')
+            description=data.get('description', ''),
+            is_published=data.get('is_published', False)
         )
 
 class AiAppManager:
@@ -59,9 +62,20 @@ class AiAppManager:
         app_id = app_data.get('app_id')
         now = datetime.now().isoformat()
 
+        # If existing app, try to preserve its original created_at
+        existing_app = None
+        if app_id:
+            existing_app = cls.get_app(app_id)
+
         if not app_id:
             app_id = f"app_{uuid.uuid4().hex[:12]}"
             app_data['app_id'] = app_id
+            app_data['created_at'] = now
+        elif existing_app:
+            # Preserve original creation date
+            app_data['created_at'] = existing_app.created_at
+        else:
+            # New ID provided but not found, use current time
             app_data['created_at'] = now
 
         app_data['updated_at'] = now
@@ -102,3 +116,18 @@ class AiAppManager:
             os.remove(path)
             return True
         return False
+
+    @classmethod
+    def publish_app(cls, app_id: str, published: bool = True) -> Optional[AiApp]:
+        app = cls.get_app(app_id)
+        if not app:
+            return None
+
+        app.is_published = published
+        app.updated_at = datetime.now().isoformat()
+
+        path = cls._get_app_path(app_id)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(app.to_dict(), f, ensure_ascii=False, indent=2)
+
+        return app
