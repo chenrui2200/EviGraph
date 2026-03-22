@@ -115,6 +115,9 @@ class FileParser:
 
                 for i, page in enumerate(doc):
                     page_num = i + 1
+                    # Get page size (width, height)
+                    page_rect = page.rect
+                    pw, ph = page_rect.width, page_rect.height
 
                     # --- Table Extraction ---
                     table_bboxes = []
@@ -152,7 +155,9 @@ class FileParser:
                                         "total_pages": total_pages,
                                         "type": "table",
                                         "method": "fitz_tables",
-                                        "bbox": list(tab.bbox)
+                                        "bbox": list(tab.bbox),
+                                        "page_width": pw,
+                                        "page_height": ph
                                     }
                                 ))
                     except Exception as te:
@@ -198,7 +203,9 @@ class FileParser:
                                 "total_pages": total_pages,
                                 "type": "pdf",
                                 "method": "fitz_blocks",
-                                "bbox": bbox  # [x0, y0, x1, y1]
+                                "bbox": bbox,  # [x0, y0, x1, y1]
+                                "page_width": pw,
+                                "page_height": ph
                             }
                         ))
 

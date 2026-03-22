@@ -481,6 +481,8 @@ class GraphToolsService:
                                 page = meta.get("page")
                                 total_pages = meta.get("total_pages")
                                 bbox = meta.get("bbox")
+                                page_width = meta.get("page_width")
+                                page_height = meta.get("page_height")
                                 break # Use first found source info
 
                         fact_obj = {
@@ -489,6 +491,8 @@ class GraphToolsService:
                             "page": page,
                             "total_pages": total_pages,
                             "bbox": bbox,
+                            "page_width": page_width,
+                            "page_height": page_height,
                             "graph_id": graph_id
                         }
                         facts.append(fact_obj)
