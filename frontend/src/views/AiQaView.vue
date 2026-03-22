@@ -108,6 +108,11 @@
                 <label>温度: {{ workflowData.temperature }}</label>
                 <input type="range" v-model="workflowData.temperature" min="0" max="1" step="0.1" />
               </div>
+              <div v-if="results.prompts.user" class="prompt-debug-entry">
+                <button class="debug-btn" @click="showPromptModal = true">
+                  🔍 查看输入信息 (Prompts)
+                </button>
+              </div>
             </div>
 
             <!-- Output Node Content -->
@@ -204,6 +209,29 @@
         </div>
         <div class="modal-footer">
           <button class="action-btn" @click="showKbTools = false">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompt Debug Modal -->
+    <div v-if="showPromptModal" class="modal-overlay" @click.self="showPromptModal = false">
+      <div class="prompt-modal">
+        <div class="modal-header">
+          <h3>大模型输入详情 (Prompts)</h3>
+          <button class="close-btn" @click="showPromptModal = false">×</button>
+        </div>
+        <div class="modal-body prompt-debug-body">
+          <div class="prompt-section">
+            <div class="section-title">System Prompt</div>
+            <pre class="prompt-pre">{{ results.prompts.system }}</pre>
+          </div>
+          <div class="prompt-section">
+            <div class="section-title">User Prompt (Including Context)</div>
+            <pre class="prompt-pre">{{ results.prompts.user }}</pre>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="action-btn" @click="showPromptModal = false">关闭</button>
         </div>
       </div>
     </div>
@@ -404,8 +432,14 @@ const workflowData = ref({
 
 const results = ref({
   facts: [],
-  answer: ''
+  answer: '',
+  prompts: {
+    system: '',
+    user: ''
+  }
 })
+
+const showPromptModal = ref(false)
 
 // Node Positions and Config
 const nodes = ref([
@@ -498,7 +532,11 @@ const getProjectName = (graphId) => {
 }
 
 const resetWorkflow = () => {
-  results.value = { facts: [], answer: '' }
+  results.value = {
+    facts: [],
+    answer: '',
+    prompts: { system: '', user: '' }
+  }
   nodes.value.forEach(n => n.status = 'pending')
 }
 
@@ -531,6 +569,7 @@ const runWorkflow = async () => {
     if (res.success) {
       nodes.value[1].status = 'completed'
       results.value.facts = res.data.retrieved_facts || []
+      results.value.prompts = res.data.prompts || { system: '', user: '' }
 
       // Step 3: LLM
       nodes.value[2].status = 'running'
@@ -1161,6 +1200,82 @@ onUnmounted(() => {
 .answer-text {
   max-height: 300px;
   overflow-y: auto;
+}
+
+.prompt-debug-entry {
+  margin-top: 15px;
+  padding-top: 10px;
+  border-top: 1px dashed #e0e0e0;
+}
+
+.debug-btn {
+  width: 100%;
+  background: #f8f9fa;
+  border: 1px solid #dcdfe6;
+  color: #606266;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.debug-btn:hover {
+  background: #eef1f6;
+  border-color: #409eff;
+  color: #409eff;
+}
+
+.prompt-modal {
+  background: #fff;
+  width: 800px;
+  max-width: 90vw;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+  display: flex;
+  flex-direction: column;
+  max-height: 85vh;
+}
+
+.prompt-debug-body {
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.prompt-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: #333;
+  padding-left: 8px;
+  border-left: 3px solid #409eff;
+}
+
+.prompt-pre {
+  background: #f4f6f8;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 12px;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #444;
+  margin: 0;
 }
 
 /* Modal Styles */

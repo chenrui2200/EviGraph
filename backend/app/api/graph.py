@@ -842,7 +842,11 @@ def ai_qa():
                 "query": query,
                 "answer": answer,
                 "retrieved_facts": search_result.facts,
-                "graph_ids": graph_ids
+                "graph_ids": graph_ids,
+                "prompts": {
+                    "system": system_prompt,
+                    "user": user_prompt
+                }
             }
         })
 
