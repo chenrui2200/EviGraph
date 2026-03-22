@@ -50,6 +50,9 @@
           <div class="node-header">
             <span class="node-icon">{{ node.icon }}</span>
             <span class="node-title">{{ node.title }}</span>
+            <button v-if="node.type === 'output' && results.answer" class="expand-btn" title="全屏查看" @click.stop="toggleFullResult">
+              ⛶
+            </button>
             <div v-if="node.status === 'running'" class="node-spinner"></div>
             <div v-if="node.status === 'completed'" class="node-check">✓</div>
           </div>
@@ -118,11 +121,47 @@
             <!-- Output Node Content -->
             <div v-if="node.type === 'output'" class="output-content">
               <div v-if="!results.answer" class="output-placeholder">等待运行结果...</div>
-              <div v-else class="answer-text">{{ results.answer }}</div>
+              <div v-else class="qa-result-container">
+                <!-- 1. Knowledge Sources with "Screenshots" -->
+                <div class="result-section">
+                  <div class="section-header">📚 检索依据原文</div>
+                  <div class="source-evidence-list">
+                    <div v-for="(fact, idx) in results.facts" :key="idx" class="evidence-item">
+                      <div class="evidence-meta">
+                        <span class="source-tag">来源 {{ idx + 1 }}: {{ fact.source }} <template v-if="fact.page">(P{{ fact.page }})</template></span>
+                      </div>
+                      <!-- The "Screenshot" Canvas -->
+                      <div class="evidence-screenshot-box">
+                        <canvas :ref="el => setEvidenceRef(el, idx, 'node')" class="evidence-canvas"></canvas>
+                        <div v-if="!fact.bbox" class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 2. Reasoning (Thought) -->
+                <div v-if="parsedResult.thought" class="result-section">
+                  <div class="section-header" @click="showThought = !showThought">
+                    🧠 推理过程 (Thinking Process)
+                    <span class="toggle-icon">{{ showThought ? '▼' : '▶' }}</span>
+                  </div>
+                  <div v-if="showThought" class="thought-content">
+                    {{ parsedResult.thought }}
+                  </div>
+                </div>
+
+                <!-- 3. Final Conclusion -->
+                <div class="result-section">
+                  <div class="section-header">✨ 最终结论</div>
+                  <div class="conclusion-text">
+                    {{ parsedResult.conclusion }}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      </div> <!-- End Canvas Area -->
 
       <!-- Right Panel: Document Viewer -->
       <div class="document-viewer" :class="{ 'open': showDocViewer }">
@@ -161,7 +200,7 @@
           </div>
         </div>
       </div>
-    </div>
+    </div> <!-- End Main Container -->
 
     <!-- Knowledge Base Tools Dialog -->
     <div v-if="showKbTools" class="modal-overlay" @click.self="showKbTools = false">
@@ -235,6 +274,56 @@
         </div>
       </div>
     </div>
+
+    <!-- Full Result Detailed View -->
+    <div v-if="showFullResult" class="modal-overlay" @click.self="showFullResult = false">
+      <div class="full-result-modal">
+        <div class="modal-header">
+          <h3>
+            <span class="header-icon">✨</span> 问答结果详情报告
+          </h3>
+          <div class="header-actions">
+            <button class="close-btn" @click="showFullResult = false">×</button>
+          </div>
+        </div>
+        <div class="modal-body full-result-body">
+          <!-- 1. Source Evidence Section -->
+          <div class="full-section">
+            <div class="full-section-title">📚 检索知识出处 (Knowledge Evidence)</div>
+            <div class="full-evidence-grid">
+              <div v-for="(fact, idx) in results.facts" :key="idx" class="full-evidence-card">
+                <div class="evidence-header">
+                  <span class="evidence-idx">#{{ idx + 1 }}</span>
+                  <span class="evidence-source">{{ fact.source }} <template v-if="fact.page">(第 {{ fact.page }} 页)</template></span>
+                </div>
+                <div class="full-evidence-screenshot">
+                  <canvas :ref="el => setEvidenceRef(el, idx, 'modal')" class="full-evidence-canvas"></canvas>
+                  <div v-if="!fact.bbox" class="full-no-bbox">
+                    <p class="fact-text-fallback">{{ fact.text }}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 2. Thinking Process Section -->
+          <div v-if="parsedResult.thought" class="full-section thought-section">
+            <div class="full-section-title">🧠 深度推理过程 (Thinking Process)</div>
+            <div class="full-thought-box">
+              {{ parsedResult.thought }}
+            </div>
+          </div>
+
+          <!-- 3. Final Conclusion Section -->
+          <div v-if="parsedResult.conclusion" class="full-section conclusion-section">
+            <div class="full-section-title">✨ 最终结论 (Final Conclusion)</div>
+            <div class="full-conclusion-box">
+              {{ parsedResult.conclusion }}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -260,6 +349,127 @@ const appId = ref(route.query.appId || null)
 const appName = ref('新 AI 知识库应用')
 const isEditingAppName = ref(false)
 const appNameInput = ref(null)
+const showThought = ref(true)
+const showFullResult = ref(false)
+
+// Results parsing logic
+const parsedResult = computed(() => {
+  const text = results.value.answer || ''
+  let thought = ''
+  let conclusion = text
+
+  // Match <thought> or <think> tags
+  const thoughtMatch = text.match(/<(thought|think)>([\s\S]*?)<\/\1>/i)
+  if (thoughtMatch) {
+    thought = thoughtMatch[2].trim()
+    conclusion = text.replace(thoughtMatch[0], '').trim()
+  } else if (text.includes('思考过程：') || text.includes('Thinking Process:')) {
+    // Fallback for custom markers
+    const parts = text.split(/结论：|Conclusion:/i)
+    if (parts.length > 1) {
+      thought = parts[0].replace(/思考过程：|Thinking Process:/i, '').trim()
+      conclusion = parts[1].trim()
+    }
+  }
+
+  return { thought, conclusion }
+})
+
+// Evidence Canvas management
+const evidenceCanvasRefs = ref({ node: {}, modal: {} })
+const setEvidenceRef = (el, idx, type = 'node') => {
+  if (el) evidenceCanvasRefs.value[type][idx] = el
+}
+
+const renderEvidenceScreenshots = async (type = 'node') => {
+  const factsWithBbox = results.value.facts.filter(f => f.bbox && f.bbox.length === 4 && f.graph_id && f.source)
+
+  if (factsWithBbox.length === 0) return
+
+  // Ensure PDF.js is ready
+  if (!pdfjsLib.value) await initPdfJs()
+
+  // Cache for PDF documents
+  const pdfDocCache = {}
+
+  for (const fact of results.value.facts) {
+    const idx = results.value.facts.indexOf(fact)
+    const canvas = evidenceCanvasRefs.value[type][idx]
+    if (!canvas || !fact.bbox || !fact.graph_id) continue
+
+    try {
+      const cacheKey = `${fact.graph_id}:${fact.source}`
+      let pdfDoc = pdfDocCache[cacheKey]
+
+      if (!pdfDoc) {
+        const apiUrl = `${window.location.origin}/api/graph/project/${fact.graph_id}/document/${encodeURIComponent(fact.source)}`
+        const response = await fetch(apiUrl)
+        if (!response.ok) continue
+        const blob = await response.blob()
+        const arrayBuffer = await blob.arrayBuffer()
+        pdfDoc = await pdfjsLib.value.getDocument({ data: arrayBuffer }).promise
+        pdfDocCache[cacheKey] = pdfDoc
+      }
+
+      const page = await pdfDoc.getPage(fact.page || 1)
+      const context = canvas.getContext('2d')
+
+      // Logic: Extract the bbox area + some padding
+      const bbox = fact.bbox
+      const padding = type === 'modal' ? 40 : 20
+      const cropX = Math.max(0, bbox[0] - padding)
+      const cropY = Math.max(0, bbox[1] - padding)
+      const cropW = (bbox[2] - bbox[0]) + padding * 2
+      const cropH = (bbox[3] - bbox[1]) + padding * 2
+
+      const scale = type === 'modal' ? 3.0 : 2.0
+      const viewport = page.getViewport({ scale })
+
+      const tempCanvas = document.createElement('canvas')
+      tempCanvas.width = viewport.width
+      tempCanvas.height = viewport.height
+      const tempCtx = tempCanvas.getContext('2d')
+
+      await page.render({ canvasContext: tempCtx, viewport }).promise
+
+      const sX = cropX * scale
+      const sY = cropY * scale
+      const sW = cropW * scale
+      const sH = cropH * scale
+
+      const targetWidth = type === 'modal' ? 700 : 240
+      canvas.width = targetWidth
+      canvas.height = (sH / sW) * targetWidth
+
+      context.drawImage(
+        tempCanvas,
+        sX, sY, sW, sH,
+        0, 0, canvas.width, canvas.height
+      )
+
+      context.strokeStyle = 'rgba(255, 69, 0, 0.6)'
+      context.lineWidth = type === 'modal' ? 3 : 2
+      context.setLineDash([5, 3])
+      const hX = (bbox[0] - cropX) * (canvas.width / cropW)
+      const hY = (bbox[1] - cropY) * (canvas.height / cropH)
+      const hW = (bbox[2] - bbox[0]) * (canvas.width / cropW)
+      const hH = (bbox[3] - bbox[1]) * (canvas.height / cropH)
+      context.strokeRect(hX, hY, hW, hH)
+
+    } catch (err) {
+      console.error(`Failed to render screenshot for fact ${idx}:`, err)
+    }
+  }
+}
+
+const toggleFullResult = () => {
+  showFullResult.value = !showFullResult.value
+  if (showFullResult.value) {
+    nextTick(() => {
+      renderEvidenceScreenshots('modal')
+    })
+  }
+}
 
 // Document Viewer State
 const showDocViewer = ref(false)
@@ -310,7 +520,6 @@ const renderPdfPage = async (blob, pageNum) => {
     const canvas = pdfCanvas.value
     const context = canvas.getContext('2d')
 
-    // Set scale based on container width
     const containerWidth = viewerContainer.value?.clientWidth || 600
     const unscaledViewport = page.getViewport({ scale: 1 })
     const scale = (containerWidth - 40) / unscaledViewport.width
@@ -356,7 +565,6 @@ const viewDocument = async (fact) => {
 
     const blobUrl = URL.createObjectURL(blob)
 
-    // Ensure PDF.js is ready
     if (!pdfjsLib.value) await initPdfJs()
 
     nextTick(async () => {
@@ -370,7 +578,6 @@ const viewDocument = async (fact) => {
       }
       showDocViewer.value = true
 
-      // Wait for container to be visible and ref to be bound
       setTimeout(() => {
         renderPdfPage(blob, page)
       }, 300)
@@ -409,7 +616,6 @@ const saveProjectName = async (projectId) => {
   try {
     const res = await updateProject(projectId, { name: editProjectName.value.trim() })
     if (res.success) {
-      // Update local project list
       const project = projects.value.find(p => p.project_id === projectId)
       if (project) {
         project.name = res.data.name
@@ -455,7 +661,6 @@ const connections = [
   { from: 'n3', to: 'n4' }
 ]
 
-// Drag and Drop Logic
 const draggingNode = ref(null)
 const dragOffset = ref({ x: 0, y: 0 })
 
@@ -484,8 +689,8 @@ const getConnectionPath = (conn) => {
 
   if (!fromNode || !toNode) return ''
 
-  const x1 = fromNode.x + 280 // width of node roughly
-  const y1 = fromNode.y + 40 // header center
+  const x1 = fromNode.x + 280
+  const y1 = fromNode.y + 40
   const x2 = toNode.x
   const y2 = toNode.y + 40
 
@@ -493,15 +698,12 @@ const getConnectionPath = (conn) => {
   return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`
 }
 
-// Logic Methods
 const loadProjects = async () => {
   projectListLoading.value = true
   try {
     const res = await getProjectList()
     if (res.success) {
       projects.value = res.data
-
-      // Auto-select current project if we came from one
       if (route.params.projectId) {
         const currentProj = projects.value.find(p => p.project_id === route.params.projectId)
         if (currentProj && currentProj.graph_id && !workflowData.value.selectedGraphIds.includes(currentProj.graph_id)) {
@@ -554,10 +756,7 @@ const runWorkflow = async () => {
   resetWorkflow()
 
   try {
-    // Step 1: Input
     nodes.value[0].status = 'completed'
-
-    // Step 2: Retrieval
     nodes.value[1].status = 'running'
 
     const res = await aiQa({
@@ -571,15 +770,16 @@ const runWorkflow = async () => {
       results.value.facts = res.data.retrieved_facts || []
       results.value.prompts = res.data.prompts || { system: '', user: '' }
 
-      // Step 3: LLM
       nodes.value[2].status = 'running'
-      // Simulating some thinking time for UX
       await new Promise(r => setTimeout(r, 800))
 
       nodes.value[2].status = 'completed'
       results.value.answer = res.data.answer
 
-      // Step 4: Output
+      nodes.value[3].status = 'running'
+      nextTick(() => {
+        renderEvidenceScreenshots('node')
+      })
       nodes.value[3].status = 'completed'
     } else {
       throw new Error(res.error || '运行失败')
@@ -605,7 +805,6 @@ const saveWorkflowApp = async () => {
     const res = await saveApp(payload)
     if (res.success) {
       appId.value = res.data.app_id
-      // Update URL with appId if it's new, without reload
       if (!route.query.appId) {
         router.replace({ query: { ...route.query, appId: res.data.app_id } })
       }
@@ -637,13 +836,6 @@ const loadAppConfig = async (id) => {
   } catch (err) {
     console.error('Load app error:', err)
   }
-}
-
-const toggleEditAppName = () => {
-  isEditingAppName.value = true
-  nextTick(() => {
-    if (appNameInput.value) appNameInput.value.focus()
-  })
 }
 
 onMounted(async () => {
@@ -723,16 +915,6 @@ onUnmounted(() => {
   font-family: inherit;
 }
 
-.save-btn {
-  background: #fff;
-  border: 1px solid #000;
-  color: #000;
-}
-
-.save-btn:hover {
-  background: #f0f0f0;
-}
-
 .header-right {
   display: flex;
   gap: 10px;
@@ -773,7 +955,6 @@ onUnmounted(() => {
   color: #000;
 }
 
-/* Canvas Area */
 .main-container {
   flex: 1;
   display: flex;
@@ -790,7 +971,6 @@ onUnmounted(() => {
   transition: all 0.3s ease;
 }
 
-/* Document Viewer Panel */
 .document-viewer {
   width: 0;
   background: #fff;
@@ -841,7 +1021,7 @@ onUnmounted(() => {
 .viewer-content {
   flex: 1;
   position: relative;
-  background: #525659; /* Standard PDF viewer background */
+  background: #525659;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -888,7 +1068,7 @@ onUnmounted(() => {
 }
 
 .highlight-rect {
-  fill: rgba(255, 165, 0, 0.35); /* Transparent orange */
+  fill: rgba(255, 165, 0, 0.35);
   stroke: #ff4500;
   stroke-width: 1.5px;
   stroke-dasharray: 2;
@@ -918,13 +1098,6 @@ onUnmounted(() => {
   font-size: 13px;
 }
 
-.pdf-iframe {
-  width: 100%;
-  height: 100%;
-  border: none;
-  display: block;
-}
-
 .viewer-empty {
   height: 100%;
   display: flex;
@@ -940,7 +1113,6 @@ onUnmounted(() => {
   opacity: 0.3;
 }
 
-/* Facts List Refinement */
 .facts-scroll-area {
   max-height: 350px;
   overflow-y: auto;
@@ -1074,12 +1246,30 @@ onUnmounted(() => {
   flex: 1;
 }
 
+.expand-btn {
+  background: none;
+  border: none;
+  font-size: 16px;
+  cursor: pointer;
+  color: #666;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.expand-btn:hover {
+  background: #eef1f6;
+  color: #409eff;
+}
+
 .node-content {
   padding: 15px;
   min-height: 100px;
 }
 
-/* Specific Node Content Styles */
 .input-content textarea {
   width: 100%;
   height: 100px;
@@ -1140,18 +1330,6 @@ onUnmounted(() => {
   margin-bottom: 5px;
 }
 
-.fact-mini-item {
-  color: #444;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-bottom: 2px;
-}
-
-.more-facts {
-  color: #999;
-}
-
 .llm-content .form-group {
   margin-bottom: 12px;
 }
@@ -1191,15 +1369,110 @@ onUnmounted(() => {
   color: #333;
 }
 
+.qa-result-container {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  max-height: 500px;
+  overflow-y: auto;
+  padding-right: 5px;
+}
+
+.result-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-header {
+  font-weight: 700;
+  font-size: 12px;
+  color: #666;
+  background: #f0f2f5;
+  padding: 4px 8px;
+  border-radius: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: default;
+}
+
+.source-evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.evidence-item {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.evidence-meta {
+  padding: 4px 8px;
+  background: #fafafa;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.source-tag {
+  font-size: 10px;
+  color: #909399;
+  font-weight: 600;
+}
+
+.evidence-screenshot-box {
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #525659;
+}
+
+.evidence-canvas {
+  max-width: 100%;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  background: #fff;
+}
+
+.no-bbox-hint {
+  font-size: 11px;
+  color: #999;
+  font-style: italic;
+  padding: 10px;
+  background: #fff;
+  width: 100%;
+}
+
+.thought-content {
+  font-size: 12px;
+  color: #606266;
+  background: #fdf6ec;
+  border-left: 3px solid #e6a23c;
+  padding: 10px;
+  white-space: pre-wrap;
+  font-family: inherit;
+}
+
+.conclusion-text {
+  font-size: 13px;
+  color: #2c3e50;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  padding: 0 5px;
+}
+
+.toggle-icon {
+  font-size: 10px;
+  transition: transform 0.2s;
+}
+
 .output-placeholder {
   color: #999;
   text-align: center;
   margin-top: 20px;
-}
-
-.answer-text {
-  max-height: 300px;
-  overflow-y: auto;
 }
 
 .prompt-debug-entry {
@@ -1250,12 +1523,6 @@ onUnmounted(() => {
   gap: 20px;
 }
 
-.prompt-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
 .section-title {
   font-weight: 700;
   font-size: 13px;
@@ -1278,7 +1545,113 @@ onUnmounted(() => {
   margin: 0;
 }
 
-/* Modal Styles */
+.full-result-modal {
+  background: #f8f9fa;
+  width: 1000px;
+  max-width: 95vw;
+  height: 90vh;
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+}
+
+.full-result-body {
+  padding: 30px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 35px;
+}
+
+.full-section-title {
+  font-size: 16px;
+  font-weight: 800;
+  color: #1a1a1a;
+  margin-bottom: 15px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid #e0e0e0;
+  display: flex;
+  align-items: center;
+}
+
+.full-evidence-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 25px;
+}
+
+.full-evidence-card {
+  background: #fff;
+  border-radius: 12px;
+  border: 1px solid #e0e0e0;
+  overflow: hidden;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+.evidence-header {
+  padding: 10px 15px;
+  background: #f1f3f5;
+  border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.evidence-idx {
+  background: #409eff;
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.evidence-source {
+  font-size: 13px;
+  font-weight: 600;
+  color: #495057;
+}
+
+.full-evidence-screenshot {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #525659;
+}
+
+.full-evidence-canvas {
+  max-width: 100%;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+  border: 1px solid #000;
+  background: #fff;
+}
+
+.full-thought-box {
+  background: #fffbea;
+  border-left: 5px solid #f6ad55;
+  padding: 20px;
+  font-size: 14px;
+  line-height: 1.8;
+  color: #4a5568;
+  border-radius: 0 8px 8px 0;
+  white-space: pre-wrap;
+}
+
+.full-conclusion-box {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  padding: 25px;
+  font-size: 16px;
+  line-height: 1.7;
+  color: #2d3748;
+  border-radius: 12px;
+  box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.06);
+  white-space: pre-wrap;
+}
+
 .modal-overlay {
   position: fixed;
   top: 0;
@@ -1318,7 +1691,6 @@ onUnmounted(() => {
 
 .modal-body {
   padding: 20px;
-  max-height: 400px;
   overflow-y: auto;
 }
 

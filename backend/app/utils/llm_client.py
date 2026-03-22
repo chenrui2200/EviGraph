@@ -97,9 +97,8 @@ class LLMClient:
                 # Use property that provides thread-local client
                 response = self.client.chat.completions.create(**kwargs)
                 content = response.choices[0].message.content
-                # Some models include <think> content
-                content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
-                return content
+                # Keep <think> content if present, we'll parse it in frontend
+                return content.strip()
 
             except (APIConnectionError, APITimeoutError) as e:
                 last_error = e
