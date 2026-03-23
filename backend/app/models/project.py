@@ -183,33 +183,45 @@ class ProjectManager:
 
     @classmethod
     def save_project(cls, project: Project) -> None:
-        """Save project metadata"""
+        """Save project metadata atomically"""
         project.updated_at = datetime.now().isoformat()
         meta_path = cls._get_project_meta_path(project.project_id)
+        temp_path = meta_path + ".tmp"
 
-        with open(meta_path, 'w', encoding='utf-8') as f:
-            json.dump(project.to_dict(), f, ensure_ascii=False, indent=2)
+        try:
+            # Write to temporary file first to ensure atomicity
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(project.to_dict(), f, ensure_ascii=False, indent=2)
+
+            # Atomic rename (replace existing file)
+            if os.path.exists(meta_path):
+                os.replace(temp_path, meta_path)
+            else:
+                os.rename(temp_path, meta_path)
+        except Exception as e:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise e
 
     @classmethod
     def get_project(cls, project_id: str) -> Optional[Project]:
         """
-        Get project
-
-        Args:
-            project_id: Project ID
-
-        Returns:
-            Project object, or None if not found
+        Get project with JSON error handling
         """
         meta_path = cls._get_project_meta_path(project_id)
 
         if not os.path.exists(meta_path):
             return None
 
-        with open(meta_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-        return Project.from_dict(data)
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return Project.from_dict(data)
+        except (json.JSONDecodeError, KeyError) as e:
+            # Prevent crashing the entire system if one project file is corrupted
+            from ..utils.logger import get_logger
+            get_logger('mirofish.project').error(f"Failed to load project {project_id}: {e}. File may be corrupted.")
+            return None
 
     @classmethod
     def list_projects(cls, limit: int = 50) -> List[Project]:

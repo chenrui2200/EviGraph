@@ -50,8 +50,8 @@ class Config:
     ALLOWED_EXTENSIONS = {'pdf', 'md', 'txt', 'markdown'}
 
     # Text processing configuration
-    DEFAULT_CHUNK_SIZE = 800  # Default chunk size (increased for better context)
-    DEFAULT_CHUNK_OVERLAP = 80  # Default overlap size
+    DEFAULT_CHUNK_SIZE = 1500  # Increased for engineering standards to keep clauses intact
+    DEFAULT_CHUNK_OVERLAP = 150  # Balanced overlap for 1500 chunk size
     TESSERACT_CMD = os.environ.get('TESSERACT_CMD', r'C:\Program Files\Tesseract-OCR\tesseract.exe')
     TESSDATA_DIR = os.path.join(os.path.dirname(__file__), 'tessdata')
 

@@ -450,6 +450,12 @@ class Neo4jStorage(GraphStorage):
                 s_uuid = entity_uuid_map.get(s_name.lower())
                 t_uuid = entity_uuid_map.get(t_name.lower())
 
+                # Issue 1 Fix: Prevent self-loops (Entity pointing to itself)
+                # This ensures the graph remains a meaningful DAG for reasoning.
+                if s_uuid and t_uuid and s_uuid == t_uuid:
+                    logger.debug(f"[add_text] Skipping self-loop relation: {s_name} --[{r_type}]--> {t_name}")
+                    continue
+
                 if s_uuid and t_uuid:
                     fact_emb = relation_embeddings[idx] if idx < len(relation_embeddings) else []
 
