@@ -60,6 +60,7 @@ class Project:
     simulation_requirement: Optional[str] = None
     chunk_size: int = 500
     chunk_overlap: int = 50
+    use_semantic: bool = False
 
     # Error information
     error: Optional[str] = None
@@ -83,6 +84,7 @@ class Project:
             "simulation_requirement": self.simulation_requirement,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
+            "use_semantic": self.use_semantic,
             "error": self.error
         }
 
@@ -110,6 +112,7 @@ class Project:
             simulation_requirement=data.get('simulation_requirement'),
             chunk_size=data.get('chunk_size', 500),
             chunk_overlap=data.get('chunk_overlap', 50),
+            use_semantic=data.get('use_semantic', False),
             error=data.get('error')
         )
 
