@@ -18,7 +18,7 @@
         <div class="card-content">
           <p class="api-note">POST /api/graph/ontology/generate</p>
           <p class="description">
-            LLM 分析文档内容和仿真需求，提取现实种子，并自动生成合适的本体结构。
+            LLM 分析文档内容，提取现实种子，并自动生成合适的本体结构。
           </p>
 
           <!-- Loading / Progress -->

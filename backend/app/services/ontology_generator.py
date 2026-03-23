@@ -113,10 +113,111 @@ We are building an **AI Engineering Compliance Auditor**. Every entity and relat
 4. **Standard Fallbacks**: Last 2 must be `Person` and `Organization`.
 """
 
+# System prompt for iterative ontology generation (Engineering Standard Mode)
+ITERATIVE_ENGINEERING_PROMPT = """You are a professional knowledge graph ontology design expert specializing in **Industrial Engineering Standards and Regulatory Compliance**.
+
+## 🎯 Task: Iterative Structural Ontology Discovery
+Your task is to analyze a specific **Text Chunk** from a technical document and update/expand the current knowledge schema (Ontology).
+
+### 1. Document Structure Awareness
+Technical documents have rigorous hierarchy. You MUST identify:
+- **Structural Links**: How chunks relate via writing order (e.g., `PRECEDES`, `FOLLOWS`, `DEFINES_SCOPE_FOR`).
+- **Hierarchy**: `Clause` -> `SubItem` relationship.
+
+### 2. Descriptive Association
+Identify how technical nouns relate through description:
+- `DESCRIBES`: Technical specs describing equipment.
+- `CONSTRAINS`: Safety requirements constraining installation.
+- `LOCATES_AT`: Physical location relationship mentioned in text.
+
+### 3. Entity Precision
+Capture technical entities with maximum detail (e.g., `PorousDuct`, `CatchBasin`, `ConcreteBed`).
+
+## 📋 Input Context
+- **Current Draft Ontology**: The entity and edge types we have discovered so far.
+- **Current Text Chunk**: The new content to analyze.
+
+## 📤 Output Requirement
+Return ONLY valid JSON with two fields:
+1. `new_entity_types`: List of entity type definitions discovered in THIS chunk.
+2. `new_edge_types`: List of relationship type definitions discovered in THIS chunk.
+3. `structural_context`: A brief description of this chunk's position in the document (e.g., "Part of Chapter 7 regarding conduit laying").
+
+**Constraints**:
+- Keep descriptions concise.
+- Focus on technical nouns and logical verbs.
+"""
+
+# System prompt for iterative ontology generation (Engineering Standard Mode)
+ITERATIVE_ENGINEERING_PROMPT = """You are a professional knowledge graph ontology design expert specializing in **Industrial Engineering Standards, Technical Specifications, and Regulatory Compliance**.
+
+## 🎯 Task: High-Density Structural Ontology Discovery
+You are analyzing a sequence of **Multiple Text Chunks** from a technical document. Your goal is to design a schema (Ontology) that captures not just entities, but the **Writing Logic** and **Descriptive Associations** inherent in engineering standards.
+
+### 1. Identify Writing & Structural Logic
+Technical documents follow a strict flow. Identify relationship types like:
+- `PREREQUISITE_FOR`: One requirement must be met before another.
+- `ELABORATES_ON`: A later chunk provides details for a term mentioned earlier.
+- `GOVERNED_BY`: A component is governed by a specific safety clause.
+- `LOGICAL_FLOW`: Sequential steps in a process.
+
+### 2. Identify Descriptive & Functional Associations
+Identify how technical nouns (Entities) relate beyond simple physical connection:
+- `DEFINES`: A clause defines a technical term.
+- `SPECIFIES_LIMIT`: Linking equipment to its technical parameters (slope, depth, etc.).
+- `APPLIES_TO`: Linking a rule to a specific material or condition.
+
+### 3. Entity Precision
+Capture technical entities with maximum detail (e.g., `PorousDuct`, `CatchBasin`, `ConcreteBed`).
+
+## 📤 Output Requirement
+Return ONLY valid JSON with two fields:
+1. `new_entity_types`: List of entity type definitions discovered in these chunks.
+2. `new_edge_types`: List of relationship type definitions that capture the logical and descriptive links found.
+3. `analysis_summary`: A summary of the technical logic and document structure found in this window.
+
+**Constraint**: Focus on the logic between the lines.
+"""
+
+# System prompt for iterative ontology generation (High-Fidelity Engineering KG)
+ITERATIVE_ENGINEERING_PROMPT = """You are a high-fidelity Knowledge Graph Architect specializing in **Technical Standard Digitization**.
+
+## 🎯 Mission: Exhaustive Structural Discovery
+Analyze the provided **Text Chunks** and design an UNRESTRICTED schema (Ontology) that perfectly maps the document's knowledge.
+
+### 1. Technical Noun & Attribute Discovery (Entities)
+- Identify EVERY technical noun, material, equipment, and abstract technical concept.
+- If a noun has unique attributes (e.g., "Catch Basin" has "Drainage Capacity"), define a specific Entity Type for it.
+- **NO LIMITS**: Do not merge distinct concepts. Precision is paramount.
+
+### 2. Chunk as a Semantic Anchor
+- Treat `DocumentChunk` as a first-class entity.
+- Identify **Cross-References**: If text says "See Section X", "Refer to table Y", or "Consistent with rule Z", extract these as relationships between Chunks or between an Entity and a Chunk.
+
+### 3. Deep Semantic Edge Discovery
+Exhaustively identify how entities relate:
+- **Structural**: `PART_OF`, `MEMBER_OF`, `COMPOSED_OF`.
+- **Descriptive**: `DEFINES` (Clause defines a term), `DESCRIBES_SPECS` (Text describes equipment properties).
+- **Logical/Regulatory**: `CONSTRAINS` (A rule restricts a parameter), `PREREQUISITE_FOR`, `GOVERNS`.
+- **Positional**: `FOLLOWS` (Writing sequence), `LOCATED_IN`.
+
+## 📤 Output Requirement
+Return ONLY valid JSON:
+{
+  "new_entity_types": [
+    {"name": "PreciseType", "description": "Strict technical definition", "attributes": [{"name": "attr", "type": "text"}]}
+  ],
+  "new_edge_types": [
+    {"name": "DEEP_RELATION_NAME", "description": "Specific nature of linkage", "source_targets": [{"source": "TypeA", "target": "TypeB"}]}
+  ],
+  "logic_analysis": "Briefly explain the document flow and noun associations found here."
+}
+"""
+
 class OntologyGenerator:
     """
-    Ontology generator
-    Analyze text content and generate entity and relationship type definitions
+    High-Fidelity Ontology Generator.
+    Supports unrestricted technical entity discovery and structural anchor modeling.
     """
 
     def __init__(self, llm_client: Optional[LLMClient] = None):
@@ -126,51 +227,156 @@ class OntologyGenerator:
         self,
         document_texts: List[str],
         simulation_requirement: str,
-        additional_context: Optional[str] = None
+        additional_context: Optional[str] = None,
+        chunks: Optional[List[Any]] = None
     ) -> Dict[str, Any]:
         """
-        Generate ontology definition by first detecting the domain.
+        Generates a deep, structural ontology without artificial constraints.
         """
-        # Step 1: Smart Domain Detection via LLM
-        domain = self._detect_domain(document_texts[:3], simulation_requirement)
+        # Step 1: Detect domain (Keep this to branch strategies if needed)
+        sample = "\n".join(document_texts[:2])[:2000]
+        domain = self._detect_domain([sample], simulation_requirement)
 
-        # Step 2: Select Prompt Strategy
-        prompt_map = {
-            "engineering": ENGINEERING_ONTOLOGY_PROMPT,
-            "social": ONTOLOGY_SYSTEM_PROMPT
+        if domain == "engineering" and chunks:
+            logger.info("Initializing High-Fidelity Engineering Ontology Discovery...")
+            return self._generate_high_fidelity_iterative(chunks, simulation_requirement)
+
+        # Fallback for non-engineering
+        return self._generate_standard(document_texts, simulation_requirement, additional_context)
+
+    def _generate_high_fidelity_iterative(self, chunks: List[Any], requirement: str) -> Dict[str, Any]:
+        """
+        Unrestricted iterative discovery across the document.
+        """
+        import concurrent.futures
+        final_ontology = {
+            "entity_types": [
+                {
+                    "name": "DocumentChunk",
+                    "description": "A physical segment of the technical document acting as a semantic anchor.",
+                    "attributes": [{"name": "chunk_index", "type": "number"}, {"name": "source", "type": "text"}]
+                }
+            ],
+            "edge_types": [
+                {
+                    "name": "CROSS_REFERENCES",
+                    "description": "Explicit mention of another section, clause, or chunk.",
+                    "source_targets": [{"source": "DocumentChunk", "target": "DocumentChunk"}]
+                }
+            ],
+            "analysis_summary": "High-fidelity structural analysis."
         }
 
-        system_prompt = prompt_map.get(domain, ONTOLOGY_SYSTEM_PROMPT)
-        logger.info(f"Detected domain: {domain}. Selecting strategy with high granularity...")
+        # High-density window for relationship context
+        window_size = 12
+        # Scan up to 200 chunks for deep discovery in large documents
+        max_discovery_chunks = 200
+        discovery_subset = chunks[:max_discovery_chunks]
 
-        # Step 3: Build user message
-        user_message = self._build_user_message(
-            document_texts,
-            simulation_requirement,
-            additional_context
-        )
+        windows = []
+        for i in range(0, len(discovery_subset), window_size):
+            window = discovery_subset[i : i + window_size]
+            window_text = "\n\n---\n\n".join([f"[Chunk {i+j}] {c.text if hasattr(c, 'text') else str(c)}" for j, c in enumerate(window)])
+            windows.append(window_text)
+
+        logger.info(f"Launching {len(windows)} parallel discovery workers for high-fidelity modeling...")
+
+        def _worker(w_text):
+            messages = [
+                {"role": "system", "content": ITERATIVE_ENGINEERING_PROMPT},
+                {"role": "user", "content": f"## Context Requirement\n{requirement}\n\n## Text to Mine\n{w_text}"}
+            ]
+            try:
+                return self.llm_client.chat_json(messages=messages, temperature=0.1)
+            except Exception as e:
+                logger.error(f"Discovery worker failed: {e}")
+                return None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(_worker, windows))
+
+        for res in results:
+            if res:
+                self._merge_increment(final_ontology, res)
+
+        # Use unconstrained validation for engineering
+        return self._validate_and_process_unconstrained(final_ontology)
+
+    def _merge_increment(self, base: Dict[str, Any], increment: Dict[str, Any]):
+        """Smartly merge discoveries without keys mismatch."""
+        if not isinstance(increment, dict): return
+
+        # Handle Entities
+        seen_entities = {e.get("name", "").lower() for e in base.get("entity_types", []) if isinstance(e, dict) and "name" in e}
+        for et in increment.get("new_entity_types", []):
+            if not isinstance(et, dict) or "name" not in et: continue
+            name_lower = et["name"].lower()
+            if name_lower and name_lower not in seen_entities:
+                base["entity_types"].append(et)
+                seen_entities.add(name_lower)
+
+        # Handle Edges
+        seen_edges = {e.get("name", "").upper() for e in base.get("edge_types", []) if isinstance(e, dict) and "name" in e}
+        for edge in increment.get("new_edge_types", []):
+            if not isinstance(edge, dict) or "name" not in edge: continue
+            name_upper = edge["name"].upper()
+            if name_upper and name_upper not in seen_edges:
+                base["edge_types"].append(edge)
+                seen_edges.add(name_upper)
+
+    def _validate_and_process_unconstrained(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Post-processing without artificial caps for high-fidelity graphs."""
+        if "relation_types" in result and "edge_types" not in result:
+            result["edge_types"] = result.pop("relation_types")
+
+        # Ensure description length etc.
+        for e in result.get("entity_types", []):
+            if len(e.get("description", "")) > 200: e["description"] = e["description"][:197] + "..."
+        for e in result.get("edge_types", []):
+            if len(e.get("description", "")) > 200: e["description"] = e["description"][:197] + "..."
+
+        return result
+
+    def _merge_increment(self, base: Dict[str, Any], increment: Dict[str, Any]):
+        """Smartly merge new discoveries into the base ontology with error handling."""
+        if not isinstance(increment, dict):
+            return
+
+        # Handle Entities
+        seen_entities = {e.get("name", "").lower() for e in base.get("entity_types", []) if isinstance(e, dict) and "name" in e}
+        for et in increment.get("new_entity_types", []):
+            if not isinstance(et, dict) or "name" not in et:
+                continue
+
+            name_lower = et["name"].lower()
+            if name_lower and name_lower not in seen_entities:
+                base["entity_types"].append(et)
+                seen_entities.add(name_lower)
+
+        # Handle Edges
+        seen_edges = {e.get("name", "").upper() for e in base.get("edge_types", []) if isinstance(e, dict) and "name" in e}
+        for edge in increment.get("new_edge_types", []):
+            if not isinstance(edge, dict) or "name" not in edge:
+                continue
+
+            name_upper = edge["name"].upper()
+            if name_upper and name_upper not in seen_edges:
+                base["edge_types"].append(edge)
+                seen_edges.add(name_upper)
+
+    def _generate_standard(self, document_texts: List[str], simulation_requirement: str, additional_context: Optional[str]) -> Dict[str, Any]:
+        """Original one-shot generation logic."""
+        system_prompt = ENGINEERING_ONTOLOGY_PROMPT # We'll keep the previous enhanced prompt here
+        user_message = self._build_user_message(document_texts, simulation_requirement, additional_context)
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message}
         ]
 
-        # Call LLM
-        try:
-            logger.info(f"Calling LLM ({self.llm_client.model}) for exhaustive {domain} ontology generation...")
-            result = self.llm_client.chat_json(
-                messages=messages,
-                temperature=0.3,
-                max_tokens=4096
-            )
-        except Exception as e:
-            logger.error(f"Ontology LLM call failed: {str(e)}\n{traceback.format_exc()}")
-            raise RuntimeError(f"LLM analysis failed: {str(e)}. Please check your API key and model configuration.")
+        result = self.llm_client.chat_json(messages=messages, temperature=0.3)
+        return self._validate_and_process(result)
 
-        # Validate and post-process
-        result = self._validate_and_process(result)
-
-        return result
 
     def _detect_domain(self, samples: List[str], requirement: str) -> str:
         """
@@ -268,9 +474,8 @@ Respond with ONLY the choice name.
 Based on the above content, design entity types and relationship types.
 **Rules to follow**:
 1. Define at least 15 specific entity types to capture details.
-2. Last 2 must be Person and Organization.
-3. Include relationship types for hierarchy (e.g., SUB_CLAUSE_OF, PART_OF).
-4. All types must be real subjects or logical concepts, not metadata.
+2. Include relationship types for hierarchy (e.g., SUB_CLAUSE_OF, PART_OF).
+3. All types must be real subjects or logical concepts, not metadata.
 """
 
         return message
@@ -387,107 +592,4 @@ Based on the above content, design entity types and relationship types.
             result["edge_types"] = result["edge_types"][:MAX_EDGE_TYPES]
 
         return result
-    
-    def generate_python_code(self, ontology: Dict[str, Any]) -> str:
-        """
-        [DEPRECATED] Convert ontology definition to Zep-format Pydantic code.
-        Not used in MiroFish-Offline (ontology stored as JSON in Neo4j).
-        Kept for reference only.
-        """
-        code_lines = [
-            '"""',
-            'Custom entity type definitions',
-            'Auto-generated by MiroFish for social opinion simulation',
-            '"""',
-            '',
-            'from pydantic import Field',
-            'from zep_cloud.external_clients.ontology import EntityModel, EntityText, EdgeModel',
-            '',
-            '',
-            '# ============== Entity Type Definitions ==============',
-            '',
-        ]
-
-        # Generate entity types
-        for entity in ontology.get("entity_types", []):
-            name = entity["name"]
-            desc = entity.get("description", f"A {name} entity.")
-
-            code_lines.append(f'class {name}(EntityModel):')
-            code_lines.append(f'    """{desc}"""')
-
-            attrs = entity.get("attributes", [])
-            if attrs:
-                for attr in attrs:
-                    attr_name = attr["name"]
-                    attr_desc = attr.get("description", attr_name)
-                    code_lines.append(f'    {attr_name}: EntityText = Field(')
-                    code_lines.append(f'        description="{attr_desc}",')
-                    code_lines.append(f'        default=None')
-                    code_lines.append(f'    )')
-            else:
-                code_lines.append('    pass')
-
-            code_lines.append('')
-            code_lines.append('')
-
-        code_lines.append('# ============== Relationship Type Definitions ==============')
-        code_lines.append('')
-
-        # Generate relationship types
-        for edge in ontology.get("edge_types", []):
-            name = edge["name"]
-            # Convert to PascalCase class name
-            class_name = ''.join(word.capitalize() for word in name.split('_'))
-            desc = edge.get("description", f"A {name} relationship.")
-
-            code_lines.append(f'class {class_name}(EdgeModel):')
-            code_lines.append(f'    """{desc}"""')
-
-            attrs = edge.get("attributes", [])
-            if attrs:
-                for attr in attrs:
-                    attr_name = attr["name"]
-                    attr_desc = attr.get("description", attr_name)
-                    code_lines.append(f'    {attr_name}: EntityText = Field(')
-                    code_lines.append(f'        description="{attr_desc}",')
-                    code_lines.append(f'        default=None')
-                    code_lines.append(f'    )')
-            else:
-                code_lines.append('    pass')
-
-            code_lines.append('')
-            code_lines.append('')
-
-        # Generate type dictionaries
-        code_lines.append('# ============== Type Configuration ==============')
-        code_lines.append('')
-        code_lines.append('ENTITY_TYPES = {')
-        for entity in ontology.get("entity_types", []):
-            name = entity["name"]
-            code_lines.append(f'    "{name}": {name},')
-        code_lines.append('}')
-        code_lines.append('')
-        code_lines.append('EDGE_TYPES = {')
-        for edge in ontology.get("edge_types", []):
-            name = edge["name"]
-            class_name = ''.join(word.capitalize() for word in name.split('_'))
-            code_lines.append(f'    "{name}": {class_name},')
-        code_lines.append('}')
-        code_lines.append('')
-
-        # Generate source_targets mapping for edges
-        code_lines.append('EDGE_SOURCE_TARGETS = {')
-        for edge in ontology.get("edge_types", []):
-            name = edge["name"]
-            source_targets = edge.get("source_targets", [])
-            if source_targets:
-                st_list = ', '.join([
-                    f'{{"source": "{st.get("source", "Entity")}", "target": "{st.get("target", "Entity")}"}}'
-                    for st in source_targets
-                ])
-                code_lines.append(f'    "{name}": [{st_list}],')
-        code_lines.append('}')
-
-        return '\n'.join(code_lines)
 

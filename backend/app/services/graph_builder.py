@@ -187,81 +187,25 @@ class GraphBuilderService:
         self,
         graph_id: str,
         chunks: List[Any],
-        batch_size: int = 3,
+        batch_size: int = 5,
         progress_callback: Optional[Callable] = None,
-        max_workers: int = 2
     ) -> List[str]:
         """
-        Add text in parallel to graph using ThreadPoolExecutor.
-        Each thread processes one chunk independently (LLM call + Neo4j merge).
-        Returns uuid list of all episodes. Supports both strings and TextChunks.
+        Add text chunks to the graph.
+        Now leverages the concurrent batch processing in Neo4jStorage.
         """
-        # Lower default max_workers to 2 for better stability on local LLMs
-        episode_uuids = [None] * len(chunks)
-        total_chunks = len(chunks)
+        logger.info(f"[graph_build] Delegating processing of {len(chunks)} chunks to Neo4jStorage (batch_size={batch_size})")
 
-        logger.info(f"[graph_build] Starting Parallel Extraction: {total_chunks} chunks (max_workers={max_workers})")
+        # Directly call the storage-level batch processor which we optimized for concurrency
+        episode_uuids = self.storage.add_text_batch(
+            graph_id,
+            chunks,
+            batch_size=batch_size,
+            progress_callback=progress_callback
+        )
 
-        def _process_single_chunk(idx, chunk_data):
-            # Handle both raw strings and TextChunk objects
-            if hasattr(chunk_data, 'text'):
-                text = chunk_data.text
-                metadata = chunk_data.metadata
-            elif isinstance(chunk_data, dict) and "text" in chunk_data:
-                text = chunk_data["text"]
-                metadata = chunk_data.get("metadata")
-            else:
-                text = str(chunk_data)
-                metadata = None
-
-            t0 = time.time()
-            try:
-                episode_id = self.storage.add_text(graph_id, text, metadata=metadata)
-                elapsed = time.time() - t0
-                log_msg = f"Chunk {idx+1}/{total_chunks} extracted in {elapsed:.1f}s"
-                logger.info(f"[graph_build] {log_msg}")
-                return idx, episode_id, log_msg
-            except Exception as e:
-                elapsed = time.time() - t0
-                err_msg = f"Chunk {idx+1}/{total_chunks} FAILED after {elapsed:.1f}s: {e}"
-                logger.error(f"[graph_build] {err_msg}")
-                raise e
-
-        processed_count = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Map futures to indices
-            future_to_idx = {
-                executor.submit(_process_single_chunk, i, chunk): i
-                for i, chunk in enumerate(chunks)
-            }
-
-            for future in as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                try:
-                    res_idx, episode_id, log_msg = future.result()
-                    episode_uuids[res_idx] = episode_id
-                    processed_count += 1
-
-                    if progress_callback:
-                        progress = processed_count / total_chunks
-                        # Pass log message to progress callback if it supports it
-                        # The callback in api/graph.py updates task message and logs
-                        progress_callback(
-                            f"Extracted {processed_count}/{total_chunks} chunks...",
-                            progress,
-                            log=log_msg
-                        )
-                except Exception as e:
-                    logger.error(f"Error processing chunk at index {idx}: {e}")
-                    # In case of failure, we still want to finish other threads or stop depending on policy
-                    # Here we let it continue but log the error.
-                    # Note: The task will eventually be marked as failed by the caller if we raise.
-                    if progress_callback:
-                        progress_callback(f"Chunk processing failed: {str(e)}", 0)
-                    raise
-
-        logger.info(f"[graph_build] All {total_chunks} chunks processed successfully")
-        return [uid for uid in episode_uuids if uid is not None]
+        logger.info(f"[graph_build] All {len(chunks)} chunks processed successfully")
+        return episode_uuids
 
     def _get_graph_info(self, graph_id: str) -> GraphInfo:
         """Get graph information"""

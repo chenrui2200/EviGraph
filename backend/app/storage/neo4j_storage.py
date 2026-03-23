@@ -9,6 +9,8 @@ import json
 import time
 import uuid
 import logging
+import traceback
+import concurrent.futures
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Callable, Union
 
@@ -496,36 +498,72 @@ class Neo4jStorage(GraphStorage):
         self,
         graph_id: str,
         chunks: List[Union[str, Any]],
-        batch_size: int = 3,
+        batch_size: int = 5,
         progress_callback: Optional[Callable] = None,
     ) -> List[str]:
-        """Batch-add text chunks with progress reporting. Supports both strings and TextChunks."""
+        """
+        Batch-add text chunks concurrently using a ThreadPoolExecutor.
+        Significantly improves throughput for large PDF documents (e.g., 730 chunks).
+        """
         episode_ids = []
         total = len(chunks)
 
-        for i, chunk_data in enumerate(chunks):
-            # Handle both raw strings and TextChunk objects
-            if hasattr(chunk_data, 'text') and hasattr(chunk_data, 'metadata'):
-                text = chunk_data.text
-                metadata = chunk_data.metadata
-            elif isinstance(chunk_data, dict) and "text" in chunk_data:
-                text = chunk_data["text"]
-                metadata = chunk_data.get("metadata")
-            else:
-                text = str(chunk_data)
-                metadata = None
+        logger.info(f"Starting concurrent processing for {total} chunks with max_workers {batch_size}...")
 
-            if not text or not text.strip():
-                continue
+        # Use ThreadPoolExecutor to parallelize the heavy LLM/Embedding lifting
+        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+            # Map each chunk to a future task
+            future_to_idx = {}
+            for i, chunk_data in enumerate(chunks):
+                # Normalize chunk data
+                if hasattr(chunk_data, 'text') and hasattr(chunk_data, 'metadata'):
+                    text = chunk_data.text
+                    metadata = chunk_data.metadata
+                elif isinstance(chunk_data, dict) and "text" in chunk_data:
+                    text = chunk_data["text"]
+                    metadata = chunk_data.get("metadata")
+                else:
+                    text = str(chunk_data)
+                    metadata = None
 
-            episode_id = self.add_text(graph_id, text, metadata=metadata)
-            episode_ids.append(episode_id)
+                if not text or not text.strip():
+                    continue
 
-            if progress_callback:
-                progress = (i + 1) / total
-                progress_callback(progress)
+                # Schedule add_text call
+                future = executor.submit(self.add_text, graph_id, text, metadata=metadata)
+                future_to_idx[future] = i
 
-            logger.info(f"Processed chunk {i + 1}/{total}")
+            # Collect results as they complete
+            completed = 0
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                log_msg = ""
+                try:
+                    episode_id = future.result()
+                    episode_ids.append(episode_id)
+                    log_msg = f"Chunk {idx+1}/{total} extracted successfully."
+                except Exception as e:
+                    log_msg = f"Error processing chunk {idx+1}: {e}"
+                    logger.error(f"{log_msg}\n{traceback.format_exc()}")
+
+                completed += 1
+                if progress_callback:
+                    # Adaptive callback signature handling
+                    import inspect
+                    sig = inspect.signature(progress_callback)
+                    if len(sig.parameters) >= 2:
+                        # Call as (message, progress, log)
+                        progress_callback(
+                            f"Extracted {completed}/{total} chunks...",
+                            completed / total,
+                            log=log_msg
+                        )
+                    else:
+                        # Call as (progress)
+                        progress_callback(completed / total)
+
+                if completed % 10 == 0 or completed == total:
+                    logger.info(f"Processed {completed}/{total} chunks (Concurrent)...")
 
         return episode_ids
 

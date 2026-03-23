@@ -10,7 +10,7 @@
       <section class="hero-section" :style="s.heroSection">
         <div class="hero-left" :style="s.heroLeft">
           <div class="tag-row" :style="s.tagRow">
-            <span class="orange-tag" :style="s.orangeTag">离线多智能体仿真引擎</span>
+            <span class="orange-tag" :style="s.orangeTag">知识图谱自动构建索引引擎</span>
             <span class="version-text" :style="s.versionText">/ v0.1-预览版</span>
           </div>
 
@@ -21,7 +21,7 @@
 
           <div class="hero-desc" :style="s.heroDesc">
             <p :style="s.heroDescP">
-              通过单一文档，<span :style="s.highlightBold">MiroFish Offline</span> 提取现实种子并构建一个由 <span :style="s.highlightOrange">自主 AI 智能体</span> 组成的平行世界。注入变量，观察涌现行为，并在复杂的社会动态中寻找 <span :style="s.highlightCode">"局部最优解"</span>。
+              通过单一文档，<span :style="s.highlightBold">MiroFish Offline</span> 提取现实种子并构建一个由 <span :style="s.highlightOrange">自主 AI 知识图谱构架</span> 组成的知识库。注入问题，观察涌现行为，并在复杂的知识库群中寻找 <span :style="s.highlightCode">答案</span>。
             </p>
           </div>
         </div>
@@ -117,9 +117,18 @@
             </div>
 
             <div :style="s.btnSection">
-              <button :style="s.startEngineBtn" @click="startSimulation" :disabled="!canSubmit || loading">
-                <span v-if="!loading">开始构建知识库</span>
-                <span v-else>正在处理...</span>
+              <button
+                :style="{
+                  ...s.startEngineBtn,
+                  background: (!canSubmit || loading || systemStatus !== 'ok') ? '#666' : '#FF4500',
+                  cursor: (!canSubmit || loading || systemStatus !== 'ok') ? 'not-allowed' : 'pointer'
+                }"
+                @click="startSimulation"
+                :disabled="!canSubmit || loading || systemStatus !== 'ok'"
+              >
+                <span v-if="loading">正在处理...</span>
+                <span v-else-if="systemStatus !== 'ok'">系统未就绪 (请检查左侧状态)</span>
+                <span v-else>开始构建知识库</span>
                 <span>→</span>
               </button>
             </div>
