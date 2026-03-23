@@ -392,11 +392,6 @@ class Neo4jStorage(GraphStorage):
         print(f"💾 [STEP 6/6] [{episode_id[:8]}] Finalizing in Neo4j...")
         logger.info(f"💾 [STEP 6/6] [{episode_id[:8]}] Writing entities and relations to Neo4j...")
         with self._driver.session() as session:
-            # Mark episode as processed
-            session.run("MATCH (ep:Episode {uuid: $uuid}) SET ep.processed = true", uuid=episode_id)
-            # Mark episode as processed
-            session.run("MATCH (ep:Episode {uuid: $uuid}) SET ep.processed = true", uuid=episode_id)
-
             # MERGE entities and link to episode
             entity_uuid_map: Dict[str, str] = {}
             for idx, entity in enumerate(entities):
@@ -497,7 +492,6 @@ class Neo4jStorage(GraphStorage):
                 t_uuid = entity_uuid_map.get(t_name.lower())
 
                 # Issue 1 Fix: Prevent self-loops (Entity pointing to itself)
-                # This ensures the graph remains a meaningful DAG for reasoning.
                 if s_uuid and t_uuid and s_uuid == t_uuid:
                     logger.debug(f"[add_text] Skipping self-loop relation: {s_name} --[{r_type}]--> {t_name}")
                     continue
@@ -543,7 +537,10 @@ class Neo4jStorage(GraphStorage):
                         )
                     self._call_with_retry(session.execute_write, _merge_rel)
 
-        logger.info(f"[add_text] Knowledge update done for episode {episode_id[:8]}")
+            # CRITICAL: Mark episode as processed ONLY AFTER EVERYTHING IS DONE
+            session.run("MATCH (ep:Episode {uuid: $uuid}) SET ep.processed = true", uuid=episode_id)
+
+        logger.info(f"✅ [DONE] Episode {episode_id[:8]} processed successfully.")
         return episode_id
 
     def add_text_batch(

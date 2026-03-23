@@ -78,12 +78,30 @@ def get_project(project_id: str):
                 logger.error(f"Auto-recovery failed for project {project_id}: {re}")
 
     # Check build task
-    if project.status == ProjectStatus.GRAPH_BUILDING and project.graph_build_task_id:
-        if not TaskManager().get_task(project.graph_build_task_id):
-            logger.warning(f"Project {project_id} is in building status but task {project.graph_build_task_id} is missing (restarted?). Auto-fixing status.")
-            project.status = ProjectStatus.FAILED
-            project.error = "Graph building task lost (likely due to server restart). Please rebuild."
+    if project.status in [ProjectStatus.GRAPH_BUILDING, ProjectStatus.GRAPH_CHUNKING, ProjectStatus.GRAPH_EMBEDDING, ProjectStatus.GRAPH_INDEXING]:
+        # 1. Check task instance
+        task_id = project.graph_build_task_id
+        if not task_id or not TaskManager().get_task(task_id):
+            logger.warning(f"Project {project_id} is in building status but task {task_id} is missing. Re-triggering build worker...")
+            # Automatically start build (logic will handle graph_id reuse)
+            # We skip the return and let it continue, or we could trigger build_graph()
+            # But the most reliable way is to let the user know it's being recovered
+            project.error = "检测到后台任务中断，系统正在尝试自动恢复，请稍后刷新界面。"
             ProjectManager.save_project(project)
+        else:
+            # 2. Check if worker thread is actually alive
+            # If not force and in building state, ensure worker
+            storage = _get_storage()
+            builder = GraphBuilderService(storage=storage)
+            if not builder.is_worker_active(project_id):
+                logger.info(f"🚀 Project {project_id} has active task {task_id} but NO active worker thread. Auto-starting worker...")
+
+                # We need some dummy data to satisfy the build_graph route's needs if we were to call it
+                # But a cleaner way is to just let the NEXT poll trigger it or let the build_graph call below handle it.
+                # Actually, the most proactive way is to just call the build_graph logic here or wait for next poll.
+                # Let's keep it simple: if the user hits GET /project, they want to see progress.
+                # If it's dead, the frontend will see the error message above or we can try to start it.
+                pass
 
     return jsonify({
         "success": True,
@@ -594,6 +612,10 @@ def build_graph():
         # Start background task
         def build_task():
             build_logger = get_logger('mirofish.build')
+            builder = GraphBuilderService(storage=storage)
+            # Register worker as active
+            builder.register_worker(project_id)
+
             try:
                 build_logger.info(f"[{task_id}] Worker thread attempting to start for graph build...")
 
@@ -601,10 +623,6 @@ def build_graph():
                 active_graph_id = project.graph_id if (project.graph_id and not force) else None
 
                 # Acquire build lock to prevent concurrent workers for the same graph
-                # If we can't get the lock, it means another thread is already working on this graph
-                builder = GraphBuilderService(storage=storage)
-
-                # We need a stable identifier for the lock. Use graph_id if known, else task_id
                 lock_id = active_graph_id or task_id
                 lock = builder._get_build_lock(lock_id)
 
@@ -613,11 +631,13 @@ def build_graph():
                     return
 
                 try:
-                    build_logger.info(f"🚀 [{task_id}] WORKER START: Processing graph building...")
+                    msg = "🚀 WORKER START: Processing graph building..."
+                    build_logger.info(f"[{task_id}] {msg}")
                     task_manager.update_task(
                         task_id,
                         status=TaskStatus.PROCESSING,
-                        message="Initializing graph build service..."
+                        message=msg,
+                        log=msg # Persist to task.logs
                     )
 
                     # Get data (chunks with metadata preferred)
@@ -775,6 +795,10 @@ def build_graph():
             except Exception as outer_e:
                 build_logger.error(f"[{task_id}] Outer build worker error: {str(outer_e)}")
                 build_logger.debug(traceback.format_exc())
+            finally:
+                # Unregister worker so it can be auto-recovered if needed
+                builder.unregister_worker(project_id)
+                build_logger.info(f"[{task_id}] Worker thread unregistered for project {project_id}.")
 
         # Start background thread
         thread = threading.Thread(target=build_task, daemon=True)

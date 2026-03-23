@@ -41,6 +41,10 @@ class GraphBuilderService:
     Build knowledge graph through GraphStorage interface
     """
 
+    # Global registry to track active build workers
+    _active_workers: Dict[str, bool] = {} # project_id -> is_active
+    _registry_lock = threading.Lock()
+
     # Global lock to prevent multiple build threads for the same graph
     _build_locks: Dict[str, threading.Lock] = {}
     _lock_manager_lock = threading.Lock()
@@ -54,6 +58,20 @@ class GraphBuilderService:
             if graph_id not in self._build_locks:
                 self._build_locks[graph_id] = threading.Lock()
             return self._build_locks[graph_id]
+
+    def is_worker_active(self, project_id: str) -> bool:
+        """Check if a worker is currently running for this project"""
+        with self._registry_lock:
+            return self._active_workers.get(project_id, False)
+
+    def register_worker(self, project_id: str):
+        with self._registry_lock:
+            self._active_workers[project_id] = True
+
+    def unregister_worker(self, project_id: str):
+        with self._registry_lock:
+            if project_id in self._active_workers:
+                self._active_workers[project_id] = False
 
     def build_graph_async(
         self,
