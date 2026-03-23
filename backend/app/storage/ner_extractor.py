@@ -50,7 +50,7 @@ _OUTPUT_FORMAT = """
 Return ONLY valid JSON:
 {{
   "entities": [
-    {{"name": "Full Name", "type": "OntologyType", "attributes": {{"key": "value"}}}}
+    {{"name": "Full Name", "type": "OntologyType", "description": "Concise but meaningful summary of what this is based on text", "attributes": {{"key": "value"}}}}
   ],
   "relations": [
     {{"source": "Full Name", "target": "Full Name", "type": "ONTOLOGY_TYPE", "fact": "Detailed context."}}
@@ -65,7 +65,7 @@ _USER_PROMPT = """Extract entities and relations from the following text:
 class NERExtractor:
     """Extract entities and relations from text using local LLM."""
 
-    def __init__(self, llm_client: Optional[LLMClient] = None, max_retries: int = 2):
+    def __init__(self, llm_client: Optional[LLMClient] = None, max_retries: int = 3):
         self.llm = llm_client or LLMClient()
         self.max_retries = max_retries
 
@@ -108,14 +108,12 @@ class NERExtractor:
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
-                print(f"🤖 [LLM CHAT] Starting NER extraction (attempt {attempt + 1})...")
                 logger.info(f"Calling LLM for {'Engineering' if is_engineering else 'Social'} NER extraction (attempt {attempt + 1})...")
                 result = self.llm.chat_json(
                     messages=messages,
                     temperature=0.1,  # Low temp for extraction precision
-                    max_tokens=4096,
+                    max_tokens=4096 * 3,
                 )
-                print(f"✅ [LLM CHAT] Success! Received response.")
                 logger.debug(f"LLM raw response for extraction: {result}")
                 cleaned_result = self._validate_and_clean(result, ontology)
                 logger.info(f"Extracted {len(cleaned_result.get('entities', []))} entities and {len(cleaned_result.get('relations', []))} relations.")
@@ -235,6 +233,7 @@ class NERExtractor:
             cleaned_entities.append({
                 "name": name,
                 "type": etype,
+                "description": str(entity.get("description", "")).strip(),
                 "attributes": entity.get("attributes", {}),
             })
 

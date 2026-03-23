@@ -8,6 +8,7 @@ Includes: CRUD, NER/RE-based text ingestion, hybrid search, retry logic.
 import json
 import time
 import uuid
+import hashlib
 import logging
 import traceback
 import concurrent.futures
@@ -237,7 +238,6 @@ class Neo4jStorage(GraphStorage):
 
     def add_text(self, graph_id: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Process text: Create skeleton -> NER/RE -> batch embed -> update knowledge."""
-        import hashlib
         # Generate stable UUID based on graph_id and content to allow idempotency
         content_seed = f"{graph_id}:{text}".encode('utf-8')
         episode_id = str(uuid.UUID(hashlib.md5(content_seed).hexdigest()))
@@ -256,25 +256,20 @@ class Neo4jStorage(GraphStorage):
                 logger.info(f"⏩ [SKIP] Episode {episode_id[:8]} already processed. Moving to next.")
                 return episode_id
 
-        print(f"🔨 [START] Processing Episode {episode_id[:8]}...")
         logger.info(f"🔨 [START] Processing Episode {episode_id[:8]} (Content Length: {len(text)})")
 
         # 1. Create episode node and structural skeleton IMMEDIATELY
         chunk_embedding = []
         try:
-            print(f"📡 [STEP 1/6] [{episode_id[:8]}] Requesting Embedding...")
             logger.info(f"📡 [STEP 1/6] [{episode_id[:8]}] Requesting Embedding...")
             # Embedding is often the first bottleneck
             chunk_embedding = self._embedding.embed(text)
-            print(f"✅ [STEP 1/6] [{episode_id[:8]}] Embedding received.")
             logger.info(f"✅ [STEP 1/6] [{episode_id[:8]}] Embedding received.")
         except Exception as e:
-            print(f"❌ [STEP 1/6] [{episode_id[:8]}] Embedding failed: {e}")
             logger.warning(f"❌ [STEP 1/6] [{episode_id[:8]}] Embedding failed: {e}")
 
         with self._driver.session() as session:
             def _create_skeleton(tx):
-                print(f"💾 [STEP 2/6] [{episode_id[:8]}] Saving Skeleton to Neo4j...")
                 logger.info(f"💾 [STEP 2/6] [{episode_id[:8]}] Creating/Merging Episode node in Neo4j...")
                 # Use MERGE instead of CREATE to handle episodes that were created but not fully processed
                 tx.run(
@@ -349,39 +344,39 @@ class Neo4jStorage(GraphStorage):
                             )
 
             self._call_with_retry(session.execute_write, _create_skeleton)
-            print(f"✅ [STEP 2/6] [{episode_id[:8]}] Episode skeleton ready.")
             logger.info(f"✅ [STEP 2/6] [{episode_id[:8]}] Episode skeleton ready.")
 
         # 2. Knowledge Extraction (Guided by Ontology)
-        print(f"🔍 [STEP 3/6] [{episode_id[:8]}] Fetching ontology...")
         logger.info(f"🔍 [STEP 3/6] [{episode_id[:8]}] Fetching ontology...")
         ontology = self.get_ontology(graph_id)
 
-        print(f"🤖 [STEP 4/6] [{episode_id[:8]}] Calling LLM Chat (NER)...")
         logger.info(f"🤖 [STEP 4/6] [{episode_id[:8]}] Calling LLM for NER extraction (Chat)...")
         # This is where 'chat' method is called
         extraction = self._ner.extract(text, ontology)
         entities = extraction.get("entities", [])
         relations = extraction.get("relations", [])
 
-        print(f"✅ [STEP 4/6] [{episode_id[:8]}] NER Done: {len(entities)} entities found.")
         logger.info(f"✅ [STEP 4/6] [{episode_id[:8]}] NER extracted {len(entities)} entities and {len(relations)} relations.")
 
         # 3. Batch embed all extraction results
-        entity_summaries = [f"{e['name']} ({e['type']})" for e in entities]
+        entity_summaries = []
+        for e in entities:
+            # Prefer LLM-extracted description, fallback to "Name (Type)"
+            desc = e.get("description")
+            if not desc or len(desc) < 3:
+                desc = f"{e['name']} ({e['type']})"
+            entity_summaries.append(desc)
+
         fact_texts = [r.get("fact", f"{r['source']} {r['type']} {r['target']}") for r in relations]
         all_texts_to_embed = entity_summaries + fact_texts
 
         all_embeddings: list = []
         if all_texts_to_embed:
             try:
-                print(f"📡 [STEP 5/6] [{episode_id[:8]}] Embedding results...")
                 logger.info(f"📡 [STEP 5/6] [{episode_id[:8]}] Embedding {len(all_texts_to_embed)} facts/entities...")
                 all_embeddings = self._embedding.embed_batch(all_texts_to_embed)
-                print(f"✅ [STEP 5/6] [{episode_id[:8]}] Knowledge embeddings received.")
                 logger.info(f"✅ [STEP 5/6] [{episode_id[:8]}] Knowledge embeddings received.")
             except Exception as e:
-                print(f"❌ [STEP 5/6] [{episode_id[:8]}] Knowledge embedding failed: {e}")
                 logger.warning(f"❌ [STEP 5/6] [{episode_id[:8]}] Knowledge embedding failed: {e}")
                 all_embeddings = [[] for _ in all_texts_to_embed]
 
@@ -389,7 +384,6 @@ class Neo4jStorage(GraphStorage):
         relation_embeddings = all_embeddings[len(entities):]
 
         # 4. Write knowledge back to Neo4j
-        print(f"💾 [STEP 6/6] [{episode_id[:8]}] Finalizing in Neo4j...")
         logger.info(f"💾 [STEP 6/6] [{episode_id[:8]}] Writing entities and relations to Neo4j...")
         with self._driver.session() as session:
             # MERGE entities and link to episode

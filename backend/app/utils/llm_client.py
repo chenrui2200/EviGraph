@@ -133,7 +133,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.3,
-        max_tokens: int = 4096
+        max_tokens: int = 4096 * 3
     ) -> Dict[str, Any]:
         """
         Send chat request and return JSON with smart repair logic
@@ -158,24 +158,35 @@ class LLMClient:
             try:
                 return json.loads(repaired)
             except Exception:
-                raise ValueError(f"Invalid and unrepairable JSON format from LLM: {cleaned_response}")
+                # Truncate long responses in error messages to avoid bloating logs/SSE
+                truncated_resp = cleaned_response[:500] + "..." if len(cleaned_response) > 500 else cleaned_response
+                raise ValueError(f"Invalid and unrepairable JSON format from LLM (truncated): {truncated_resp}")
 
     def _repair_json(self, json_str: str) -> str:
         """
-        Basic logic to repair truncated JSON by balancing braces and brackets.
-        Useful when LLM hits token limit or times out midway.
+        Robust logic to repair truncated JSON by balancing braces and brackets.
+        Handles partial keys/values at the end of the string.
         """
-        # Remove trailing junk that often appears before truncation
-        json_str = re.sub(r',[\s\n]*$', '', json_str) # remove trailing comma
-        json_str = re.sub(r'\"[\w\s]*$', '', json_str) # remove unclosed string key/value
+        json_str = json_str.strip()
 
+        # 1. Handle common truncation artifacts
+        # Remove trailing commas
+        json_str = re.sub(r',[\s\n]*$', '', json_str)
+
+        # Remove partial keys/values: look for a trailing quote that isn't preceded by a colon or start of object
+        # If the string ends with something like "key": "val... or "key": ...
+        # We try to find the last complete structural element.
+
+        # 2. Balance brackets and braces
         stack = []
         in_string = False
         escaped = False
+        fixed_str = ""
 
-        for char in json_str:
+        for i, char in enumerate(json_str):
             if char == '"' and not escaped:
                 in_string = not in_string
+
             if not in_string:
                 if char == '{':
                     stack.append('}')
@@ -190,12 +201,21 @@ class LLMClient:
             else:
                 escaped = False
 
-        # If we were in a string, close it first
+            fixed_str += char
+
+        # 3. Handle the case where we stopped inside a string
         if in_string:
-            json_str += '"'
+            # If we were in a string, we might have half a key or value.
+            # Easiest fix is to close the quote and let the stack close the objects.
+            fixed_str += '"'
+
+        # 4. Final cleaning: if we ended up with something like "key": " or "key": , remove the dangling key
+        # This is a bit complex, but simple repair often works:
+        fixed_str = re.sub(r',?\s*\"[^"]+\"\s*:\s*\"?$', '', fixed_str)
+        fixed_str = re.sub(r',?\s*\"[^"]+\"\s*:\s*$', '', fixed_str)
 
         # Close all remaining scopes in reverse order
         while stack:
-            json_str += stack.pop()
+            fixed_str += stack.pop()
 
-        return json_str
+        return fixed_str
