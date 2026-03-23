@@ -54,6 +54,26 @@ ORDER BY score DESC
 LIMIT $limit
 """
 
+# Cypher for vector search on episodes (raw text chunks)
+_VECTOR_SEARCH_EPISODES = """
+CALL db.index.vector.queryNodes('episode_embedding', $limit, $query_vector)
+YIELD node, score
+WHERE node.graph_id = $graph_id
+RETURN node AS e, score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
+# Cypher for fulltext search on episodes
+_FULLTEXT_SEARCH_EPISODES = """
+CALL db.index.fulltext.queryNodes('episode_fulltext', $query_text)
+YIELD node, score
+WHERE node.graph_id = $graph_id
+RETURN node AS e, score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
 
 class SearchService:
     """Hybrid search combining vector similarity and keyword matching."""
@@ -63,6 +83,66 @@ class SearchService:
 
     def __init__(self, embedding_service: EmbeddingService):
         self.embedding = embedding_service
+
+    def search_episodes(
+        self,
+        session: Neo4jSession,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Search raw text chunks (episodes)."""
+        query_vector = self.embedding.embed(query)
+
+        # Vector search
+        vector_results = self._run_episode_vector_search(
+            session, graph_id, query_vector, limit * 2
+        )
+
+        # Keyword search
+        keyword_results = self._run_episode_keyword_search(
+            session, graph_id, query, limit * 2
+        )
+
+        # Merge
+        return self._merge_results(vector_results, keyword_results, key="uuid", limit=limit)
+
+    def _run_episode_vector_search(
+        self, session: Neo4jSession, graph_id: str, query_vector: List[float], limit: int
+    ) -> List[Dict[str, Any]]:
+        try:
+            result = session.run(
+                _VECTOR_SEARCH_EPISODES,
+                graph_id=graph_id,
+                query_vector=query_vector,
+                limit=limit,
+            )
+            return [
+                {**dict(record["e"]), "uuid": record["e"]["uuid"], "_score": record["score"]}
+                for record in result
+            ]
+        except Exception as e:
+            logger.warning(f"Vector episode search failed: {e}")
+            return []
+
+    def _run_episode_keyword_search(
+        self, session: Neo4jSession, graph_id: str, query: str, limit: int
+    ) -> List[Dict[str, Any]]:
+        try:
+            safe_query = self._escape_lucene(query)
+            result = session.run(
+                _FULLTEXT_SEARCH_EPISODES,
+                graph_id=graph_id,
+                query_text=safe_query,
+                limit=limit,
+            )
+            return [
+                {**dict(record["e"]), "uuid": record["e"]["uuid"], "_score": record["score"]}
+                for record in result
+            ]
+        except Exception as e:
+            logger.warning(f"Keyword episode search failed: {e}")
+            return []
 
     def search_edges(
         self,

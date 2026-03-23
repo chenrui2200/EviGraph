@@ -38,10 +38,11 @@ _SOCIAL_MODE_PROMPT = """
 _ENGINEERING_MODE_PROMPT = """
 ## ⚙️ Domain Mode: Engineering & Logic Specification
 - **Exhaustive Extraction**: Capture ALL technical entities mentioned. Do not group distinct components (e.g., "Transformer", "Switch") into a single "Equipment" type if the ontology allows for specificity.
-- **Structural Integrity**: Ensure clause numbers (e.g., "3.1.1") are captured as part of names or attributes.
+- **Structural Integrity**: Ensure clause numbers (e.g., "3.1.1", "7.6.49") are captured as distinct `Clause` or `Requirement` entities. The `name` MUST include the number and title (e.g., "Clause 7.6.49: Laying of Porous Ducts").
+- **Content Preservation**: For clauses, store the full detailed text of all sub-items (1, 2, 3...) in the `summary` field. DO NOT truncate the regulatory requirements.
 - **Hierarchy Detection**: If the text indicates a containment or parent-child relationship (e.g., "Section 3 includes Clause 3.1", "The panel contains a breaker"), EXPLICITLY extract this as a relationship (e.g., `SUB_CLAUSE_OF`, `PART_OF`).
 - **Logical Chaining**: Extract relationships like "REFERENCES", "CONSTRAINS", or "REQUIRES" even if they involve abstract concepts.
-- **Parameter Precision**: Capture units (A, V, m) and limit types (min/max) accurately.
+- **Parameter Precision**: Capture units (A, V, m, %) and limit types (min/max/greater than) accurately in the `attributes`.
 """
 
 _OUTPUT_FORMAT = """

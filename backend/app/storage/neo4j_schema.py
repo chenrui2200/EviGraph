@@ -72,6 +72,16 @@ OPTIONS {{indexConfig: {{
 }}}}
 """
 
+def get_episode_vector_index_query(dimension: int = 768) -> str:
+    return f"""
+CREATE VECTOR INDEX episode_embedding IF NOT EXISTS
+FOR (e:Episode) ON (e.embedding)
+OPTIONS {{indexConfig: {{
+    `vector.dimensions`: {dimension},
+    `vector.similarity_function`: 'cosine'
+}}}}
+"""
+
 # Fulltext indexes (for BM25 keyword search)
 CREATE_ENTITY_FULLTEXT_INDEX = """
 CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS
@@ -81,6 +91,11 @@ FOR (n:Entity) ON EACH [n.name, n.summary]
 CREATE_FACT_FULLTEXT_INDEX = """
 CREATE FULLTEXT INDEX fact_fulltext IF NOT EXISTS
 FOR ()-[r:RELATION]-() ON EACH [r.fact, r.name]
+"""
+
+CREATE_EPISODE_FULLTEXT_INDEX = """
+CREATE FULLTEXT INDEX episode_fulltext IF NOT EXISTS
+FOR (e:Episode) ON EACH [e.data]
 """
 
 CREATE_ENTITY_NAME_LOWER_INDEX = """
@@ -103,8 +118,10 @@ def get_all_schema_queries(dimension: int = 768) -> list:
         CREATE_EPISODE_GRAPH_ID_INDEX,
         get_entity_vector_index_query(dimension),
         get_relation_vector_index_query(dimension),
+        get_episode_vector_index_query(dimension),
         CREATE_ENTITY_FULLTEXT_INDEX,
         CREATE_FACT_FULLTEXT_INDEX,
+        CREATE_EPISODE_FULLTEXT_INDEX,
     ]
 
 # Keep this for backward compatibility if needed, but the storage class should call the function

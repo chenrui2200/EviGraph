@@ -57,6 +57,11 @@ class Neo4jStorage(GraphStorage):
         # Initialize schema (indexes, constraints)
         self._ensure_schema()
 
+    @property
+    def driver(self) -> GraphDatabase.driver:
+        """Expose the Neo4j driver."""
+        return self._driver
+
     def close(self):
         """Close the Neo4j driver connection."""
         self._driver.close()
@@ -236,9 +241,15 @@ class Neo4jStorage(GraphStorage):
 
         # 1. Create episode node and structural skeleton IMMEDIATELY
         # This provides immediate visual feedback in the graph visualization
+        chunk_embedding = []
+        try:
+            chunk_embedding = self._embedding.embed(text)
+        except Exception as e:
+            logger.warning(f"[add_text] Failed to embed chunk text: {e}")
+
         with self._driver.session() as session:
             def _create_skeleton(tx):
-                # Create episode
+                # Create episode with embedding
                 tx.run(
                     """
                     CREATE (ep:Episode {
@@ -247,6 +258,7 @@ class Neo4jStorage(GraphStorage):
                         data: $data,
                         metadata_json: $metadata_json,
                         processed: false,
+                        embedding: $embedding,
                         created_at: $created_at
                     })
                     """,
@@ -254,6 +266,7 @@ class Neo4jStorage(GraphStorage):
                     graph_id=graph_id,
                     data=text,
                     metadata_json=metadata_json,
+                    embedding=chunk_embedding,
                     created_at=now,
                 )
 
@@ -687,12 +700,20 @@ class Neo4jStorage(GraphStorage):
         """
         Hybrid search — returns results matching the scope.
 
-        Returns a dict with 'edges' and/or 'nodes' lists
-        (callers like zep_tools will wrap into SearchResult).
+        Returns a dict with 'edges', 'nodes', and 'episodes' lists.
         """
-        result = {"edges": [], "nodes": [], "query": query}
+        result = {"edges": [], "nodes": [], "episodes": [], "query": query}
 
         with self._driver.session() as session:
+            # 1. Search Episodes (Raw text chunks) - ALWAYS search as fallback/context
+            episodes = self._search.search_episodes(session, graph_id, query, limit)
+            for e in episodes:
+                for k, v in e.items():
+                    if hasattr(v, "isoformat"):
+                        e[k] = v.isoformat()
+            result["episodes"] = episodes
+
+            # 2. Search Edges
             if scope in ("edges", "both"):
                 edges = self._search.search_edges(
                     session, graph_id, query, limit
@@ -704,6 +725,7 @@ class Neo4jStorage(GraphStorage):
                             e[k] = v.isoformat()
                 result["edges"] = edges
 
+            # 3. Search Nodes
             if scope in ("nodes", "both"):
                 nodes = self._search.search_nodes(
                     session, graph_id, query, limit

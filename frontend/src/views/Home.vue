@@ -49,7 +49,7 @@
 
           <div class="metrics-row" :style="s.metricsRow">
             <div class="metric-card" :style="s.metricCard">
-              <div class="metric-value" :style="s.metricValue">{{ neo4jStatus === 'ok' ? '本地连接' : '离线' }}</div>
+              <div class="metric-value" :style="s.metricValue">{{ neo4jStatus === 'ok' ? '在线' : '离线' }}</div>
               <div class="metric-label" :style="s.metricLabel">Neo4j 数据库</div>
             </div>
             <div class="metric-card" :style="s.metricCard">

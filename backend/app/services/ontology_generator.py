@@ -83,34 +83,34 @@ We are building a **Social Media Opinion Simulation System**. To make this effec
 
 
 # System prompt for ontology generation (Engineering Standard Mode)
-ENGINEERING_ONTOLOGY_PROMPT = """You are a professional knowledge graph ontology design expert specializing in **Industrial Engineering Standards and Technical Specifications**.
+ENGINEERING_ONTOLOGY_PROMPT = """You are a professional knowledge graph ontology design expert specializing in **Industrial Engineering Standards, Technical Specifications, and Regulatory Compliance**.
 
-Your task is to analyze engineering documents (like Power Distribution Codes) and design a schema (Ontology) that captures the rigorous logic of technical requirements.
+Your task is to analyze engineering documents (like Power Distribution Codes, Safety Manuals, or Design Standards) and design a rigorous schema (Ontology) that captures the technical requirements with extreme precision.
 
 **Important: You must output valid JSON format data, do not output anything else.**
 
-## 🎯 Design Goal: Structural Knowledge for Reasoning
-We are building an **Engineering Design Assistant**. Every entity and relation must support logical deduction.
-
-**Exhaustive Extraction**: Aim for maximum granularity. Do not group distinct technical concepts into broad categories. If the text distinguishes between "Circuit Breaker" and "Fuse", define them as separate types if they have different logic.
+## 🎯 Design Goal: Structural Knowledge for Reasoning and Verification
+We are building an **AI Engineering Compliance Auditor**. Every entity and relation must support logical validation and parameter checking.
 
 ### 1. Entity Guidelines
-- **Structural Nodes**: `Clause`, `Section`, `Chapter`.
-- **Physical/Technical Entities**: Specific equipment types (e.g., `Switchgear`, `Transformer`), materials, specific components.
-- **Logic & Constraints**: `Parameter` (e.g., Voltage), `Condition`, `Scenario`, `Threshold`.
-- **Hierarchical Thinking**: Define entities at multiple levels.
+- **Structural Nodes**: `Chapter`, `Section`, `Clause` (e.g., Clause 7.6.49), `SubItem`.
+- **Physical/Technical Entities**: Specific equipment models, materials (e.g., `ConcretePavement`, `PorousDuct`), specific components.
+- **Logic & Constraints**: `Requirement` (The core rule), `Parameter` (e.g., Slope, Depth, Thickness), `Threshold` (Limit values), `Condition` (When the rule applies).
+- **Metric-Focused Attributes**: For parameters, always include `unit` (e.g., %, m, mm), `min_value`, `max_value`, and `operator` (>=, <, etc.).
 
 ### 2. Relationship Guidelines
-- **Hierarchy (CRITICAL)**: Must include `SUB_CLAUSE_OF`, `PART_OF`, `MEMBER_OF`, `CHILD_OF`.
-- **Logical Flow**: `REFERENCES`, `APPLIES_TO`, `CONSTRAINS`, `DETERMINES`.
+- **Structural (CRITICAL)**: `SUB_CLAUSE_OF`, `PART_OF`, `CONTAINED_IN`.
+- **Logical Flow**: `GOVERNS` (A clause governs a component), `SPECIFIES` (A clause specifies a parameter), `REFERENCES`, `REQUIRES`, `CONSTRAINS`.
+- **Constraint Links**: `HAS_PARAMETER`, `APPLIES_WHEN` (Linking requirements to specific scenarios).
 
 ## 📋 Output Format (JSON)
 [Same JSON structure as standard mode]
 
 ## 📏 Strict Design Constraints
-1. **Quantity**: Define **at least 15 and up to 30** specific entity types to ensure no knowledge loss.
-2. **Standard Fallbacks**: Last 2 must be `Person` and `Organization`.
-3. **Hierarchy Focus**: At least 3 relationship types must represent hierarchical containment.
+1. **Granularity**: Do not group "Depth" and "Slope" into a single "Parameter". Define specific types if they have different validation logic.
+2. **Quantity**: Define **at least 20 and up to 40** specific entity types to ensure maximum technical detail retention.
+3. **Hierarchy**: At least 5 relationship types must represent hierarchical containment or logical derivation.
+4. **Standard Fallbacks**: Last 2 must be `Person` and `Organization`.
 """
 
 class OntologyGenerator:
@@ -328,9 +328,9 @@ Based on the above content, design entity types and relationship types.
             if len(edge.get("description", "")) > 100:
                 edge["description"] = edge["description"][:97] + "..."
 
-        # NEW LIMIT: Up to 30 custom entity types, maximum 20 custom edge types
-        MAX_ENTITY_TYPES = 30
-        MAX_EDGE_TYPES = 20
+        # NEW LIMIT: Up to 40 custom entity types, maximum 25 custom edge types
+        MAX_ENTITY_TYPES = 40
+        MAX_EDGE_TYPES = 25
 
         # Fallback type definitions
         person_fallback = {
