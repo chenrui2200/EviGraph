@@ -328,7 +328,17 @@
               
               <!-- Build progress -->
               <div class="detail-section" v-if="buildProgress && currentPhase >= 1">
-                <div class="detail-label">Build Progress</div>
+                <div class="detail-header-row">
+                  <div class="detail-label">Build Progress</div>
+                  <button
+                    class="reset-build-btn"
+                    @click="handleResetBuild"
+                    :disabled="graphLoading"
+                    title="重置当前构建进度并从头开始"
+                  >
+                    重置并重新构建
+                  </button>
+                </div>
                 <div class="progress-bar">
                   <div class="progress-fill" :style="{ width: buildProgress.progress + '%' }"></div>
                 </div>
@@ -495,7 +505,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, searchGraph, updateProject } from '../api/graph'
+import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, searchGraph, updateProject, getTaskEventsURL } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 import * as d3 from 'd3'
 
@@ -567,8 +577,8 @@ const hitTestResults = ref(null)
 const graphContainer = ref(null)
 const graphSvg = ref(null)
 
-// Polling timers
-let pollTimer = null
+// Task connection source (SSE)
+let taskSource = null
 
 // Computed properties
 const statusClass = computed(() => {
@@ -862,17 +872,30 @@ const updatePhaseByStatus = (status) => {
   }
 }
 
+const handleResetBuild = async () => {
+  if (confirm('确定要重置当前构建吗？这将删除已生成的图谱数据并从头开始。')) {
+    stopPolling()
+    stopGraphPolling()
+    graphData.value = null
+    systemLogs.value = []
+    await startBuildGraph(true)
+  }
+}
+
 // Start building graph
-const startBuildGraph = async () => {
+const startBuildGraph = async (force = false) => {
   try {
     currentPhase.value = 1
     // Initialize progress
     buildProgress.value = {
       progress: 0,
-      message: 'Starting graph build...'
+      message: force ? 'Resetting and starting new build...' : 'Starting graph build...'
     }
 
-    const response = await buildGraph({ project_id: currentProjectId.value })
+    const response = await buildGraph({
+      project_id: currentProjectId.value,
+      force: force
+    })
 
     if (response.success) {
       buildProgress.value.message = 'Graph build task started...'
@@ -958,109 +981,139 @@ const fetchGraphData = async () => {
   }
 }
 
-// Poll task status
+// Start listening to task events (SSE)
 const startPollingTask = (taskId, type = 'build') => {
-  // Execute query once immediately
-  pollTaskStatus(taskId, type)
+  if (taskSource) {
+    taskSource.close()
+  }
 
-  // Then poll at intervals
-  pollTimer = setInterval(() => {
-    pollTaskStatus(taskId, type)
-  }, 2000)
+  console.log(`📡 Starting SSE listener for ${type} task: ${taskId}`)
+  const url = getTaskEventsURL(taskId)
+  taskSource = new EventSource(url)
+
+  taskSource.onmessage = async (event) => {
+    try {
+      const { type: msgType, data } = JSON.parse(event.data)
+
+      // Handle initial state
+      if (msgType === 'init') {
+        const task = data
+        console.log(`✅ SSE initialized for ${type} task`)
+
+        // Initial logs
+        if (task.logs && task.logs.length > 0) {
+          systemLogs.value = task.logs.map(l => ({
+            time: l.timestamp,
+            msg: l.message
+          }))
+        }
+
+        updateTaskUI(task, type)
+        return
+      }
+
+      // Handle incremental updates
+      if (msgType === 'update') {
+        const payload = data
+
+        // Append new logs
+        if (payload.new_logs && payload.new_logs.length > 0) {
+          const incomingLogs = payload.new_logs.map(l => ({
+            time: l.timestamp,
+            msg: l.message
+          }))
+          systemLogs.value = [...systemLogs.value, ...incomingLogs]
+        }
+
+        updateTaskUI(payload, type)
+
+        // Close connection on finish
+        if (payload.status === 'completed' || payload.status === 'failed') {
+          console.log(`🏁 SSE task finished: ${payload.status}`)
+          handleTaskFinished(payload, type)
+          stopPolling()
+        }
+      }
+    } catch (err) {
+      console.error('SSE message parsing error:', err)
+    }
+  }
+
+  taskSource.onerror = (err) => {
+    console.error('SSE connection error:', err)
+    // Fallback to single status check if SSE fails
+    getTaskStatus(taskId).then(res => {
+      if (res.success) {
+        updateTaskUI(res.data, type)
+        if (res.data.status === 'completed' || res.data.status === 'failed') {
+          handleTaskFinished(res.data, type)
+          stopPolling()
+        }
+      }
+    })
+  }
 }
 
-// Query task status
-const pollTaskStatus = async (taskId, type = 'build') => {
-  try {
-    const response = await getTaskStatus(taskId)
-
-    if (response.success) {
-      const task = response.data
-
-      // Update logs dashboard
-      if (task.logs && task.logs.length > 0) {
-        // Map backend log format {timestamp, message} to frontend format {time, msg}
-        const newLogs = task.logs.map(l => ({
-          time: l.timestamp,
-          msg: l.message
-        }))
-
-        // Only update if logs changed (simple length check for performance)
-        if (newLogs.length !== systemLogs.value.length) {
-          systemLogs.value = newLogs
-        }
-      }
-
-      // Update progress display
-      if (type === 'ontology') {
-        currentPhase.value = 0
-        ontologyProgress.value = {
-          progress: task.progress || 0,
-          message: task.message || 'Analyzing documents...'
-        }
-      } else {
-        currentPhase.value = 1
-        buildProgress.value = {
-          progress: task.progress || 0,
-          message: task.message || 'Processing...'
-        }
-      }
-
-      console.log(`${type} task status:`, task.status, 'Progress:', task.progress)
-
-      if (task.status === 'completed') {
-        console.log(`✅ ${type} task complete`)
-
-        stopPolling()
-
-        if (type === 'ontology') {
-          ontologyProgress.value = null
-
-          // Small delay to ensure backend disk persistence is stable
-          setTimeout(async () => {
-            // Reload project data
-            const projectResponse = await getProject(currentProjectId.value)
-            if (projectResponse.success) {
-              projectData.value = projectResponse.data
-            }
-            // Automatically move to phase 2
-            await startBuildGraph()
-          }, 1000)
-        } else {
-          stopGraphPolling()
-          currentPhase.value = 2
-          buildProgress.value = {
-            progress: 100,
-            message: 'Build complete, loading graph...'
-          }
-
-          // Reload project data to get graph_id
-          const projectResponse = await getProject(currentProjectId.value)
-          if (projectResponse.success) {
-            projectData.value = projectResponse.data
-            if (projectResponse.data.graph_id) {
-              await loadGraph(projectResponse.data.graph_id)
-            }
-          }
-          buildProgress.value = null
-        }
-      } else if (task.status === 'failed') {
-        stopPolling()
-        stopGraphPolling()
-        error.value = `${type} failed: ` + (task.error || 'Unknown error')
-        if (type === 'ontology') ontologyProgress.value = null
-        else buildProgress.value = null
-      }
+// Shared UI update logic for task
+const updateTaskUI = (taskData, type) => {
+  if (type === 'ontology') {
+    currentPhase.value = 0
+    ontologyProgress.value = {
+      progress: taskData.progress ?? (ontologyProgress.value?.progress || 0),
+      message: taskData.message ?? (ontologyProgress.value?.message || 'Analyzing documents...')
     }
-  } catch (err) {
-    console.error('Poll task error:', err)
+  } else {
+    currentPhase.value = 1
+    buildProgress.value = {
+      progress: taskData.progress ?? (buildProgress.value?.progress || 0),
+      message: taskData.message ?? (buildProgress.value?.message || 'Processing...')
+    }
+  }
+}
+
+// Handle task finished transition
+const handleTaskFinished = async (taskData, type) => {
+  if (taskData.status === 'completed') {
+    console.log(`✅ ${type} task transition triggered`)
+
+    if (type === 'ontology') {
+      ontologyProgress.value = null
+      setTimeout(async () => {
+        const projectResponse = await getProject(currentProjectId.value)
+        if (projectResponse.success) {
+          projectData.value = projectResponse.data
+        }
+        await startBuildGraph()
+      }, 1000)
+    } else {
+      stopGraphPolling()
+      currentPhase.value = 2
+      buildProgress.value = {
+        progress: 100,
+        message: 'Build complete, loading graph...'
+      }
+
+      const projectResponse = await getProject(currentProjectId.value)
+      if (projectResponse.success) {
+        projectData.value = projectResponse.data
+        if (projectResponse.data.graph_id) {
+          await loadGraph(projectResponse.data.graph_id)
+        }
+      }
+      buildProgress.value = null
+    }
+  } else if (taskData.status === 'failed') {
+    stopGraphPolling()
+    error.value = `${type} failed: ` + (taskData.error || 'Unknown error')
+    if (type === 'ontology') ontologyProgress.value = null
+    else buildProgress.value = null
   }
 }
 
 const stopPolling = () => {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
+  if (taskSource) {
+    taskSource.close()
+    taskSource = null
   }
 }
 
@@ -1740,6 +1793,35 @@ onUnmounted(() => {
 
 .detail-section {
   margin-bottom: 12px;
+}
+
+.detail-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.reset-build-btn {
+  font-size: 0.7rem;
+  padding: 4px 12px;
+  background: #C5283D;
+  border: 1px solid #C5283D;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 2px 4px rgba(197, 40, 61, 0.2);
+}
+
+.reset-build-btn:hover:not(:disabled) {
+  background: #a32032;
+  border-color: #a32032;
+}
+
+.reset-build-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 .detail-summary {

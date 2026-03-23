@@ -114,7 +114,10 @@
           </div>
           <div class="step-status">
             <span v-if="currentPhase > 1" class="badge success">已完成</span>
-            <span v-else-if="currentPhase === 1" class="badge processing">{{ buildProgress?.progress || 0 }}%</span>
+            <div v-else-if="currentPhase === 1" class="status-with-action">
+              <button class="reset-btn-mini" @click="handleReset" title="重置并重新构建">↻ 重置</button>
+              <span class="badge processing">{{ buildProgress?.progress || 0 }}%</span>
+            </div>
             <span v-else class="badge pending">等待中</span>
           </div>
         </div>
@@ -243,7 +246,13 @@ const props = defineProps({
   systemLogs: { type: Array, default: () => [] }
 })
 
-const emit = defineEmits(['next-step'])
+const emit = defineEmits(['next-step', 'reset-build'])
+
+const handleReset = () => {
+  if (confirm('确定要重置并重新构建吗？')) {
+    emit('reset-build')
+  }
+}
 
 const selectedOntologyItem = ref(null)
 const logContent = ref(null)
@@ -469,6 +478,29 @@ watch(() => props.systemLogs.length, () => {
 .badge.processing { background: #FF5722; color: #FFF; }
 .badge.accent { background: #FF5722; color: #FFF; }
 .badge.pending { background: #F5F5F5; color: #999; }
+
+.status-with-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reset-btn-mini {
+  background: #FFF;
+  border: 1px solid #FF5722;
+  color: #FF5722;
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.reset-btn-mini:hover {
+  background: #FF5722;
+  color: #FFF;
+}
 
 .api-note {
   font-family: 'JetBrains Mono', monospace;

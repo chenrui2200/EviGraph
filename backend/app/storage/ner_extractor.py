@@ -108,12 +108,14 @@ class NERExtractor:
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
+                print(f"🤖 [LLM CHAT] Starting NER extraction (attempt {attempt + 1})...")
                 logger.info(f"Calling LLM for {'Engineering' if is_engineering else 'Social'} NER extraction (attempt {attempt + 1})...")
                 result = self.llm.chat_json(
                     messages=messages,
                     temperature=0.1,  # Low temp for extraction precision
                     max_tokens=4096,
                 )
+                print(f"✅ [LLM CHAT] Success! Received response.")
                 logger.debug(f"LLM raw response for extraction: {result}")
                 cleaned_result = self._validate_and_clean(result, ontology)
                 logger.info(f"Extracted {len(cleaned_result.get('entities', []))} entities and {len(cleaned_result.get('relations', []))} relations.")

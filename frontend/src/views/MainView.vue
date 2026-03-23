@@ -58,6 +58,7 @@
           :graphData="graphData"
           :systemLogs="systemLogs"
           @next-step="handleNextStep"
+          @reset-build="handleResetBuild"
         />
         <!-- Step 5: Interaction (Analysis) -->
         <Step5Interaction
@@ -77,7 +78,7 @@ import GraphPanel from '../components/GraphPanel.vue'
 import Step1GraphBuild from '../components/Step1GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import Step5Interaction from '../components/Step5Interaction.vue'
-import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
+import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, getTaskEventsURL, updateProject } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 
 const route = useRoute()
@@ -103,8 +104,8 @@ const ontologyProgress = ref(null)
 const buildProgress = ref(null)
 const systemLogs = ref([])
 
-// Polling timers
-let pollTimer = null
+// Task connection source (SSE)
+let taskSource = null
 let graphPollTimer = null
 
 // --- Computed Layout Styles ---
@@ -311,13 +312,24 @@ const updatePhaseByStatus = (status) => {
   }
 }
 
-const startBuildGraph = async () => {
+const handleResetBuild = async () => {
+  stopPolling()
+  stopGraphPolling()
+  graphData.value = null
+  systemLogs.value = []
+  await startBuildGraph(true)
+}
+
+const startBuildGraph = async (force = false) => {
   try {
     currentPhase.value = 1
-    buildProgress.value = { progress: 0, message: 'Starting build...' }
+    buildProgress.value = { progress: 0, message: force ? 'Resetting and starting build...' : 'Starting build...' }
     addLog('Initiating graph build...')
-    
-    const res = await buildGraph({ project_id: currentProjectId.value })
+
+    const res = await buildGraph({
+      project_id: currentProjectId.value,
+      force: force
+    })
     if (res.success) {
       addLog(`Graph build task started. Task ID: ${res.data.task_id}`)
       startGraphPolling()
@@ -357,67 +369,105 @@ const fetchGraphData = async () => {
 }
 
 const startPollingTask = (taskId, type = 'build') => {
-  pollTaskStatus(taskId, type)
-  pollTimer = setInterval(() => pollTaskStatus(taskId, type), 2000)
+  if (taskSource) {
+    taskSource.close()
+  }
+
+  console.log(`📡 Starting SSE listener (MainView) for ${type} task: ${taskId}`)
+  const url = getTaskEventsURL(taskId)
+  taskSource = new EventSource(url)
+
+  taskSource.onmessage = (event) => {
+    try {
+      const { type: msgType, data } = JSON.parse(event.data)
+
+      if (msgType === 'init') {
+        const task = data
+        console.log(`✅ SSE initialized for ${type} task (MainView)`)
+
+        // Log current message if any
+        if (task.message) {
+          addLog(task.message)
+        }
+
+        updateTaskUI(task, type)
+        return
+      }
+
+      if (msgType === 'update') {
+        const payload = data
+
+        // Log message change
+        const currentProgressMsg = type === 'ontology' ? ontologyProgress.value?.message : buildProgress.value?.message
+        if (payload.message && payload.message !== currentProgressMsg) {
+          addLog(payload.message)
+        }
+
+        updateTaskUI(payload, type)
+
+        // Close connection on finish
+        if (payload.status === 'completed' || payload.status === 'failed') {
+          handleTaskFinished(payload, type)
+          stopPolling()
+        }
+      }
+    } catch (err) {
+      console.error('SSE parsing error (MainView):', err)
+    }
+  }
+
+  taskSource.onerror = (err) => {
+    console.error('SSE connection error (MainView):', err)
+    // Fallback
+    getTaskStatus(taskId).then(res => {
+      if (res.success) {
+        updateTaskUI(res.data, type)
+        if (res.data.status === 'completed' || res.data.status === 'failed') {
+          handleTaskFinished(res.data, type)
+          stopPolling()
+        }
+      }
+    })
+  }
 }
 
-const pollTaskStatus = async (taskId, type = 'build') => {
-  try {
-    const res = await getTaskStatus(taskId)
-    if (res.success) {
-      const task = res.data
+const updateTaskUI = (taskData, type) => {
+  if (type === 'ontology') {
+    ontologyProgress.value = {
+      progress: taskData.progress ?? (ontologyProgress.value?.progress || 0),
+      message: taskData.message ?? (ontologyProgress.value?.message || 'Analyzing...')
+    }
+  } else {
+    buildProgress.value = {
+      progress: taskData.progress ?? (buildProgress.value?.progress || 0),
+      message: taskData.message ?? (buildProgress.value?.message || 'Processing...')
+    }
+  }
+}
 
-      // Log progress message if it changed
-      const currentProgressMsg = type === 'ontology' ? ontologyProgress.value?.message : buildProgress.value?.message
-      if (task.message && task.message !== currentProgressMsg) {
-        addLog(task.message)
+const handleTaskFinished = async (taskData, type) => {
+  if (taskData.status === 'completed') {
+    addLog(`${type === 'ontology' ? 'Ontology generation' : 'Graph build'} task completed.`)
+
+    if (type === 'ontology') {
+      ontologyProgress.value = null
+      const projRes = await getProject(currentProjectId.value)
+      if (projRes.success) {
+        projectData.value = projRes.data
+        await startBuildGraph()
       }
-
-      if (type === 'ontology') {
-        ontologyProgress.value = { progress: task.progress || 0, message: task.message }
-      } else {
-        buildProgress.value = { progress: task.progress || 0, message: task.message }
-      }
-
-      if (task.status === 'completed') {
-        addLog(`${type === 'ontology' ? 'Ontology generation' : 'Graph build'} task completed.`)
-        stopPolling()
-
-        if (type === 'ontology') {
-          ontologyProgress.value = null
-          // Automatically move to build phase after ontology is done
-          const projRes = await getProject(currentProjectId.value)
-          if (projRes.success) {
-            projectData.value = projRes.data
-            await startBuildGraph()
-          }
-        } else {
-          stopGraphPolling() // Stop polling, do final load
-          currentPhase.value = 2
-
-          // Final load
-          const projRes = await getProject(currentProjectId.value)
-          if (projRes.success && projRes.data.graph_id) {
-              projectData.value = projRes.data
-              await loadGraph(projRes.data.graph_id)
-          }
-        }
-      } else if (task.status === 'failed') {
-        stopPolling()
-        error.value = task.error
-        addLog(`${type === 'ontology' ? 'Ontology generation' : 'Graph build'} task failed: ${task.error}`)
+    } else {
+      stopGraphPolling()
+      currentPhase.value = 2
+      const projRes = await getProject(currentProjectId.value)
+      if (projRes.success && projRes.data.graph_id) {
+        projectData.value = projRes.data
+        await loadGraph(projRes.data.graph_id)
       }
     }
-  } catch (e) {
-    console.error('Polling task error:', e)
-    // If task not found (404), stop polling to avoid infinite loops
-    if (e.response?.status === 404) {
-      addLog(`Task ${taskId} not found. Stopping polling.`)
-      stopPolling()
-
-      // Attempt to reload project to see if it auto-fixes status on backend
-      await loadProject()
-    }
+  } else if (taskData.status === 'failed') {
+    error.value = taskData.error || 'Task failed'
+    addLog(`${type === 'ontology' ? 'Ontology generation' : 'Graph build'} task failed: ${taskData.error}`)
   }
 }
 
@@ -447,9 +497,9 @@ const refreshGraph = () => {
 }
 
 const stopPolling = () => {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
+  if (taskSource) {
+    taskSource.close()
+    taskSource = null
   }
 }
 

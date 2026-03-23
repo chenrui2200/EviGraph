@@ -4,6 +4,8 @@ Uses project context mechanism with server-side state persistence
 """
 
 import os
+import json
+import queue
 import traceback
 import threading
 from flask import request, jsonify, current_app, send_from_directory
@@ -395,8 +397,6 @@ def generate_ontology():
                 generator = OntologyGenerator()
                 task_manager.update_task(task_id, log="Calling LLM (Iterative Structural Analysis)...")
 
-                # Get the actual TextChunk objects for iterative discovery
-                from ..utils.file_parser import TextChunk
                 all_chunks_objs = [TextChunk(c["text"], c["metadata"]) for c in all_chunks_data]
 
                 ontology = generator.generate(
@@ -491,7 +491,7 @@ def build_graph():
         data = request.get_json() or {}
         project_id = data.get('project_id')
         logger.debug(f"Request parameters: project_id={project_id}")
-        
+
         if not project_id:
             logger.warning("Build graph failed: missing project_id")
             return jsonify({
@@ -508,8 +508,14 @@ def build_graph():
                 "error": f"Project does not exist: {project_id}"
             }), 404
 
-        # Check project status
+        # Get configuration
+        graph_name = data.get('graph_name', project.name or 'MiroFish Graph')
+        chunk_size = data.get('chunk_size', project.chunk_size or Config.DEFAULT_CHUNK_SIZE)
+        chunk_overlap = data.get('chunk_overlap', project.chunk_overlap or Config.DEFAULT_CHUNK_OVERLAP)
+        use_semantic = data.get('semantic', False) # New: option for semantic chunking
         force = data.get('force', False)  # Force rebuild
+
+        # Check project status
         logger.info(f"Project {project_id} status: {project.status}, force={force}")
 
         # Intelligent status fix: check if ontology data exists even if status is CREATED
@@ -522,8 +528,31 @@ def build_graph():
             project.status = ProjectStatus.ONTOLOGY_GENERATED
             ProjectManager.save_project(project)
 
+        # Handle Existing Task vs New Task
+        task_id = project.graph_build_task_id
+        if not force and project.status in [ProjectStatus.GRAPH_BUILDING, ProjectStatus.GRAPH_CHUNKING, ProjectStatus.GRAPH_EMBEDDING, ProjectStatus.GRAPH_INDEXING] and task_id:
+            logger.info(f"Project {project_id} building status detected. Attempting to ensure worker thread is active for task {task_id}.")
+        else:
+            # Create a brand new task
+            task_manager = TaskManager()
+            task_id = task_manager.create_task(f"Build graph: {graph_name}")
+            logger.info(f"New graph build task created: task_id={task_id}, project_id={project_id}")
+
+            # Update project status
+            project.status = ProjectStatus.GRAPH_BUILDING
+            project.graph_build_task_id = task_id
+            ProjectManager.save_project(project)
+
         # If force rebuild, reset status and DELETE old graph data
-        if force and project.status in [ProjectStatus.GRAPH_BUILDING, ProjectStatus.FAILED, ProjectStatus.GRAPH_COMPLETED]:
+        force_reset_statuses = [
+            ProjectStatus.GRAPH_BUILDING,
+            ProjectStatus.GRAPH_CHUNKING,
+            ProjectStatus.GRAPH_EMBEDDING,
+            ProjectStatus.GRAPH_INDEXING,
+            ProjectStatus.FAILED,
+            ProjectStatus.GRAPH_COMPLETED
+        ]
+        if force and project.status in force_reset_statuses:
             logger.info(f"Forcing rebuild for project {project_id}. Cleaning up old data...")
 
             # Physical cleanup of old graph in Neo4j if it exists
@@ -539,15 +568,9 @@ def build_graph():
             # Reset project metadata for a clean start
             project.status = ProjectStatus.ONTOLOGY_GENERATED
             project.graph_id = None
-            project.graph_build_task_id = None
+            project.graph_build_task_id = task_id # Use the task we just created or recovered
             project.error = None
             ProjectManager.save_project(project)
-
-        # Get configuration
-        graph_name = data.get('graph_name', project.name or 'MiroFish Graph')
-        chunk_size = data.get('chunk_size', project.chunk_size or Config.DEFAULT_CHUNK_SIZE)
-        chunk_overlap = data.get('chunk_overlap', project.chunk_overlap or Config.DEFAULT_CHUNK_OVERLAP)
-        use_semantic = data.get('semantic', False) # New: option for semantic chunking
 
         # Update project configuration
         project.chunk_size = chunk_size
@@ -565,168 +588,193 @@ def build_graph():
         # Get storage in request context (background thread cannot access current_app)
         storage = _get_storage()
 
-        # Create async task
+        # Task manager for the thread
         task_manager = TaskManager()
-        task_id = task_manager.create_task(f"Build graph: {graph_name}")
-        logger.info(f"Graph build task created: task_id={task_id}, project_id={project_id}")
-        
-        # Update project status
-        project.status = ProjectStatus.GRAPH_BUILDING
-        project.graph_build_task_id = task_id
-        ProjectManager.save_project(project)
 
         # Start background task
         def build_task():
             build_logger = get_logger('mirofish.build')
             try:
-                build_logger.info(f"[{task_id}] Starting graph build...")
-                task_manager.update_task(
-                    task_id,
-                    status=TaskStatus.PROCESSING,
-                    message="Initializing graph build service..."
-                )
+                build_logger.info(f"[{task_id}] Worker thread attempting to start for graph build...")
 
-                # Create graph builder service (storage passed from outer closure)
+                # Check for existing graph_id from project if not force
+                active_graph_id = project.graph_id if (project.graph_id and not force) else None
+
+                # Acquire build lock to prevent concurrent workers for the same graph
+                # If we can't get the lock, it means another thread is already working on this graph
                 builder = GraphBuilderService(storage=storage)
 
-                # Get data (chunks with metadata preferred)
-                task_manager.update_task(
-                    task_id,
-                    message="Preparing text chunks with metadata...",
-                    progress=5
-                )
-                chunks_data = ProjectManager.get_chunks(project_id)
-                if chunks_data:
-                    # Convert dicts back to TextChunk objects
-                    from ..utils.file_parser import TextChunk
-                    initial_chunks = [TextChunk(c["text"], c["metadata"]) for c in chunks_data]
+                # We need a stable identifier for the lock. Use graph_id if known, else task_id
+                lock_id = active_graph_id or task_id
+                lock = builder._get_build_lock(lock_id)
 
-                    # Split into smaller chunks preserving metadata
-                    chunks = TextProcessor.split_chunks(
-                        initial_chunks,
-                        chunk_size=chunk_size,
-                        overlap=chunk_overlap,
-                        semantic=use_semantic
-                    )
-                    build_logger.info(f"Using {len(chunks)} chunks with metadata from chunks.json")
-                else:
-                    # Fallback to plain text splitting
-                    build_logger.warning("chunks.json not found, falling back to plain text splitting")
-                    chunks = TextProcessor.split_text(
-                        text,
-                        chunk_size=chunk_size,
-                        overlap=chunk_overlap
-                    )
+                if not lock.acquire(blocking=False):
+                    build_logger.warning(f"[{task_id}] Build worker already active for {lock_id}. Exiting duplicate thread.")
+                    return
 
-                total_chunks = len(chunks)
-
-                # Create graph
-                task_manager.update_task(
-                    task_id,
-                    message="Creating Zep graph...",
-                    progress=10
-                )
-                graph_id = builder.create_graph(name=graph_name)
-
-                # Update project graph_id
-                project.graph_id = graph_id
-                ProjectManager.save_project(project)
-
-                # Update status to chunking and set ontology
-                project.status = ProjectStatus.GRAPH_CHUNKING
-                ProjectManager.save_project(project)
-                
-                task_manager.update_task(
-                    task_id,
-                    message="Setting ontology definition...",
-                    progress=15
-                )
-                builder.set_ontology(graph_id, project.ontology)
-                
-                # Add text (progress_callback signature is (msg, progress_ratio, log=None))
-                def add_progress_callback(msg, progress_ratio, log=None):
-                    progress = 15 + int(progress_ratio * 75)  # 15% - 90%
+                try:
+                    build_logger.info(f"🚀 [{task_id}] WORKER START: Processing graph building...")
                     task_manager.update_task(
                         task_id,
-                        message=msg,
-                        progress=progress,
-                        log=log
+                        status=TaskStatus.PROCESSING,
+                        message="Initializing graph build service..."
                     )
 
-                task_manager.update_task(
-                    task_id,
-                    message=f"Starting to add {total_chunks} text chunks...",
-                    progress=15
-                )
+                    # Get data (chunks with metadata preferred)
+                    task_manager.update_task(
+                        task_id,
+                        message="Preparing text chunks with metadata...",
+                        progress=5
+                    )
+                    chunks_data = ProjectManager.get_chunks(project_id)
+                    if chunks_data:
+                        # Convert dicts back to TextChunk objects
+                        from ..utils.file_parser import TextChunk
+                        initial_chunks = [TextChunk(c["text"], c["metadata"]) for c in chunks_data]
 
-                episode_uuids = builder.add_text_batches(
-                    graph_id,
-                    chunks,
-                    batch_size=5,
-                    progress_callback=add_progress_callback
-                )
+                        # Split into smaller chunks preserving metadata
+                        chunks = TextProcessor.split_chunks(
+                            initial_chunks,
+                            chunk_size=chunk_size,
+                            overlap=chunk_overlap,
+                            semantic=use_semantic
+                        )
+                        build_logger.info(f"Using {len(chunks)} chunks with metadata from chunks.json")
+                    else:
+                        # Fallback to plain text splitting
+                        build_logger.warning("chunks.json not found, falling back to plain text splitting")
+                        chunks = TextProcessor.split_text(
+                            text,
+                            chunk_size=chunk_size,
+                            overlap=chunk_overlap
+                        )
 
-                # Update status to embedding generation
-                project.status = ProjectStatus.GRAPH_EMBEDDING
-                ProjectManager.save_project(project)
-                
-                # Neo4j processing is synchronous, no need to wait
-                task_manager.update_task(
-                    task_id,
-                    message="Text processing completed, generating graph data...",
-                    progress=90
-                )
+                    total_chunks = len(chunks)
 
-                # Update status to indexing
-                project.status = ProjectStatus.GRAPH_INDEXING
-                ProjectManager.save_project(project)
-                
-                # Get graph data
-                task_manager.update_task(
-                    task_id,
-                    message="Retrieving graph data...",
-                    progress=95
-                )
-                graph_data = builder.get_graph_data(graph_id)
+                    # Create graph (OR RESUME EXISTING)
+                    if project.graph_id and not force:
+                        graph_id = project.graph_id
+                        build_logger.info(f"[{task_id}] Resuming graph build for existing graph_id: {graph_id}")
+                        task_manager.update_task(
+                            task_id,
+                            message=f"Resuming build for graph: {graph_id}",
+                            progress=10
+                        )
+                    else:
+                        task_manager.update_task(
+                            task_id,
+                            message="Creating Zep graph...",
+                            progress=10
+                        )
+                        graph_id = builder.create_graph(name=graph_name)
+                        # Update project graph_id
+                        project.graph_id = graph_id
+                        ProjectManager.save_project(project)
 
-                # Update project status
-                project.status = ProjectStatus.GRAPH_COMPLETED
-                ProjectManager.save_project(project)
+                    # Update status to chunking and set ontology
+                    project.status = ProjectStatus.GRAPH_CHUNKING
+                    ProjectManager.save_project(project)
 
-                node_count = graph_data.get("node_count", 0)
-                edge_count = graph_data.get("edge_count", 0)
-                build_logger.info(f"[{task_id}] Graph build completed: graph_id={graph_id}, nodes={node_count}, edges={edge_count}")
+                    task_manager.update_task(
+                        task_id,
+                        message="Setting ontology definition...",
+                        progress=15
+                    )
+                    builder.set_ontology(graph_id, project.ontology)
 
-                # Complete
-                task_manager.update_task(
-                    task_id,
-                    status=TaskStatus.COMPLETED,
-                    message="Graph build completed",
-                    progress=100,
-                    result={
-                        "project_id": project_id,
-                        "graph_id": graph_id,
-                        "node_count": node_count,
-                        "edge_count": edge_count,
-                        "chunk_count": total_chunks
-                    }
-                )
+                    # Add text (progress_callback signature is (msg, progress_ratio, log=None))
+                    def add_progress_callback(msg, progress_ratio, log=None):
+                        progress = 15 + int(progress_ratio * 75)  # 15% - 90%
+                        task_manager.update_task(
+                            task_id,
+                            message=msg,
+                            progress=progress,
+                            log=log
+                        )
 
-            except Exception as e:
-                # Update project status to failed
-                build_logger.error(f"[{task_id}] Graph build failed: {str(e)}")
+                    task_manager.update_task(
+                        task_id,
+                        message=f"Starting to add {total_chunks} text chunks...",
+                        progress=15
+                    )
+
+                    episode_uuids = builder.add_text_batches(
+                        graph_id,
+                        chunks,
+                        batch_size=5,
+                        progress_callback=add_progress_callback
+                    )
+
+                    # Update status to embedding generation
+                    project.status = ProjectStatus.GRAPH_EMBEDDING
+                    ProjectManager.save_project(project)
+
+                    # Neo4j processing is synchronous, no need to wait
+                    task_manager.update_task(
+                        task_id,
+                        message="Text processing completed, generating graph data...",
+                        progress=90
+                    )
+
+                    # Update status to indexing
+                    project.status = ProjectStatus.GRAPH_INDEXING
+                    ProjectManager.save_project(project)
+
+                    # Get graph data
+                    task_manager.update_task(
+                        task_id,
+                        message="Retrieving graph data...",
+                        progress=95
+                    )
+                    graph_data = builder.get_graph_data(graph_id)
+
+                    # Update project status
+                    project.status = ProjectStatus.GRAPH_COMPLETED
+                    ProjectManager.save_project(project)
+
+                    node_count = graph_data.get("node_count", 0)
+                    edge_count = graph_data.get("edge_count", 0)
+                    build_logger.info(f"[{task_id}] Graph build completed: graph_id={graph_id}, nodes={node_count}, edges={edge_count}")
+
+                    # Complete
+                    task_manager.update_task(
+                        task_id,
+                        status=TaskStatus.COMPLETED,
+                        message="Graph build completed",
+                        progress=100,
+                        result={
+                            "project_id": project_id,
+                            "graph_id": graph_id,
+                            "node_count": node_count,
+                            "edge_count": edge_count,
+                            "chunk_count": total_chunks
+                        }
+                    )
+
+                except Exception as e:
+                    # Update project status to failed
+                    build_logger.error(f"[{task_id}] Graph build failed: {str(e)}")
+                    build_logger.debug(traceback.format_exc())
+
+                    project.status = ProjectStatus.FAILED
+                    project.error = str(e)
+                    ProjectManager.save_project(project)
+
+                    task_manager.update_task(
+                        task_id,
+                        status=TaskStatus.FAILED,
+                        message=f"Build failed: {str(e)}",
+                        error=traceback.format_exc()
+                    )
+                finally:
+                    # Release lock when done (success or fail)
+                    if 'lock' in locals() and lock.locked():
+                        lock.release()
+                        build_logger.info(f"[{task_id}] Worker lock released.")
+
+            except Exception as outer_e:
+                build_logger.error(f"[{task_id}] Outer build worker error: {str(outer_e)}")
                 build_logger.debug(traceback.format_exc())
-
-                project.status = ProjectStatus.FAILED
-                project.error = str(e)
-                ProjectManager.save_project(project)
-
-                task_manager.update_task(
-                    task_id,
-                    status=TaskStatus.FAILED,
-                    message=f"Build failed: {str(e)}",
-                    error=traceback.format_exc()
-                )
 
         # Start background thread
         thread = threading.Thread(target=build_task, daemon=True)

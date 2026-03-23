@@ -48,6 +48,10 @@ class Project:
     analysis_summary: Optional[str] = None
     ontology_task_id: Optional[str] = None
 
+    # NEW: Intermediate state for ontology discovery (breakpoint resume)
+    # Stores: {"last_window_index": int, "discovered_ontology": dict}
+    ontology_discovery_state: Dict[str, Any] = field(default_factory=lambda: {"last_window_index": -1, "discovered_ontology": {"entity_types": [], "edge_types": []}})
+
     # Graph information (populated after interface 2 completes)
     graph_id: Optional[str] = None
     graph_build_task_id: Optional[str] = None

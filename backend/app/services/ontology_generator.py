@@ -6,7 +6,7 @@ Interface 1: Analyze text content and generate entity and relationship type defi
 import json
 import logging
 import traceback
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 
@@ -228,78 +228,99 @@ class OntologyGenerator:
         document_texts: List[str],
         simulation_requirement: str,
         additional_context: Optional[str] = None,
-        chunks: Optional[List[Any]] = None
+        chunks: Optional[List[Any]] = None,
+        resume_state: Optional[Dict[str, Any]] = None,
+        progress_callback: Optional[Callable] = None
     ) -> Dict[str, Any]:
         """
-        Generates a deep, structural ontology without artificial constraints.
+        Main entry point for ontology generation.
+        Supports resume_state for breakpoint recovery.
         """
-        # Step 1: Detect domain (Keep this to branch strategies if needed)
+        # Step 1: Detect domain
         sample = "\n".join(document_texts[:2])[:2000]
         domain = self._detect_domain([sample], simulation_requirement)
 
         if domain == "engineering" and chunks:
             logger.info("Initializing High-Fidelity Engineering Ontology Discovery...")
-            return self._generate_high_fidelity_iterative(chunks, simulation_requirement)
+            return self._generate_high_fidelity_iterative(
+                chunks,
+                simulation_requirement,
+                resume_state=resume_state,
+                progress_callback=progress_callback
+            )
 
         # Fallback for non-engineering
         return self._generate_standard(document_texts, simulation_requirement, additional_context)
 
-    def _generate_high_fidelity_iterative(self, chunks: List[Any], requirement: str) -> Dict[str, Any]:
+    def _generate_high_fidelity_iterative(
+        self,
+        chunks: List[Any],
+        requirement: str,
+        resume_state: Optional[Dict[str, Any]] = None,
+        progress_callback: Optional[Callable] = None
+    ) -> Dict[str, Any]:
         """
-        Unrestricted iterative discovery across the document.
+        Unrestricted iterative discovery with breakpoint resume support.
         """
-        import concurrent.futures
-        final_ontology = {
-            "entity_types": [
-                {
-                    "name": "DocumentChunk",
-                    "description": "A physical segment of the technical document acting as a semantic anchor.",
-                    "attributes": [{"name": "chunk_index", "type": "number"}, {"name": "source", "type": "text"}]
-                }
-            ],
-            "edge_types": [
-                {
-                    "name": "CROSS_REFERENCES",
-                    "description": "Explicit mention of another section, clause, or chunk.",
-                    "source_targets": [{"source": "DocumentChunk", "target": "DocumentChunk"}]
-                }
-            ],
-            "analysis_summary": "High-fidelity structural analysis."
-        }
+        # Initial or Resumed state
+        start_window = 0
+        if resume_state and resume_state.get("last_window_index", -1) >= 0:
+            start_window = resume_state["last_window_index"] + 1
+            final_ontology = resume_state.get("discovered_ontology", {"entity_types": [], "edge_types": []})
+            logger.info(f"Resuming ontology discovery from window {start_window}...")
+        else:
+            final_ontology = {
+                "entity_types": [
+                    {
+                        "name": "DocumentChunk",
+                        "description": "A physical segment of the technical document acting as a semantic anchor.",
+                        "attributes": [{"name": "chunk_index", "type": "number"}, {"name": "source", "type": "text"}]
+                    }
+                ],
+                "edge_types": [
+                    {
+                        "name": "CROSS_REFERENCES",
+                        "description": "Explicit mention of another section, clause, or chunk.",
+                        "source_targets": [{"source": "DocumentChunk", "target": "DocumentChunk"}]
+                    }
+                ]
+            }
 
-        # High-density window for relationship context
+        final_ontology["analysis_summary"] = "High-fidelity structural analysis (Iterative)."
+
+        # Window settings
         window_size = 12
-        # Scan up to 200 chunks for deep discovery in large documents
-        max_discovery_chunks = 200
+        max_discovery_chunks = 150
         discovery_subset = chunks[:max_discovery_chunks]
+        total_windows = (len(discovery_subset) + window_size - 1) // window_size
 
-        windows = []
-        for i in range(0, len(discovery_subset), window_size):
-            window = discovery_subset[i : i + window_size]
-            window_text = "\n\n---\n\n".join([f"[Chunk {i+j}] {c.text if hasattr(c, 'text') else str(c)}" for j, c in enumerate(window)])
-            windows.append(window_text)
+        for i_idx, start_idx in enumerate(range(0, len(discovery_subset), window_size)):
+            # Skip windows already processed in previous sessions
+            if i_idx < start_window:
+                continue
 
-        logger.info(f"Launching {len(windows)} parallel discovery workers for high-fidelity modeling...")
+            window = discovery_subset[start_idx : start_idx + window_size]
+            window_text = "\n\n---\n\n".join([f"[Chunk {start_idx+j}] {c.text if hasattr(c, 'text') else str(c)}" for j, c in enumerate(window)])
 
-        def _worker(w_text):
+            msg = f"Analyzing document structure (Window {i_idx + 1}/{total_windows})..."
+            logger.info(msg)
+            if progress_callback:
+                # Callback to persist state and update UI
+                progress_callback(msg, (i_idx + 1) / total_windows, i_idx, final_ontology)
+
             messages = [
                 {"role": "system", "content": ITERATIVE_ENGINEERING_PROMPT},
-                {"role": "user", "content": f"## Context Requirement\n{requirement}\n\n## Text to Mine\n{w_text}"}
+                {"role": "user", "content": f"## Context Requirement\n{requirement}\n\n## Text to Mine\n{window_text}"}
             ]
+
             try:
-                return self.llm_client.chat_json(messages=messages, temperature=0.1)
+                res = self.llm_client.chat_json(messages=messages, temperature=0.1)
+                if res:
+                    self._merge_increment(final_ontology, res)
             except Exception as e:
-                logger.error(f"Discovery worker failed: {e}")
-                return None
+                logger.error(f"Discovery window {i_idx + 1} failed: {e}")
+                continue
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            results = list(executor.map(_worker, windows))
-
-        for res in results:
-            if res:
-                self._merge_increment(final_ontology, res)
-
-        # Use unconstrained validation for engineering
         return self._validate_and_process_unconstrained(final_ontology)
 
     def _merge_increment(self, base: Dict[str, Any], increment: Dict[str, Any]):
@@ -337,32 +358,6 @@ class OntologyGenerator:
 
         return result
 
-    def _merge_increment(self, base: Dict[str, Any], increment: Dict[str, Any]):
-        """Smartly merge new discoveries into the base ontology with error handling."""
-        if not isinstance(increment, dict):
-            return
-
-        # Handle Entities
-        seen_entities = {e.get("name", "").lower() for e in base.get("entity_types", []) if isinstance(e, dict) and "name" in e}
-        for et in increment.get("new_entity_types", []):
-            if not isinstance(et, dict) or "name" not in et:
-                continue
-
-            name_lower = et["name"].lower()
-            if name_lower and name_lower not in seen_entities:
-                base["entity_types"].append(et)
-                seen_entities.add(name_lower)
-
-        # Handle Edges
-        seen_edges = {e.get("name", "").upper() for e in base.get("edge_types", []) if isinstance(e, dict) and "name" in e}
-        for edge in increment.get("new_edge_types", []):
-            if not isinstance(edge, dict) or "name" not in edge:
-                continue
-
-            name_upper = edge["name"].upper()
-            if name_upper and name_upper not in seen_edges:
-                base["edge_types"].append(edge)
-                seen_edges.add(name_upper)
 
     def _generate_standard(self, document_texts: List[str], simulation_requirement: str, additional_context: Optional[str]) -> Dict[str, Any]:
         """Original one-shot generation logic."""

@@ -237,32 +237,61 @@ class Neo4jStorage(GraphStorage):
 
     def add_text(self, graph_id: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Process text: Create skeleton -> NER/RE -> batch embed -> update knowledge."""
-        episode_id = str(uuid.uuid4())
+        import hashlib
+        # Generate stable UUID based on graph_id and content to allow idempotency
+        content_seed = f"{graph_id}:{text}".encode('utf-8')
+        episode_id = str(uuid.UUID(hashlib.md5(content_seed).hexdigest()))
+
         now = datetime.now(timezone.utc).isoformat()
         metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
 
+        # 0. Check if already processed
+        with self._driver.session() as session:
+            existing = session.run(
+                "MATCH (ep:Episode {uuid: $uuid}) RETURN ep.processed AS processed",
+                uuid=episode_id
+            ).single()
+            if existing and existing["processed"]:
+                print(f"⏩ [SKIP] Episode {episode_id[:8]} already processed.")
+                logger.info(f"⏩ [SKIP] Episode {episode_id[:8]} already processed. Moving to next.")
+                return episode_id
+
+        print(f"🔨 [START] Processing Episode {episode_id[:8]}...")
+        logger.info(f"🔨 [START] Processing Episode {episode_id[:8]} (Content Length: {len(text)})")
+
         # 1. Create episode node and structural skeleton IMMEDIATELY
-        # This provides immediate visual feedback in the graph visualization
         chunk_embedding = []
         try:
+            print(f"📡 [STEP 1/6] [{episode_id[:8]}] Requesting Embedding...")
+            logger.info(f"📡 [STEP 1/6] [{episode_id[:8]}] Requesting Embedding...")
+            # Embedding is often the first bottleneck
             chunk_embedding = self._embedding.embed(text)
+            print(f"✅ [STEP 1/6] [{episode_id[:8]}] Embedding received.")
+            logger.info(f"✅ [STEP 1/6] [{episode_id[:8]}] Embedding received.")
         except Exception as e:
-            logger.warning(f"[add_text] Failed to embed chunk text: {e}")
+            print(f"❌ [STEP 1/6] [{episode_id[:8]}] Embedding failed: {e}")
+            logger.warning(f"❌ [STEP 1/6] [{episode_id[:8]}] Embedding failed: {e}")
 
         with self._driver.session() as session:
             def _create_skeleton(tx):
-                # Create episode with embedding
+                print(f"💾 [STEP 2/6] [{episode_id[:8]}] Saving Skeleton to Neo4j...")
+                logger.info(f"💾 [STEP 2/6] [{episode_id[:8]}] Creating/Merging Episode node in Neo4j...")
+                # Use MERGE instead of CREATE to handle episodes that were created but not fully processed
                 tx.run(
                     """
-                    CREATE (ep:Episode {
-                        uuid: $uuid,
-                        graph_id: $graph_id,
-                        data: $data,
-                        metadata_json: $metadata_json,
-                        processed: false,
-                        embedding: $embedding,
-                        created_at: $created_at
-                    })
+                    MERGE (ep:Episode {uuid: $uuid})
+                    ON CREATE SET
+                        ep.graph_id = $graph_id,
+                        ep.data = $data,
+                        ep.metadata_json = $metadata_json,
+                        ep.processed = false,
+                        ep.embedding = $embedding,
+                        ep.created_at = $created_at
+                    ON MATCH SET
+                        ep.graph_id = $graph_id,
+                        ep.data = $data,
+                        ep.metadata_json = $metadata_json,
+                        ep.embedding = $embedding
                     """,
                     uuid=episode_id,
                     graph_id=graph_id,
@@ -280,7 +309,7 @@ class Neo4jStorage(GraphStorage):
                     if filename:
                         doc_uuid = self._ensure_document(tx, graph_id, filename)
 
-                        # Sequential linking: Link current episode to the previous one in the same document
+                        # Sequential linking
                         if chunk_idx > 0:
                             tx.run(
                                 """
@@ -320,15 +349,23 @@ class Neo4jStorage(GraphStorage):
                             )
 
             self._call_with_retry(session.execute_write, _create_skeleton)
+            print(f"✅ [STEP 2/6] [{episode_id[:8]}] Episode skeleton ready.")
+            logger.info(f"✅ [STEP 2/6] [{episode_id[:8]}] Episode skeleton ready.")
 
         # 2. Knowledge Extraction (Guided by Ontology)
+        print(f"🔍 [STEP 3/6] [{episode_id[:8]}] Fetching ontology...")
+        logger.info(f"🔍 [STEP 3/6] [{episode_id[:8]}] Fetching ontology...")
         ontology = self.get_ontology(graph_id)
-        logger.info(f"[add_text] Starting NER extraction for episode {episode_id[:8]}...")
+
+        print(f"🤖 [STEP 4/6] [{episode_id[:8]}] Calling LLM Chat (NER)...")
+        logger.info(f"🤖 [STEP 4/6] [{episode_id[:8]}] Calling LLM for NER extraction (Chat)...")
+        # This is where 'chat' method is called
         extraction = self._ner.extract(text, ontology)
         entities = extraction.get("entities", [])
         relations = extraction.get("relations", [])
 
-        logger.info(f"[add_text] NER extracted {len(entities)} entities and {len(relations)} relations for episode {episode_id[:8]}")
+        print(f"✅ [STEP 4/6] [{episode_id[:8]}] NER Done: {len(entities)} entities found.")
+        logger.info(f"✅ [STEP 4/6] [{episode_id[:8]}] NER extracted {len(entities)} entities and {len(relations)} relations.")
 
         # 3. Batch embed all extraction results
         entity_summaries = [f"{e['name']} ({e['type']})" for e in entities]
@@ -338,16 +375,25 @@ class Neo4jStorage(GraphStorage):
         all_embeddings: list = []
         if all_texts_to_embed:
             try:
+                print(f"📡 [STEP 5/6] [{episode_id[:8]}] Embedding results...")
+                logger.info(f"📡 [STEP 5/6] [{episode_id[:8]}] Embedding {len(all_texts_to_embed)} facts/entities...")
                 all_embeddings = self._embedding.embed_batch(all_texts_to_embed)
+                print(f"✅ [STEP 5/6] [{episode_id[:8]}] Knowledge embeddings received.")
+                logger.info(f"✅ [STEP 5/6] [{episode_id[:8]}] Knowledge embeddings received.")
             except Exception as e:
-                logger.warning(f"[add_text] Embedding failed: {e}")
+                print(f"❌ [STEP 5/6] [{episode_id[:8]}] Knowledge embedding failed: {e}")
+                logger.warning(f"❌ [STEP 5/6] [{episode_id[:8]}] Knowledge embedding failed: {e}")
                 all_embeddings = [[] for _ in all_texts_to_embed]
 
         entity_embeddings = all_embeddings[:len(entities)]
         relation_embeddings = all_embeddings[len(entities):]
 
         # 4. Write knowledge back to Neo4j
+        print(f"💾 [STEP 6/6] [{episode_id[:8]}] Finalizing in Neo4j...")
+        logger.info(f"💾 [STEP 6/6] [{episode_id[:8]}] Writing entities and relations to Neo4j...")
         with self._driver.session() as session:
+            # Mark episode as processed
+            session.run("MATCH (ep:Episode {uuid: $uuid}) SET ep.processed = true", uuid=episode_id)
             # Mark episode as processed
             session.run("MATCH (ep:Episode {uuid: $uuid}) SET ep.processed = true", uuid=episode_id)
 
@@ -508,69 +554,62 @@ class Neo4jStorage(GraphStorage):
         progress_callback: Optional[Callable] = None,
     ) -> List[str]:
         """
-        Batch-add text chunks concurrently using a ThreadPoolExecutor.
-        Significantly improves throughput for large PDF documents (e.g., 730 chunks).
+        Batch-add text chunks sequentially to ensure stability and clear progress.
+        Leverages the 'already processed' skip logic for fast resumption.
         """
         episode_ids = []
         total = len(chunks)
+        completed = 0
 
-        logger.info(f"Starting concurrent processing for {total} chunks with max_workers {batch_size}...")
+        logger.info(f"🚀 [BATCH START] Processing {total} chunks for graph {graph_id}...")
 
-        # Use ThreadPoolExecutor to parallelize the heavy LLM/Embedding lifting
-        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
-            # Map each chunk to a future task
-            future_to_idx = {}
-            for i, chunk_data in enumerate(chunks):
-                # Normalize chunk data
-                if hasattr(chunk_data, 'text') and hasattr(chunk_data, 'metadata'):
-                    text = chunk_data.text
-                    metadata = chunk_data.metadata
-                elif isinstance(chunk_data, dict) and "text" in chunk_data:
-                    text = chunk_data["text"]
-                    metadata = chunk_data.get("metadata")
-                else:
-                    text = str(chunk_data)
-                    metadata = None
+        # We process sequentially to fulfill the user's request for "one by one"
+        # and to ensure a single hung chunk doesn't block a parallel batch.
+        # Speed is maintained via the fast-skip logic for already processed chunks.
+        for idx, chunk_data in enumerate(chunks):
+            # Normalize chunk data
+            if hasattr(chunk_data, 'text') and hasattr(chunk_data, 'metadata'):
+                text = chunk_data.text
+                metadata = chunk_data.metadata
+            elif isinstance(chunk_data, dict) and "text" in chunk_data:
+                text = chunk_data["text"]
+                metadata = chunk_data.get("metadata")
+            else:
+                text = str(chunk_data)
+                metadata = None
 
-                if not text or not text.strip():
-                    continue
-
-                # Schedule add_text call
-                future = executor.submit(self.add_text, graph_id, text, metadata=metadata)
-                future_to_idx[future] = i
-
-            # Collect results as they complete
-            completed = 0
-            for future in concurrent.futures.as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                log_msg = ""
-                try:
-                    episode_id = future.result()
-                    episode_ids.append(episode_id)
-                    log_msg = f"Chunk {idx+1}/{total} extracted successfully."
-                except Exception as e:
-                    log_msg = f"Error processing chunk {idx+1}: {e}"
-                    logger.error(f"{log_msg}\n{traceback.format_exc()}")
-
+            if not text or not text.strip():
                 completed += 1
-                if progress_callback:
-                    # Adaptive callback signature handling
-                    import inspect
-                    sig = inspect.signature(progress_callback)
-                    if len(sig.parameters) >= 2:
-                        # Call as (message, progress, log)
-                        progress_callback(
-                            f"Extracted {completed}/{total} chunks...",
-                            completed / total,
-                            log=log_msg
-                        )
-                    else:
-                        # Call as (progress)
-                        progress_callback(completed / total)
+                continue
 
-                if completed % 10 == 0 or completed == total:
-                    logger.info(f"Processed {completed}/{total} chunks (Concurrent)...")
+            log_msg = ""
+            try:
+                # Call add_text (which handles the skip logic internally)
+                episode_id = self.add_text(graph_id, text, metadata=metadata)
+                episode_ids.append(episode_id)
+                log_msg = f"Chunk {idx+1}/{total} handled."
+            except Exception as e:
+                log_msg = f"❌ Error processing chunk {idx+1}: {e}"
+                logger.error(f"{log_msg}\n{traceback.format_exc()}")
 
+            completed += 1
+            if progress_callback:
+                import inspect
+                sig = inspect.signature(progress_callback)
+                if len(sig.parameters) >= 2:
+                    # Report progress to UI
+                    progress_callback(
+                        f"Extracted {completed}/{total} chunks...",
+                        completed / total,
+                        log=log_msg
+                    )
+                else:
+                    progress_callback(completed / total)
+
+            if completed % 10 == 0 or completed == total:
+                logger.info(f"📊 Progress: {completed}/{total} chunks handled.")
+
+        logger.info(f"🏁 [BATCH END] All {total} chunks handled.")
         return episode_ids
 
     def wait_for_processing(

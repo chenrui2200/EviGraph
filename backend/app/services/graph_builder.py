@@ -41,9 +41,19 @@ class GraphBuilderService:
     Build knowledge graph through GraphStorage interface
     """
 
+    # Global lock to prevent multiple build threads for the same graph
+    _build_locks: Dict[str, threading.Lock] = {}
+    _lock_manager_lock = threading.Lock()
+
     def __init__(self, storage: GraphStorage):
         self.storage = storage
         self.task_manager = TaskManager()
+
+    def _get_build_lock(self, graph_id: str) -> threading.Lock:
+        with self._lock_manager_lock:
+            if graph_id not in self._build_locks:
+                self._build_locks[graph_id] = threading.Lock()
+            return self._build_locks[graph_id]
 
     def build_graph_async(
         self,

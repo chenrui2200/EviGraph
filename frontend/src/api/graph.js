@@ -57,6 +57,16 @@ export function getTaskStatus(taskId) {
 }
 
 /**
+ * Get SSE Events URL for task
+ * @param {String} taskId
+ * @returns {String}
+ */
+export function getTaskEventsURL(taskId) {
+  const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001'
+  return `${baseURL}/api/graph/task/${taskId}/events`
+}
+
+/**
  * Get graph data
  * @param {String} graphId - Graph ID
  * @returns {Promise}
