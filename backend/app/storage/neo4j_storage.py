@@ -760,6 +760,46 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             return self._call_with_retry(session.execute_read, _read)
 
+    def get_node_episodes(self, node_uuid: str, limit: int = 3) -> List[Dict[str, Any]]:
+        """Get episodes (text chunks) that mentioned this node for traceability."""
+        def _read(tx):
+            result = tx.run(
+                """
+                MATCH (n:Entity {uuid: $uuid})<-[:MENTIONS]-(ep:Episode)
+                OPTIONAL MATCH (p:Page)-[:HAS_EPISODE]->(ep)
+                OPTIONAL MATCH (d:Document)-[:HAS_PAGE]->(p)
+                OPTIONAL MATCH (d2:Document)-[:HAS_EPISODE]->(ep)
+                RETURN ep, p.number AS page_num,
+                       coalesce(d.name, d2.name) AS doc_name
+                LIMIT $limit
+                """,
+                uuid=node_uuid,
+                limit=limit
+            )
+            episodes = []
+            for record in result:
+                props = dict(record["ep"])
+                meta_json = props.pop("metadata_json", "{}")
+                try:
+                    metadata = json.loads(meta_json) if meta_json else {}
+                except:
+                    metadata = {}
+
+                if record["doc_name"]:
+                    metadata["source"] = record["doc_name"]
+                if record["page_num"]:
+                    metadata["page"] = record["page_num"]
+
+                episodes.append({
+                    "uuid": props.get("uuid"),
+                    "text": props.get("data"),
+                    "metadata": metadata
+                })
+            return episodes
+
+        with self._driver.session() as session:
+            return self._call_with_retry(session.execute_read, _read)
+
     # ----------------------------------------------------------------
     # Search
     # ----------------------------------------------------------------

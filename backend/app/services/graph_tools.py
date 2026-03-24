@@ -844,11 +844,30 @@ Your response:"""
                     })
                     summary = node.get('summary', '')
                     if summary:
+                        # Traceability for Node Summary: Find original episodes
+                        source_info = {"source": "Knowledge Graph", "page": None, "bbox": None}
+                        try:
+                            node_eps = self.storage.get_node_episodes(node_uuid, limit=1)
+                            if node_eps:
+                                meta = node_eps[0].get("metadata", {})
+                                source_info.update({
+                                    "source": meta.get("source", "Knowledge Graph"),
+                                    "page": meta.get("page"),
+                                    "bbox": meta.get("bbox"),
+                                    "page_width": meta.get("page_width"),
+                                    "page_height": meta.get("page_height")
+                                })
+                        except:
+                            pass
+
                         facts.append({
                             "uuid": node_uuid,
                             "text": f"Entity Knowledge: {node.get('name', '')} - {summary}",
-                            "source": "Knowledge Graph",
-                            "page": None,
+                            "source": source_info["source"],
+                            "page": source_info["page"],
+                            "bbox": source_info["bbox"],
+                            "page_width": source_info.get("page_width"),
+                            "page_height": source_info.get("page_height"),
                             "graph_id": graph_id,
                             "entity_name": node.get('name', '')
                         })
@@ -859,10 +878,31 @@ Your response:"""
                             node_rels = self.storage.get_node_edges(node_uuid)
                             for rel in node_rels[:3]: # Add up to 3 context relations
                                 if rel.get('fact'):
+                                    # Traceability for Relation: Find original episodes from edge
+                                    rel_source_info = {"source": "Graph Path Extension", "page": None, "bbox": None}
+                                    ep_ids = rel.get("episode_ids", [])
+                                    if ep_ids:
+                                        try:
+                                            rel_eps = self.storage.get_episodes([ep_ids[0]])
+                                            if rel_eps:
+                                                meta = rel_eps[0].get("metadata", {})
+                                                rel_source_info.update({
+                                                    "source": meta.get("source", "Graph Path Extension"),
+                                                    "page": meta.get("page"),
+                                                    "bbox": meta.get("bbox"),
+                                                    "page_width": meta.get("page_width"),
+                                                    "page_height": meta.get("page_height")
+                                                })
+                                        except:
+                                            pass
+
                                     facts.append({
                                         "text": f"Contextual Fact: {rel['fact']}",
-                                        "source": "Graph Path Extension",
-                                        "page": None,
+                                        "source": rel_source_info["source"],
+                                        "page": rel_source_info["page"],
+                                        "bbox": rel_source_info["bbox"],
+                                        "page_width": rel_source_info.get("page_width"),
+                                        "page_height": rel_source_info.get("page_height"),
                                         "graph_id": graph_id
                                     })
                         except:

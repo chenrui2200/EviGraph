@@ -114,7 +114,7 @@
                       <span v-if="fact.page">(P{{ fact.page }})</span>
                     </span>
                     <button
-                      v-if="fact.page && fact.source !== 'Knowledge Graph' && fact.source !== 'Graph Path Extension' && fact.source !== 'Local Search'"
+                      v-if="fact.page && fact.source !== 'Local Search'"
                       class="locate-btn"
                       @click.stop="viewDocument(fact)"
                     >
