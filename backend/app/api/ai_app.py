@@ -131,7 +131,7 @@ def execute_app(app_id: str):
             "success": True,
             "data": {
                 "answer": answer,
-                "retrieved_facts_count": len(search_result.facts),
+                "retrieved_facts": search_result.facts,
                 "rerank_results": search_result.rerank_details,
                 "app_name": app.name
             }

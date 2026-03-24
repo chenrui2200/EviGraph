@@ -7,12 +7,19 @@ import ReportView from '../views/ReportView.vue'
 import InteractionView from '../views/InteractionView.vue'
 import AiQaView from '../views/AiQaView.vue'
 import HitTestView from '../views/HitTestView.vue'
+import PublicChatView from '../views/PublicChatView.vue'
 
 const routes = [
   {
     path: '/',
     name: 'Home',
     component: Home
+  },
+  {
+    path: '/chat/:id',
+    name: 'PublicChat',
+    component: PublicChatView,
+    props: true
   },
   {
     path: '/process/:projectId',

@@ -20,10 +20,10 @@
       </div>
       <div class="header-right">
         <button class="action-btn publish-btn" :class="{ 'published': isPublished }" :disabled="publishing || !appId" @click="handlePublish">
-          <span v-if="!publishing">{{ isPublished ? '🌐 已发布' : '🚀 发布 API' }}</span>
+          <span v-if="!publishing">{{ isPublished ? '🌐 已发布' : '🚀 发布' }}</span>
           <span v-else class="spinner-sm"></span>
         </button>
-        <button v-if="isPublished" class="icon-btn info-btn" @click="showApiModal = true" title="查看 API 文档">
+        <button v-if="isPublished" class="icon-btn info-btn" @click="showApiModal = true" title="查看发布详情">
           ℹ️
         </button>
         <button class="action-btn save-btn" :disabled="saving" @click="saveWorkflowApp">
@@ -394,13 +394,27 @@
     <div v-if="showApiModal" class="modal-overlay" @click.self="showApiModal = false">
       <div class="api-modal">
         <div class="modal-header">
-          <h3><span class="header-icon">🌐</span> API 服务发布详情</h3>
+          <h3><span class="header-icon">🌐</span> 应用发布详情</h3>
           <button class="close-btn" @click="showApiModal = false">×</button>
         </div>
         <div class="modal-body api-modal-body">
           <div class="api-tabs">
             <div class="api-section">
-              <div class="section-title">接口调用说明</div>
+              <div class="section-title">方式 1: Web 应用嵌入 (Iframe)</div>
+              <div class="api-info-card">
+                <div class="info-row">
+                  <span class="info-label">访问地址:</span>
+                  <a :href="publicChatUrl" target="_blank" class="info-value link">{{ publicChatUrl }}</a>
+                </div>
+              </div>
+              <div class="code-block-wrapper">
+                <div class="code-header">嵌入代码 (HTML)</div>
+                <pre class="code-content">{{ iframeCode }}</pre>
+              </div>
+            </div>
+
+            <div class="api-section">
+              <div class="section-title">方式 2: API 接口调用</div>
               <div class="api-info-card">
                 <div class="info-row">
                   <span class="info-label">接口地址:</span>
@@ -410,17 +424,6 @@
                   <span class="info-label">请求方法:</span>
                   <span class="info-value method-tag">POST</span>
                 </div>
-                <div class="info-row">
-                  <span class="info-label">Content-Type:</span>
-                  <code class="info-value">application/json</code>
-                </div>
-              </div>
-
-              <div class="code-block-wrapper">
-                <div class="code-header">请求参数示例 (JSON)</div>
-                <pre class="code-content">{
-  "query": "这里输入您的查询问题..."
-}</pre>
               </div>
 
               <div class="code-block-wrapper">
@@ -428,22 +431,6 @@
                 <pre class="code-content">curl -X POST {{ apiBaseUrl }} \
      -H "Content-Type: application/json" \
      -d '{"query": "您的问题"}'</pre>
-              </div>
-            </div>
-
-            <div class="api-section mock-test-section">
-              <div class="section-title">Mock 接口测试</div>
-              <div class="mock-input-group">
-                <textarea v-model="mockQuery" placeholder="输入测试问题..." class="mock-textarea"></textarea>
-                <button class="action-btn run-btn" :disabled="mockLoading || !mockQuery" @click="runMockTest">
-                  <span v-if="!mockLoading">发送请求</span>
-                  <span v-else class="spinner-sm"></span>
-                </button>
-              </div>
-
-              <div v-if="mockResult" class="mock-result-area">
-                <div class="code-header">响应结果 (Response)</div>
-                <pre class="code-content result-pre" :class="{ 'error': mockResult.error }">{{ JSON.stringify(mockResult, null, 2) }}</pre>
               </div>
             </div>
           </div>
@@ -508,6 +495,8 @@ const mockResult = ref(null)
 const mockLoading = ref(false)
 
 const apiBaseUrl = computed(() => `${window.location.origin}/api/ai-app/execute/${appId.value}`)
+const publicChatUrl = computed(() => `${window.location.origin}/chat/${appId.value}`)
+const iframeCode = computed(() => `<iframe src="${publicChatUrl.value}" width="100%" height="600px" frameborder="0"></iframe>`)
 
 // Results parsing logic
 const parsedResult = computed(() => {
