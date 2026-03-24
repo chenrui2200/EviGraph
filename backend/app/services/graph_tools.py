@@ -24,11 +24,12 @@ logger = get_logger('mirofish.graph_tools')
 @dataclass
 class SearchResult:
     """Search Result"""
-    facts: List[Dict[str, Any]]  # List of {text, source, page, graph_id}
+    facts: List[Dict[str, Any]]  # List of {text, source, page, graph_id, relevance_score, reasoning}
     edges: List[Dict[str, Any]]
     nodes: List[Dict[str, Any]]
     query: str
     total_count: int
+    rerank_details: List[Dict[str, Any]] = field(default_factory=list) # [{index, score, reason}]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -36,7 +37,8 @@ class SearchResult:
             "edges": self.edges,
             "nodes": self.nodes,
             "query": self.query,
-            "total_count": self.total_count
+            "total_count": self.total_count,
+            "rerank_details": self.rerank_details
         }
 
     def to_text(self) -> str:
@@ -512,6 +514,81 @@ class GraphToolsService:
             logger.error(f"LLM Fact Filtering failed: {str(e)}")
             return facts # Return all if filtering fails
 
+    def rerank_facts(self, query: str, facts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Use LLM to rerank facts based on relevance to the query.
+        Returns sorted facts with 'relevance_score' and 'relevance_reasoning'.
+        """
+        if not facts:
+            return []
+
+        logger.info(f"Performing LLM Reranking for {len(facts)} facts...")
+
+        # Prepare fact list for LLM (limit to top 30 to avoid prompt too long)
+        fact_list_str = ""
+        facts_to_process = facts[:30]
+        for i, f in enumerate(facts_to_process):
+            text = f.get('text', '')
+            fact_list_str += f"[{i}] {text[:300]}\n"
+
+        rerank_prompt = f"""你是一个专业的知识重排（Rerank）专家。请根据【用户问题】，对【候选事实列表】中的每一条记录进行相关性打分。
+
+### 用户问题:
+{query}
+
+### 候选事实列表:
+{fact_list_str}
+
+### 任务要求:
+1. 对每个事实，评估其对回答【用户问题】的直接贡献度和核心程度。
+2. 打分范围为 0-100（分值越高越相关）。
+3. 对于每个事实，提供简短的一句话理由。
+4. 返回结果必须是 JSON 格式，包含一个名为 "rerank_results" 的对象列表，每个对象包含:
+   - "index": 原始列表中的索引。
+   - "score": 相关性得分 (0-100)。
+   - "reason": 评分理由。
+
+### 输出格式示例:
+{{
+  "rerank_results": [
+    {{"index": 0, "score": 95, "reason": "直接包含了多孔导管敷设的具体间距规定"}},
+    {{"index": 2, "score": 40, "reason": "提及了导管，但主要讨论材质而非敷设规定"}}
+  ]
+}}
+
+请输出打分后的结果 JSON："""
+
+        try:
+            response = self.llm.chat_json(messages=[{"role": "user", "content": rerank_prompt}], temperature=0.1)
+            rerank_results = response.get("rerank_results", [])
+
+            # Map results
+            scored_facts = []
+            for item in rerank_results:
+                idx = item.get('index')
+                if isinstance(idx, int) and 0 <= idx < len(facts_to_process):
+                    fact = facts_to_process[idx].copy()
+                    fact['relevance_score'] = item.get('score', 0)
+                    fact['relevance_reasoning'] = item.get('reason', '')
+                    scored_facts.append(fact)
+
+            # Sort by score descending
+            scored_facts.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
+
+            # Add any facts that LLM missed (at the end with 0 score)
+            seen_texts = {f.get('text') for f in scored_facts}
+            for f in facts_to_process:
+                if f.get('text') not in seen_texts:
+                    f_copy = f.copy()
+                    f_copy['relevance_score'] = 0
+                    f_copy['relevance_reasoning'] = "LLM missed during rerank"
+                    scored_facts.append(f_copy)
+
+            return scored_facts
+        except Exception as e:
+            logger.error(f"LLM Fact Reranking failed: {str(e)}")
+            return facts # Return all if reranking fails
+
     def search_with_agentic_flow(
         self,
         graph_ids: List[str],
@@ -525,6 +602,7 @@ class GraphToolsService:
         2. Multi-hop search
         3. LLM filtering
         4. Deduplication
+        5. Final Reranking Card
         """
         logger.info(f"Starting search_with_agentic_flow for query: {query[:50]}...")
 
@@ -613,13 +691,30 @@ Your response:"""
                 logger.error(f"Multi-hop reasoning failed: {str(e)}")
                 break
 
-        # Final result assembly
+        # 3. Final Reranking Card (Added as a dedicated step)
+        logger.info(f"Final Step: Reranking {len(current_context_facts)} gathered facts...")
+        reranked_facts = self.rerank_facts(query, current_context_facts)
+
+        # Limit to final results
+        final_facts = reranked_facts[:limit]
+
+        # Prepare rerank details for visibility in frontend/API
+        rerank_details = []
+        for i, f in enumerate(final_facts):
+            rerank_details.append({
+                "index": i,
+                "score": f.get('relevance_score', 0),
+                "reason": f.get('relevance_reasoning', ''),
+                "text": f.get('text', '')[:100] + "..."
+            })
+
         return SearchResult(
-            facts=current_context_facts,
-            edges=[], # Not used for QA context usually
+            facts=final_facts,
+            edges=[],
             nodes=[],
             query=query,
-            total_count=len(current_context_facts)
+            total_count=len(final_facts),
+            rerank_details=rerank_details
         )
 
     # ========== Basic Tools ==========

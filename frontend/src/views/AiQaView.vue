@@ -86,7 +86,12 @@
               </div>
 
               <div v-if="results.facts.length > 0" class="facts-preview">
-                <div class="facts-header">检索到 {{ results.facts.length }} 条事实</div>
+                <div class="facts-header">
+                  召回阶段: 发现 {{ results.facts.length }} 条相关事实
+                </div>
+                <div v-if="results.rerank_results.length > 0" class="retrieval-done-hint-mini">
+                  ✅ 初步检索完成
+                </div>
                 <div class="facts-scroll-area">
                   <div v-for="(fact, idx) in results.facts" :key="idx" class="fact-card">
                     <div class="fact-text">{{ fact.text }}</div>
@@ -100,6 +105,38 @@
                         @click="viewDocument(fact)"
                       >
                         定位文档
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Rerank Node Content -->
+            <div v-if="node.type === 'rerank'" class="rerank-content">
+              <div v-if="results.rerank_results.length === 0" class="rerank-placeholder">
+                等待对检索结果进行相关性打分...
+              </div>
+              <div v-else class="rerank-results-list">
+                <div class="rerank-summary">LLM 已完成精排 (Top {{ results.facts.length }})</div>
+                <div class="rerank-scroll-area">
+                  <div v-for="(fact, idx) in results.facts" :key="idx" class="rerank-item-card" :class="{ 'high-score': fact.relevance_score > 80 }">
+                    <div class="rerank-item-header">
+                      <span class="rerank-score">{{ fact.relevance_score }}分</span>
+                      <span class="rerank-index">Rank #{{ idx + 1 }}</span>
+                    </div>
+                    <div class="rerank-reason">理由: {{ fact.relevance_reasoning }}</div>
+                    <div class="rerank-text-snippet">{{ fact.text }}</div>
+                    <div class="fact-footer" style="margin-top: 8px;">
+                      <span class="fact-source-tag">
+                        📄 {{ fact.source }} <template v-if="fact.page">(P{{ fact.page }})</template>
+                      </span>
+                      <button
+                        v-if="fact.source !== 'Unknown' && fact.source !== 'Graph Knowledge' && fact.source !== 'Local Search'"
+                        class="view-doc-btn"
+                        @click="viewDocument(fact)"
+                      >
+                        定位
                       </button>
                     </div>
                   </div>
@@ -738,6 +775,7 @@ const workflowData = ref({
 const results = ref({
   facts: [],
   answer: '',
+  rerank_results: [],
   prompts: {
     system: '',
     user: ''
@@ -750,13 +788,15 @@ const showPromptModal = ref(false)
 const nodes = ref([
   { id: 'n1', type: 'input', title: '用户输入 (Input)', icon: '📝', x: 50, y: 150, status: 'pending' },
   { id: 'n2', type: 'retrieval', title: '知识库检索 (Retrieval)', icon: '🔍', x: 350, y: 150, status: 'pending' },
-  { id: 'n3', type: 'llm', title: '大模型推理 (LLM)', icon: '🧠', x: 650, y: 150, status: 'pending' },
-  { id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 950, y: 150, status: 'pending' }
+  { id: 'n_rerank', type: 'rerank', title: 'LLM 相关性重排 (Rerank)', icon: '🃏', x: 650, y: 150, status: 'pending' },
+  { id: 'n3', type: 'llm', title: '大模型推理 (LLM)', icon: '🧠', x: 950, y: 150, status: 'pending' },
+  { id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 1250, y: 150, status: 'pending' }
 ])
 
 const connections = [
   { from: 'n1', to: 'n2' },
-  { from: 'n2', to: 'n3' },
+  { from: 'n2', to: 'n_rerank' },
+  { from: 'n_rerank', to: 'n3' },
   { from: 'n3', to: 'n4' }
 ]
 
@@ -837,6 +877,7 @@ const resetWorkflow = () => {
   results.value = {
     facts: [],
     answer: '',
+    rerank_results: [],
     prompts: { system: '', user: '' }
   }
   nodes.value.forEach(n => n.status = 'pending')
@@ -856,7 +897,10 @@ const runWorkflow = async () => {
   resetWorkflow()
 
   try {
+    // Step 1: Input
     nodes.value[0].status = 'completed'
+
+    // Step 2: Retrieval
     nodes.value[1].status = 'running'
 
     const res = await aiQa({
@@ -870,17 +914,24 @@ const runWorkflow = async () => {
       results.value.facts = res.data.retrieved_facts || []
       results.value.prompts = res.data.prompts || { system: '', user: '' }
 
+      // Step 3: Rerank (Wait slightly for visual effect)
       nodes.value[2].status = 'running'
-      await new Promise(r => setTimeout(r, 800))
-
+      await new Promise(r => setTimeout(r, 600))
+      results.value.rerank_results = res.data.rerank_results || []
       nodes.value[2].status = 'completed'
-      results.value.answer = res.data.answer
 
+      // Step 4: LLM
       nodes.value[3].status = 'running'
+      await new Promise(r => setTimeout(r, 400))
+      results.value.answer = res.data.answer
+      nodes.value[3].status = 'completed'
+
+      // Step 5: Output
+      nodes.value[4].status = 'running'
       nextTick(() => {
         renderEvidenceScreenshots('node')
       })
-      nodes.value[3].status = 'completed'
+      nodes.value[4].status = 'completed'
     } else {
       throw new Error(res.error || '运行失败')
     }
@@ -1511,6 +1562,96 @@ onUnmounted(() => {
   font-weight: 700;
   color: #666;
   margin-bottom: 5px;
+}
+
+.retrieval-done-hint-mini {
+  font-size: 10px;
+  color: #67c23a;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.rerank-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.rerank-placeholder {
+  color: #999;
+  text-align: center;
+  margin-top: 20px;
+  font-size: 13px;
+}
+
+.rerank-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rerank-summary {
+  font-size: 11px;
+  font-weight: 700;
+  color: #409eff;
+  background: #ecf5ff;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.rerank-scroll-area {
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rerank-item-card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 8px;
+  transition: all 0.2s;
+}
+
+.rerank-item-card.high-score {
+  border-left: 4px solid #67c23a;
+  background: #f0f9eb;
+}
+
+.rerank-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.rerank-score {
+  font-weight: 800;
+  color: #f56c6c;
+  font-size: 14px;
+}
+
+.rerank-index {
+  color: #999;
+  font-size: 10px;
+}
+
+.rerank-reason {
+  font-size: 11px;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 4px;
+}
+
+.rerank-text-snippet {
+  font-size: 10px;
+  color: #666;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .llm-content .form-group {

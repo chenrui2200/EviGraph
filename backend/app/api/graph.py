@@ -991,6 +991,7 @@ def ai_qa():
         # Use unified agentic retrieval flow from GraphToolsService
         search_result = tools.search_with_agentic_flow(graph_ids=graph_ids, query=query, limit=20)
         current_context_facts = search_result.facts
+        rerank_details = search_result.rerank_details
 
         # Prepare context for answering
         facts_text = search_result.to_text()
@@ -1010,6 +1011,7 @@ def ai_qa():
                 "query": query,
                 "answer": answer,
                 "retrieved_facts": current_context_facts,
+                "rerank_results": rerank_details, # Explicitly included for "Rerank Card"
                 "graph_ids": graph_ids
             }
         })
