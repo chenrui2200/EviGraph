@@ -154,60 +154,30 @@
             <span class="step-title">知识召回命中测试 (Hit Test)</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase >= 2" class="badge accent">运行中</span>
+            <span v-if="currentPhase >= 2" class="badge accent">就绪</span>
             <span v-else class="badge pending">等待中</span>
           </div>
         </div>
 
         <div class="card-content">
           <p class="api-note">测试 GraphRAG 检索准确性</p>
-          <p class="description">图谱构建已完成。您现在可以通过提问来测试知识库的召回能力。</p>
+          <p class="description">图谱构建已完成。建议通过视觉化的命中测试验证知识库的召回能力和关联结构。</p>
 
-          <div v-if="currentPhase >= 2" class="hit-test-box">
-            <div class="search-input-wrapper">
-              <input
-                v-model="hitTestQuery"
-                placeholder="输入一个问题以测试知识召回..."
-                @keyup.enter="runHitTest"
-                :disabled="hitTestLoading"
-              />
-              <button @click="runHitTest" :disabled="hitTestLoading || !hitTestQuery.trim()">
-                {{ hitTestLoading ? '...' : '→' }}
-              </button>
-            </div>
-
-            <div v-if="hitTestResults" class="hit-test-results">
-              <div class="results-header">
-                <span>找到了 {{ hitTestResults.facts?.length || 0 }} 条相关事实</span>
-              </div>
-              <div class="facts-scroll-area">
-                <div v-for="(fact, idx) in hitTestResults.facts" :key="idx" class="fact-item">
-                  <p class="fact-text">{{ parseFactText(fact).content }}</p>
-                  <div class="fact-meta-row">
-                    <div v-if="parseFactText(fact).source" class="fact-source">
-                      <span class="source-label">原文位置</span>
-                      <span class="source-tag">{{ parseFactText(fact).source }}</span>
-                    </div>
-                    <div v-if="parseFactText(fact).page" class="fact-page">
-                      <span class="source-label">页码</span>
-                      <span class="page-tag">P.{{ parseFactText(fact).page }}</span>
-                    </div>
-                    <div v-if="parseFactText(fact).bbox" class="fact-bbox" :title="'坐标: ' + JSON.stringify(parseFactText(fact).bbox)">
-                      <span class="source-label">精确位置</span>
-                      <span class="bbox-tag">📍 定位</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <button
+            v-if="currentPhase >= 2"
+            class="action-btn hit-test-btn"
+            @click="router.push({ name: 'HitTest', params: { projectId: projectData.project_id } })"
+          >
+            进入命中测试面板 🔍
+          </button>
 
           <button
             v-if="currentPhase >= 2"
             class="action-btn next-btn"
+            style="margin-top: 12px; background: #fff; border: 1px solid #000; color: #000;"
             @click="router.push({ name: 'AiQa', params: { id: projectData.project_id } })"
           >
-            创建 AI 知识库应用 ➝
+            直接创建 AI 应用 ➝
           </button>
         </div>
       </div>

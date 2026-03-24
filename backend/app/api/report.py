@@ -400,6 +400,7 @@ def search_graph_tool():
         graph_ids = data.get('graph_ids')
         query = data.get('query')
         limit = data.get('limit', 10)
+        scope = data.get('scope', 'edges')
 
         if not query:
             return jsonify({"success": False, "error": "Please provide query"}), 400
@@ -417,10 +418,10 @@ def search_graph_tool():
         if graph_ids:
             if not isinstance(graph_ids, list):
                 return jsonify({"success": False, "error": "graph_ids must be a list"}), 400
-            result = tools.search_multi_graphs(graph_ids=graph_ids, query=query, limit=limit)
+            result = tools.search_multi_graphs(graph_ids=graph_ids, query=query, limit=limit, scope=scope)
         # Single graph search (backward compatible)
         else:
-            result = tools.search_graph(graph_id=graph_id, query=query, limit=limit)
+            result = tools.search_graph(graph_id=graph_id, query=query, limit=limit, scope=scope)
 
         return jsonify({"success": True, "data": result.to_dict()})
     except Exception as e:

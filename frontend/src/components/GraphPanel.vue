@@ -214,7 +214,7 @@
     </div>
 
     <!-- Bottom Legend (Bottom Left) -->
-    <div v-if="graphData && entityTypes.length" class="graph-legend">
+    <div v-if="graphData && entityTypes.length && showLegend" class="graph-legend">
       <span class="legend-title">Entity Types</span>
       <div class="legend-items">
         <div class="legend-item" v-for="type in entityTypes" :key="type.name">
@@ -243,7 +243,9 @@ const props = defineProps({
   graphData: Object,
   loading: Boolean,
   currentPhase: Number,
-  isSimulating: Boolean
+  isSimulating: Boolean,
+  highlightNodeId: String,
+  showLegend: { type: Boolean, default: true } // Control legend visibility
 })
 
 const emit = defineEmits(['refresh', 'toggle-maximize'])
@@ -786,6 +788,38 @@ const renderGraph = () => {
 watch(() => props.graphData, () => {
   nextTick(renderGraph)
 }, { deep: true })
+
+watch(() => props.highlightNodeId, (newId) => {
+  if (!graphSvg.value) return
+  const svg = d3.select(graphSvg.value)
+
+  if (newId) {
+    // Highlight specific node
+    svg.selectAll('circle')
+      .transition().duration(300)
+      .attr('r', d => d.id === newId ? 18 : 10)
+      .attr('stroke', d => d.id === newId ? '#FF5722' : '#fff')
+      .attr('stroke-width', d => d.id === newId ? 5 : 2.5)
+
+    // Highlight connected edges
+    svg.selectAll('.links path')
+      .transition().duration(300)
+      .attr('stroke', d => (d.source.id === newId || d.target.id === newId) ? '#FF5722' : '#C0C0C0')
+      .attr('stroke-width', d => (d.source.id === newId || d.target.id === newId) ? 3 : 1.5)
+  } else {
+    // Reset all
+    svg.selectAll('circle')
+      .transition().duration(300)
+      .attr('r', 10)
+      .attr('stroke', '#fff')
+      .attr('stroke-width', 2.5)
+
+    svg.selectAll('.links path')
+      .transition().duration(300)
+      .attr('stroke', '#C0C0C0')
+      .attr('stroke-width', 1.5)
+  }
+})
 
 // Watch edge label show/hide toggle
 watch(showEdgeLabels, (newVal) => {

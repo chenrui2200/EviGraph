@@ -6,6 +6,7 @@ import SimulationRunView from '../views/SimulationRunView.vue'
 import ReportView from '../views/ReportView.vue'
 import InteractionView from '../views/InteractionView.vue'
 import AiQaView from '../views/AiQaView.vue'
+import HitTestView from '../views/HitTestView.vue'
 
 const routes = [
   {
@@ -17,6 +18,12 @@ const routes = [
     path: '/process/:projectId',
     name: 'Process',
     component: Process,
+    props: true
+  },
+  {
+    path: '/hit-test/:projectId',
+    name: 'HitTest',
+    component: HitTestView,
     props: true
   },
   {
