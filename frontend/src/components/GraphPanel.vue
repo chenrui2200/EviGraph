@@ -248,7 +248,7 @@ const props = defineProps({
   showLegend: { type: Boolean, default: true } // Control legend visibility
 })
 
-const emit = defineEmits(['refresh', 'toggle-maximize'])
+const emit = defineEmits(['refresh', 'toggle-maximize', 'node-click'])
 
 const graphContainer = ref(null)
 const graphSvg = ref(null)
@@ -257,6 +257,10 @@ const showEdgeLabels = ref(true) // Default show edge labels
 const expandedSelfLoops = ref(new Set()) // Expanded self-loop items
 const showSimulationFinishedHint = ref(false) // Simulation finished hint
 const wasSimulating = ref(false) // Track whether was simulating before
+
+// Refs for programmatic control
+const zoomBehavior = ref(null)
+const d3Nodes = ref([])
 
 // Dismiss simulation finished hint
 const dismissFinishedHint = () => {
@@ -327,6 +331,11 @@ let currentSimulation = null
 let linkLabelsRef = null
 let linkLabelBgRef = null
 
+const getColor = (type) => {
+  const t = entityTypes.value.find(et => et.name === type)
+  return t ? t.color : '#999'
+}
+
 const renderGraph = () => {
   if (!graphSvg.value || !props.graphData) return
 
@@ -361,6 +370,7 @@ const renderGraph = () => {
     type: n.labels?.find(l => l !== 'Entity') || 'Entity',
     rawData: n
   }))
+  d3Nodes.value = nodes
 
   const nodeIds = new Set(nodes.map(n => n.id))
 
@@ -465,12 +475,7 @@ const renderGraph = () => {
     })
   })
     
-  // Color scale
-  const colorMap = {}
-  entityTypes.value.forEach(t => colorMap[t.name] = t.color)
-  const getColor = (type) => colorMap[type] || '#999'
-
-  // Simulation - dynamically adjust node spacing based on edge count
+  // simulation - dynamically adjust node spacing based on edge count
   const simulation = d3.forceSimulation(nodes)
     .force('link', d3.forceLink(edges).id(d => d.id).distance(d => {
       // Dynamically adjust distance based on edge count between this pair of nodes
@@ -491,9 +496,14 @@ const renderGraph = () => {
   const g = svg.append('g')
   
   // Zoom
-  svg.call(d3.zoom().extent([[0, 0], [width, height]]).scaleExtent([0.1, 4]).on('zoom', (event) => {
-    g.attr('transform', event.transform)
-  }))
+  zoomBehavior.value = d3.zoom()
+    .extent([[0, 0], [width, height]])
+    .scaleExtent([0.1, 4])
+    .on('zoom', (event) => {
+      g.attr('transform', event.transform)
+    })
+
+  svg.call(zoomBehavior.value)
 
   // Links - use path to support curves
   const linkGroup = g.append('g').attr('class', 'links')
@@ -573,6 +583,7 @@ const renderGraph = () => {
   const link = linkGroup.selectAll('path')
     .data(edges)
     .enter().append('path')
+    .attr('class', 'link-path') // Added class
     .attr('stroke', '#C0C0C0')
     .attr('stroke-width', 1.5)
     .attr('fill', 'none')
@@ -656,6 +667,7 @@ const renderGraph = () => {
   const node = nodeGroup.selectAll('circle')
     .data(nodes)
     .enter().append('circle')
+    .attr('class', 'node-circle') // Added class
     .attr('r', 10)
     .attr('fill', d => getColor(d.type))
     .attr('stroke', '#fff')
@@ -699,6 +711,9 @@ const renderGraph = () => {
     )
     .on('click', (event, d) => {
       event.stopPropagation()
+      // Emit node click event
+      emit('node-click', d.id)
+
       // Reset all node styles
       node.attr('stroke', '#fff').attr('stroke-width', 2.5)
       linkGroup.selectAll('path').attr('stroke', '#C0C0C0').attr('stroke-width', 1.5)
@@ -777,6 +792,7 @@ const renderGraph = () => {
 
   // Click on blank area to close detail panel
   svg.on('click', () => {
+    emit('node-click', null)
     selectedItem.value = null
     node.attr('stroke', '#fff').attr('stroke-width', 2.5)
     linkGroup.selectAll('path').attr('stroke', '#C0C0C0').attr('stroke-width', 1.5)
@@ -790,35 +806,103 @@ watch(() => props.graphData, () => {
 }, { deep: true })
 
 watch(() => props.highlightNodeId, (newId) => {
+  triggerHighlight(newId)
+})
+
+const triggerHighlight = (newId) => {
   if (!graphSvg.value) return
   const svg = d3.select(graphSvg.value)
 
   if (newId) {
-    // Highlight specific node
-    svg.selectAll('circle')
-      .transition().duration(300)
-      .attr('r', d => d.id === newId ? 18 : 10)
+    // 1. Highlight specific node (玫红色高亮，完全模拟点击效果)
+    svg.selectAll('circle.node-circle')
+      .interrupt()
+      .transition().duration(400) // Increase duration a bit
+      .attr('r', d => d.id === newId ? 25 : 10) // Slightly larger
+      .attr('fill', d => d.id === newId ? '#FF5722' : getColor(d.type)) // Use orange-red for highlight
       .attr('stroke', d => d.id === newId ? '#FF5722' : '#fff')
-      .attr('stroke-width', d => d.id === newId ? 5 : 2.5)
+      .attr('stroke-width', d => d.id === newId ? 8 : 2.5)
+      .attr('opacity', d => d.id === newId ? 1.0 : 0.6)
+      .style('filter', d => d.id === newId ? 'drop-shadow(0 0 20px rgba(255, 87, 34, 0.9))' : 'none')
 
-    // Highlight connected edges
-    svg.selectAll('.links path')
-      .transition().duration(300)
-      .attr('stroke', d => (d.source.id === newId || d.target.id === newId) ? '#FF5722' : '#C0C0C0')
-      .attr('stroke-width', d => (d.source.id === newId || d.target.id === newId) ? 3 : 1.5)
+    // 2. Highlight connected edges
+    svg.selectAll('path.link-path')
+      .interrupt()
+      .transition().duration(400)
+      .attr('stroke', d => {
+        const sId = typeof d.source === 'object' ? d.source.id : d.source
+        const tId = typeof d.target === 'object' ? d.target.id : d.target
+        return (sId === newId || tId === newId) ? '#FF5722' : '#D0D0D0'
+      })
+      .attr('stroke-width', d => {
+        const sId = typeof d.source === 'object' ? d.source.id : d.source
+        const tId = typeof d.target === 'object' ? d.target.id : d.target
+        return (sId === newId || tId === newId) ? 5 : 1.5
+      })
+      .attr('stroke-opacity', d => {
+        const sId = typeof d.source === 'object' ? d.source.id : d.source
+        const tId = typeof d.target === 'object' ? d.target.id : d.target
+        return (sId === newId || tId === newId) ? 1.0 : 0.3
+      })
   } else {
     // Reset all
-    svg.selectAll('circle')
+    svg.selectAll('circle.node-circle')
+      .interrupt()
       .transition().duration(300)
       .attr('r', 10)
+      .attr('fill', d => getColor(d.type))
       .attr('stroke', '#fff')
       .attr('stroke-width', 2.5)
+      .attr('opacity', 1.0)
+      .style('filter', 'none')
 
-    svg.selectAll('.links path')
+    svg.selectAll('path.link-path')
+      .interrupt()
       .transition().duration(300)
       .attr('stroke', '#C0C0C0')
       .attr('stroke-width', 1.5)
+      .attr('stroke-opacity', 1.0)
   }
+}
+
+const focusNode = (nodeId) => {
+  if (!nodeId || !graphSvg.value || !zoomBehavior.value) return
+
+  const targetNode = d3Nodes.value.find(n => n.id === nodeId)
+  if (!targetNode) return
+
+  // Update selected item to show detail panel
+  selectedItem.value = {
+    type: 'node',
+    data: targetNode.rawData,
+    entityType: targetNode.type,
+    color: getColor(targetNode.type)
+  }
+
+  // Animate zoom to center the node
+  const svg = d3.select(graphSvg.value)
+  const container = graphContainer.value
+  const width = container.clientWidth
+  const height = container.clientHeight
+
+  // Center point
+  const x = targetNode.x || width / 2
+  const y = targetNode.y || height / 2
+  const scale = 1.2 // Zoom in a bit
+
+  svg.transition()
+    .duration(750)
+    .call(
+      zoomBehavior.value.transform,
+      d3.zoomIdentity
+        .translate(width / 2, height / 2)
+        .scale(scale)
+        .translate(-x, -y)
+    )
+}
+
+defineExpose({
+  focusNode
 })
 
 // Watch edge label show/hide toggle

@@ -17,11 +17,13 @@
       <!-- Left: Graph Visualization -->
       <div class="graph-section">
         <GraphPanel
+          ref="graphPanelRef"
           :graph-data="filteredGraphData"
           :loading="graphLoading"
           :highlight-node-id="highlightedNodeId"
           :show-legend="false"
           @refresh="loadFullGraph"
+          @node-click="handleNodeClick"
         />
       </div>
 
@@ -81,10 +83,12 @@
               <div
                 v-for="(fact, idx) in results.facts"
                 :key="idx"
+                :id="`fact-item-${idx}`"
                 class="fact-item"
-                :class="{ 'expanded': expandedFacts.has(idx), 'active': highlightedNodeId === fact.uuid }"
+                :class="{ 'expanded': expandedFacts.has(idx), 'active': highlightedNodeId === (fact.source_node_uuid || fact.uuid) }"
                 @mouseenter="highlightInGraph(fact)"
                 @mouseleave="clearHighlight"
+                @click="selectFact(fact, idx)"
               >
                 <div class="fact-body">
                   <div class="fact-main-row">
@@ -96,12 +100,10 @@
 
                   <!-- Expanded Associated Info -->
                   <div v-if="expandedFacts.has(idx)" class="associated-info-box">
-                    <div class="associated-header">🔗 关联知识扩展</div>
+                    <div class="associated-header">🔗 关联知识扩展 (图谱关系描述)</div>
                     <div v-if="getAssociatedInfo(fact).length > 0" class="associated-list">
                       <div v-for="(assoc, aIdx) in getAssociatedInfo(fact)" :key="aIdx" class="assoc-item">
-                        <span class="assoc-rel">[{{ assoc.rel }}]</span>
-                        <span class="assoc-node">{{ assoc.node }}:</span>
-                        <span class="assoc-info">{{ assoc.info || '(无摘要信息)' }}</span>
+                        <p class="assoc-description">{{ assoc.description }}</p>
                       </div>
                     </div>
                     <div v-else class="no-assoc-hint">暂无直接关联的详细扩展信息</div>
@@ -163,6 +165,8 @@ const showDocViewer = ref(false)
 const pdfLoading = ref(false)
 const expandedFacts = ref(new Set())
 const highlightedNodeId = ref(null)
+const selectedNodeId = ref(null) // Persistent selection from click
+const graphPanelRef = ref(null)
 
 // Graph Filtering
 const filteredGraphData = computed(() => {
@@ -182,8 +186,10 @@ const filteredGraphData = computed(() => {
     resultNodeIds.add(e.target_node_uuid)
   })
 
-  // Also include the facts themselves if they represent nodes (some backends do this)
+  // Also include the facts themselves if they represent nodes or have source info
   results.value.facts.forEach(f => {
+    if (f.source_node_uuid) resultNodeIds.add(f.source_node_uuid)
+    if (f.target_node_uuid) resultNodeIds.add(f.target_node_uuid)
     if (f.uuid) resultNodeIds.add(f.uuid)
   })
 
@@ -214,20 +220,58 @@ const toggleExpand = (idx) => {
 }
 
 const getAssociatedInfo = (fact) => {
-  if (!fact.uuid || !fullGraphData.value.edges) return []
+  if (!fullGraphData.value.nodes || !fullGraphData.value.edges) return []
+
+  // Case 1: The fact itself represents a direct relation (has both source and target)
+  if (fact.source_node_uuid && fact.target_node_uuid) {
+    const sourceNode = fullGraphData.value.nodes.find(n => n.uuid === fact.source_node_uuid)
+    const targetNode = fullGraphData.value.nodes.find(n => n.uuid === fact.target_node_uuid)
+    if (sourceNode && targetNode) {
+      return [{
+        description: `直接关联: 【${sourceNode.name}】 --(${fact.fact_type || '关系'})--> 【${targetNode.name}】`,
+        node: targetNode.name
+      }]
+    }
+  }
+
+  // Case 2: The fact is tied to a node, find its neighbors
+  const factNodeId = fact.source_node_uuid || fact.uuid
+  if (!factNodeId) return []
+
+  const factNode = fullGraphData.value.nodes.find(n => n.uuid === factNodeId)
+  if (!factNode) return []
+
+  const factNodeName = factNode.name
 
   // Find nodes connected to the node that produced this fact
   const associated = []
   fullGraphData.value.edges.forEach(e => {
-    if (e.source_node_uuid === fact.uuid) {
+    if (e.source_node_uuid === factNodeId) {
       const targetNode = fullGraphData.value.nodes.find(n => n.uuid === e.target_node_uuid)
-      if (targetNode) associated.push({ rel: e.name, node: targetNode.name, info: targetNode.summary })
-    } else if (e.target_node_uuid === fact.uuid) {
+      if (targetNode && targetNode.uuid !== factNodeId) { // Avoid self-loops in extension
+        associated.push({
+          description: `【${factNodeName}】 --(${e.name || e.fact_type || '关联'})--> 【${targetNode.name}】: ${targetNode.summary || '暂无摘要'}`,
+          node: targetNode.name
+        })
+      }
+    } else if (e.target_node_uuid === factNodeId) {
       const sourceNode = fullGraphData.value.nodes.find(n => n.uuid === e.source_node_uuid)
-      if (sourceNode) associated.push({ rel: e.name, node: sourceNode.name, info: sourceNode.summary })
+      if (sourceNode && sourceNode.uuid !== factNodeId) {
+        associated.push({
+          description: `【${sourceNode.name}】 --(${e.name || e.fact_type || '关联'})--> 【${factNodeName}】: ${sourceNode.summary || '暂无摘要'}`,
+          node: sourceNode.name
+        })
+      }
     }
   })
-  return associated
+
+  // Deduplicate by description
+  const seen = new Set()
+  return associated.filter(item => {
+    if (seen.has(item.description)) return false
+    seen.add(item.description)
+    return true
+  })
 }
 
 // PDF Viewer
@@ -282,13 +326,61 @@ const resetFilter = () => {
 }
 
 const highlightInGraph = (fact) => {
-  if (fact.uuid) {
-    highlightedNodeId.value = fact.uuid
+  const nodeId = fact.source_node_uuid || fact.uuid
+  if (nodeId) {
+    highlightedNodeId.value = nodeId
   }
 }
 
 const clearHighlight = () => {
-  highlightedNodeId.value = null
+  // Reset to the persistently selected one if it exists, otherwise null
+  highlightedNodeId.value = selectedNodeId.value
+}
+
+const selectFact = (fact, idx) => {
+  const nodeId = fact.source_node_uuid || fact.uuid
+  if (nodeId) {
+    // If clicking the same one, toggle off
+    if (selectedNodeId.value === nodeId) {
+      selectedNodeId.value = null
+      highlightedNodeId.value = null
+    } else {
+      selectedNodeId.value = nodeId
+      highlightedNodeId.value = nodeId
+      // Focus node in graph panel
+      if (graphPanelRef.value) {
+        graphPanelRef.value.focusNode(nodeId)
+      }
+    }
+  }
+}
+
+// Logic to handle clicking nodes in GraphPanel
+const handleNodeClick = (nodeId) => {
+  if (!nodeId) {
+    selectedNodeId.value = null
+    highlightedNodeId.value = null
+    return
+  }
+
+  // Update selection
+  selectedNodeId.value = nodeId
+  highlightedNodeId.value = nodeId
+
+  // Find corresponding fact index
+  const factIdx = results.value.facts.findIndex(f => (f.source_node_uuid || f.uuid) === nodeId)
+  if (factIdx !== -1) {
+    // Auto expand the fact
+    expandedFacts.value.add(factIdx)
+
+    // Scroll to the fact item
+    nextTick(() => {
+      const el = document.getElementById(`fact-item-${factIdx}`)
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
+    })
+  }
 }
 
 // PDF Utilities (Same as AiQaView)
@@ -600,7 +692,9 @@ onMounted(async () => {
 
 .fact-item.active {
   border-color: #ff5722;
-  box-shadow: 0 0 0 2px rgba(255, 87, 34, 0.1);
+  background: #fff9f7;
+  box-shadow: 0 4px 12px rgba(255, 87, 34, 0.15);
+  transform: translateY(-2px);
 }
 
 .fact-main-row {
@@ -667,6 +761,12 @@ onMounted(async () => {
   font-size: 11px;
   color: #999;
   font-style: italic;
+}
+
+.assoc-description {
+  margin: 0;
+  color: #444;
+  word-break: break-all;
 }
 
 .fact-meta {

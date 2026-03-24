@@ -810,7 +810,9 @@ Your response:"""
                             "bbox": bbox,
                             "page_width": page_width,
                             "page_height": page_height,
-                            "graph_id": graph_id
+                            "graph_id": graph_id,
+                            "source_node_uuid": edge.get('source_node_uuid', ''),
+                            "target_node_uuid": edge.get('target_node_uuid', '')
                         }
                         facts.append(fact_obj)
 
