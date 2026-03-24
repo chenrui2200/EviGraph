@@ -20,7 +20,7 @@ const routes = [
     props: true
   },
   {
-    path: '/ai-qa/:projectId',
+    path: '/ai-qa/:id',
     name: 'AiQa',
     component: AiQaView,
     props: true

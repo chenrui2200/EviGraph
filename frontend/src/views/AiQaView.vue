@@ -404,6 +404,10 @@ import { useRouter, useRoute } from 'vue-router'
 import { getProjectList, aiQa, updateProject } from '../api/graph'
 import { saveApp, getApp, publishApp, executeAppApi } from '../api/ai_app'
 
+const props = defineProps({
+  id: String
+})
+
 const router = useRouter()
 const route = useRoute()
 
@@ -418,7 +422,7 @@ const projects = ref([])
 const activeNodeId = ref(null)
 
 // App State
-const appId = ref(route.query.appId || null)
+const appId = ref(props.id?.startsWith('app_') ? props.id : null)
 const appName = ref('新 AI 知识库应用')
 const isEditingAppName = ref(false)
 const appNameInput = ref(null)
@@ -799,8 +803,9 @@ const loadProjects = async () => {
     const res = await getProjectList()
     if (res.success) {
       projects.value = res.data
-      if (route.params.projectId) {
-        const currentProj = projects.value.find(p => p.project_id === route.params.projectId)
+      const projectId = (!props.id?.startsWith('app_') && props.id !== 'default') ? props.id : null
+      if (projectId) {
+        const currentProj = projects.value.find(p => p.project_id === projectId)
         if (currentProj && currentProj.graph_id && !workflowData.value.selectedGraphIds.includes(currentProj.graph_id)) {
           workflowData.value.selectedGraphIds.push(currentProj.graph_id)
         }
@@ -900,9 +905,9 @@ const saveWorkflowApp = async () => {
     }
     const res = await saveApp(payload)
     if (res.success) {
-      appId.value = res.data.app_id
-      if (!route.query.appId) {
-        router.replace({ query: { ...route.query, appId: res.data.app_id } })
+      if (appId.value !== res.data.app_id) {
+        appId.value = res.data.app_id
+        router.replace({ name: 'AiQa', params: { id: appId.value } })
       }
       alert('应用保存成功')
     } else {

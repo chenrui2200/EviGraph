@@ -205,7 +205,7 @@
           <button
             v-if="currentPhase >= 2"
             class="action-btn next-btn"
-            @click="router.push({ name: 'AiQa', params: { projectId: projectData.project_id } })"
+            @click="router.push({ name: 'AiQa', params: { id: projectData.project_id } })"
           >
             创建 AI 知识库应用 ➝
           </button>

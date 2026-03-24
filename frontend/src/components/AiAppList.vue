@@ -81,8 +81,7 @@ const loadApps = async () => {
 const navigateToApp = (app) => {
   router.push({
     name: 'AiQa',
-    params: { projectId: app.project_id || 'default' },
-    query: { appId: app.app_id }
+    params: { id: app.app_id }
   })
 }
 
