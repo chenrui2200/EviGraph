@@ -965,61 +965,244 @@ def delete_graph(graph_id: str):
         }), 500
 
 
-@graph_bp.route('/ai-qa', methods=['POST'])
-def ai_qa():
+
+@graph_bp.route('/supplement', methods=['POST'])
+def supplement_knowledge():
     """
-    AI Q&A Interface: agentic multi-hop retrieval from multiple graphs + LLM answering
+    Supplement knowledge by processing specific regions of a PDF.
+    Expects: { project_id, filename, regions: [{page, bbox: [x0, y0, x1, y1]}] }
     """
     try:
         data = request.get_json() or {}
-        query = data.get('query')
-        graph_ids = data.get('graph_ids', [])
+        project_id = data.get('project_id')
+        filename = data.get('filename')
+        regions = data.get('regions', [])
 
-        if not query:
-            return jsonify({"success": False, "error": "Please provide query"}), 400
+        if not project_id or not filename or not regions:
+            return jsonify({"success": False, "error": "Missing parameters"}), 400
 
-        if not graph_ids:
-            return jsonify({"success": False, "error": "Please select at least one knowledge base (graph)"}), 400
+        project = ProjectManager.get_project(project_id)
+        if not project or not project.graph_id:
+            return jsonify({"success": False, "error": "Project or Graph not found"}), 404
 
+        # 1. Find the physical file
+        project_dir = ProjectManager._get_project_dir(project_id)
+        file_path = None
+        found_filename = None
+
+        # Robust recursive fuzzy search (same as get_project_document logic)
+        search_name = filename.lower().strip()
+        for root, dirs, files in os.walk(project_dir):
+            for f in files:
+                f_lower = f.lower().strip()
+                # Strategy: Exact, substring or contains
+                if f_lower == search_name or search_name in f_lower or f_lower in search_name:
+                    file_path = os.path.join(root, f)
+                    found_filename = f
+                    break
+            if file_path:
+                break
+
+        if not file_path:
+            # Debug info: see what's actually there
+            all_files = []
+            for root, dirs, files in os.walk(project_dir):
+                all_files.extend(files)
+            logger.warning(f"Supplement lookup failed. Searching for '{search_name}'. Present files: {all_files}")
+            return jsonify({
+                "success": False,
+                "error": f"Source file {filename} not found in project directory."
+            }), 404
+
+        logger.info(f"Supplementing using file: {file_path}")
+
+
+        # 2. Extract text from specific regions using PyMuPDF
+        import fitz
+        from ..utils.file_parser import TextChunk
+
+        supplementary_chunks = []
+        doc = fitz.open(file_path)
+        total_pages = len(doc)
+
+        for i, reg in enumerate(regions):
+            page_num = reg.get('page')
+            bbox = reg.get('bbox')
+            if not page_num or not bbox or len(bbox) != 4:
+                continue
+
+            # fitz pages are 0-indexed
+            page = doc[page_num - 1]
+
+            # Get page dimensions
+            page_rect = page.rect
+            pw, ph = page_rect.width, page_rect.height
+
+            # Extract text from the specific rectangle
+            text = page.get_textbox(fitz.Rect(bbox))
+
+            if text.strip():
+                supplementary_chunks.append(TextChunk(
+                    text=text.strip(),
+                    metadata={
+                        "source": filename,
+                        "page": page_num,
+                        "total_pages": total_pages,
+                        "bbox": bbox,
+                        "page_width": pw,
+                        "page_height": ph,
+                        "type": "supplementary",
+                        "supplement_index": i
+                    }
+                ))
+
+        doc.close()
+
+        if not supplementary_chunks:
+            return jsonify({"success": False, "error": "No text found in selected regions"}), 400
+
+        # 3. Trigger incremental graph building
         storage = _get_storage()
-        tools = GraphToolsService(storage=storage)
-        from ..utils.llm_client import LLMClient
-        llm = LLMClient()
+        builder = GraphBuilderService(storage=storage)
 
-        logger.info(f"AI Q&A Agentic Retrieval starting: {query[:50]}...")
-
-        # Use unified agentic retrieval flow from GraphToolsService
-        search_result = tools.search_with_agentic_flow(graph_ids=graph_ids, query=query, limit=20)
-        current_context_facts = search_result.facts
-        rerank_details = search_result.rerank_details
-
-        # Prepare context for answering
-        facts_text = search_result.to_text()
-
-        system_prompt = "你是一个专业的工程标准知识助手。你的任务是基于提供的多跳检索到的【知识参考详情】深度回答用户问题。\n\n回答要求：\n1. 请先在 <thought> 标签内分析所有检索到的条文关联，确引用的完整性。\n2. 给出最终结论，必须引用具体的条款编号（如：根据 7.6.49 条规定...）。\n3. 如果知识涉及多个关联条款，请理清它们的逻辑先后关系。\n4. 若信息不足，请如实告知缺失的具体标准名称或编号。"
-        user_prompt = f"### 多跳检索结果汇总 (Context from Knowledge Graph):\n{facts_text}\n\n### 用户当前问题 (User Query):\n{query}\n\n请进行深度推理并回答："
-
-        logger.info("Calling LLM for final agentic Q&A answer...")
-        answer = llm.chat(messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ])
+        # We process these chunks synchronously for the supplement feature to give immediate feedback
+        episode_ids = builder.add_text_batches(
+            project.graph_id,
+            supplementary_chunks,
+            batch_size=1
+        )
 
         return jsonify({
             "success": True,
-            "data": {
-                "query": query,
-                "answer": answer,
-                "retrieved_facts": current_context_facts,
-                "rerank_results": rerank_details, # Explicitly included for "Rerank Card"
-                "graph_ids": graph_ids
-            }
+            "message": f"Successfully supplemented {len(supplementary_chunks)} knowledge fragments.",
+            "episode_ids": episode_ids
         })
 
     except Exception as e:
-        logger.error(f"AI Q&A failed: {str(e)}\n{traceback.format_exc()}")
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
+        logger.error(f"Supplement failed: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@graph_bp.route('/ai-qa', methods=['POST'])
+def ai_qa():
+    """
+    AI Q&A Interface: SSE streaming progress updates.
+    """
+    import time
+    from flask import Response
+
+    data = request.get_json() or {}
+    query = data.get('query')
+    graph_ids = data.get('graph_ids', [])
+    try:
+        rerank_threshold = int(data.get('rerank_threshold', 60))
+    except (ValueError, TypeError):
+        rerank_threshold = 60
+
+    if not query:
+        return jsonify({"success": False, "error": "Please provide query"}), 400
+    if not graph_ids:
+        return jsonify({"success": False, "error": "Please select at least one knowledge base"}), 400
+
+    from flask import stream_with_context
+    storage = _get_storage()
+
+    @stream_with_context
+    def generate():
+        start_total = time.time()
+        try:
+            tools = GraphToolsService(storage=storage)
+            from ..utils.llm_client import LLMClient
+            llm = LLMClient()
+
+            # 1. Start Optimization & Retrieval
+            yield f"data: {json.dumps({'type': 'retrieval_start'})}\n\n"
+            retrieval_start = time.time()
+
+            # Perform retrieval
+            search_result = tools.search_with_agentic_flow(graph_ids=graph_ids, query=query, limit=20)
+            ret_dur = round(time.time() - retrieval_start, 2)
+
+            # 2. Retrieval Complete
+            msg_ret = {
+                'type': 'retrieval_complete',
+                'data': {
+                    'facts': search_result.facts,
+                    'duration': ret_dur
+                }
+            }
+            yield f"data: {json.dumps(msg_ret, ensure_ascii=False)}\n\n"
+
+            # 3. Rerank & Filtering
+            # Filter facts based on threshold
+            all_facts = search_result.facts
+            filtered_facts = [f for f in all_facts if f.get('relevance_score', 0) >= rerank_threshold]
+
+            # If nothing passes threshold, keep top 1 as safety
+            if not filtered_facts and all_facts:
+                filtered_facts = all_facts[:1]
+
+            msg_rerank = {
+                'type': 'rerank_complete',
+                'data': {
+                    'results': search_result.rerank_details,
+                    'duration': 'incl.',
+                    'filtered_count': len(filtered_facts),
+                    'total_count': len(all_facts)
+                }
+            }
+            yield f"data: {json.dumps(msg_rerank, ensure_ascii=False)}\n\n"
+
+            # 4. LLM Generation Start
+            yield f"data: {json.dumps({'type': 'llm_start'})}\n\n"
+            llm_start = time.time()
+
+            # Use FILTERED facts for the prompt
+            from ..services.graph_tools import SearchResult
+            # Temporary SearchResult object to use its to_text method
+            temp_result = SearchResult(
+                facts=filtered_facts,
+                edges=[],
+                nodes=[],
+                query=query,
+                total_count=len(filtered_facts)
+            )
+
+            facts_text = temp_result.to_text()
+            system_prompt = "你是一个专业的工程标准知识助手。你的任务是基于提供的多跳检索到的【知识参考详情】深度回答用户问题。\n\n回答要求：\n1. 请先在 <thought> 标签内分析所有检索到的条文关联，确引用的完整性。\n2. 给出最终结论，必须引用具体的条款编号（如：根据 7.6.49 条规定...）。\n3. 如果知识涉及多个关联条款，请理清它们的逻辑先后关系。\n4. 若信息不足，请如实告知缺失的具体标准名称或编号。"
+            user_prompt = f"### 多跳检索结果汇总 (Context from Knowledge Graph):\n{facts_text}\n\n### 用户当前问题 (User Query):\n{query}\n\n请进行深度推理并回答："
+
+            # Store prompts for debugging/visibility in UI
+            msg_prompts = {
+                'type': 'prompts_ready',
+                'data': {
+                    'system': system_prompt,
+                    'user': user_prompt
+                }
+            }
+            yield f"data: {json.dumps(msg_prompts, ensure_ascii=False)}\n\n"
+
+            answer = llm.chat(messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ], temperature=data.get('temperature', 0.7))
+
+            llm_dur = round(time.time() - llm_start, 2)
+
+            # 5. Final LLM Complete
+            msg_final = {
+                'type': 'llm_complete',
+                'data': {
+                    'answer': answer,
+                    'duration': llm_dur,
+                    'total_duration': round(time.time() - start_total, 2)
+                }
+            }
+            yield f"data: {json.dumps(msg_final, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error(f"AI Q&A stream failed: {str(e)}\n{traceback.format_exc()}")
+            err_msg = {'type': 'error', 'message': str(e)}
+            yield f"data: {json.dumps(err_msg, ensure_ascii=False)}\n\n"
+
+    return Response(generate(), mimetype='text/event-stream')
+

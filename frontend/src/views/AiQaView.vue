@@ -57,6 +57,7 @@
           <div class="node-header">
             <span class="node-icon">{{ node.icon }}</span>
             <span class="node-title">{{ node.title }}</span>
+            <div v-if="node.duration" class="node-duration">{{ node.duration }}s</div>
             <button v-if="node.type === 'output' && results.answer" class="expand-btn" title="全屏查看" @click.stop="toggleFullResult">
               ⛶
             </button>
@@ -114,8 +115,22 @@
 
             <!-- Rerank Node Content -->
             <div v-if="node.type === 'rerank'" class="rerank-content">
+              <div class="rerank-config">
+                <div class="threshold-label">
+                  <span>🎯 知识过滤阈值:</span>
+                  <span class="threshold-value" :class="getThresholdClass(workflowData.rerankThreshold)">{{ workflowData.rerankThreshold }}分</span>
+                </div>
+                <div class="thermometer-container">
+                  <input type="range" v-model="workflowData.rerankThreshold" min="0" max="100" step="5" class="thermometer-input" />
+                  <div class="thermometer-track">
+                    <div class="thermometer-fill" :style="{ width: workflowData.rerankThreshold + '%', background: getThresholdColor(workflowData.rerankThreshold) }"></div>
+                  </div>
+                </div>
+                <p class="config-hint">仅将高于此分数的检索事实发送给大模型推理</p>
+              </div>
+
               <div v-if="results.rerank_results.length === 0" class="rerank-placeholder">
-                等待对检索结果进行相关性打分...
+                等待运行...
               </div>
               <div v-else class="rerank-results-list">
                 <div class="rerank-summary">LLM 已完成精排 (Top {{ results.facts.length }})</div>
@@ -769,7 +784,8 @@ const saveProjectName = async (projectId) => {
 const workflowData = ref({
   query: '',
   selectedGraphIds: [],
-  temperature: 0.7
+  temperature: 0.7,
+  rerankThreshold: 60
 })
 
 const results = ref({
@@ -880,7 +896,22 @@ const resetWorkflow = () => {
     rerank_results: [],
     prompts: { system: '', user: '' }
   }
-  nodes.value.forEach(n => n.status = 'pending')
+  nodes.value.forEach(n => {
+    n.status = 'pending'
+    n.duration = null
+  })
+}
+
+const getThresholdColor = (val) => {
+  if (val < 40) return '#f56c6c'
+  if (val < 70) return '#e6a23c'
+  return '#67c23a'
+}
+
+const getThresholdClass = (val) => {
+  if (val < 40) return 'low'
+  if (val < 70) return 'mid'
+  return 'high'
 }
 
 const runWorkflow = async () => {
@@ -897,47 +928,73 @@ const runWorkflow = async () => {
   resetWorkflow()
 
   try {
-    // Step 1: Input
-    nodes.value[0].status = 'completed'
-
-    // Step 2: Retrieval
-    nodes.value[1].status = 'running'
-
-    const res = await aiQa({
-      query: workflowData.value.query,
-      graph_ids: workflowData.value.selectedGraphIds,
-      temperature: workflowData.value.temperature
+    const response = await fetch(`${window.location.origin}/api/graph/ai-qa`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: workflowData.value.query,
+        graph_ids: workflowData.value.selectedGraphIds,
+        temperature: workflowData.value.temperature,
+        rerank_threshold: workflowData.value.rerankThreshold
+      })
     })
 
-    if (res.success) {
-      nodes.value[1].status = 'completed'
-      results.value.facts = res.data.retrieved_facts || []
-      results.value.prompts = res.data.prompts || { system: '', user: '' }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
 
-      // Step 3: Rerank (Wait slightly for visual effect)
-      nodes.value[2].status = 'running'
-      await new Promise(r => setTimeout(r, 600))
-      results.value.rerank_results = res.data.rerank_results || []
-      nodes.value[2].status = 'completed'
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
 
-      // Step 4: LLM
-      nodes.value[3].status = 'running'
-      await new Promise(r => setTimeout(r, 400))
-      results.value.answer = res.data.answer
-      nodes.value[3].status = 'completed'
+      const chunk = decoder.decode(value)
+      const lines = chunk.split('\n')
 
-      // Step 5: Output
-      nodes.value[4].status = 'running'
-      nextTick(() => {
-        renderEvidenceScreenshots('node')
-      })
-      nodes.value[4].status = 'completed'
-    } else {
-      throw new Error(res.error || '运行失败')
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const event = JSON.parse(line.slice(6))
+          const { type, data } = event
+
+          if (type === 'retrieval_start') {
+            nodes.value.find(n => n.id === 'n1').status = 'completed'
+            nodes.value.find(n => n.id === 'n1').duration = '0.01'
+            nodes.value.find(n => n.id === 'n2').status = 'running'
+          } else if (type === 'retrieval_complete') {
+            const node = nodes.value.find(n => n.id === 'n2')
+            node.status = 'completed'
+            node.duration = data.duration
+            results.value.facts = data.facts
+          } else if (type === 'rerank_complete') {
+            const node = nodes.value.find(n => n.id === 'n_rerank')
+            node.status = 'completed'
+            node.duration = data.duration
+            results.value.rerank_results = data.results
+          } else if (type === 'prompts_ready') {
+            results.value.prompts = data
+          } else if (type === 'llm_start') {
+            nodes.value.find(n => n.id === 'n3').status = 'running'
+          } else if (type === 'llm_complete') {
+            const node = nodes.value.find(n => n.id === 'n3')
+            node.status = 'completed'
+            node.duration = data.duration
+            results.value.answer = data.answer
+
+            // Output node
+            const outNode = nodes.value.find(n => n.id === 'n4')
+            outNode.status = 'completed'
+            outNode.duration = data.total_duration
+            nextTick(() => {
+              renderEvidenceScreenshots('node')
+            })
+          }
+        } catch (e) {
+          console.error('Error parsing SSE event:', e)
+        }
+      }
     }
   } catch (err) {
     console.error('Workflow error:', err)
-    alert('运行出错: ' + err.message)
+    alert('流程执行出错')
     nodes.value.forEach(n => { if (n.status === 'running') n.status = 'failed' })
   } finally {
     running.value = false
@@ -1480,7 +1537,18 @@ onUnmounted(() => {
   flex: 1;
 }
 
+.node-duration {
+  font-size: 11px;
+  color: #909399;
+  background: #f0f2f5;
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-family: monospace;
+  margin-right: 5px;
+}
+
 .expand-btn {
+
   background: none;
   border: none;
   font-size: 16px;
@@ -1569,6 +1637,62 @@ onUnmounted(() => {
   color: #67c23a;
   margin-bottom: 8px;
   font-weight: 600;
+}
+
+.rerank-config {
+  margin-bottom: 15px;
+  padding-bottom: 15px;
+  border-bottom: 1px dashed #e0e0e0;
+}
+
+.threshold-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.threshold-value {
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: #fff;
+}
+
+.threshold-value.low { background: #f56c6c; }
+.threshold-value.mid { background: #e6a23c; }
+.threshold-value.high { background: #67c23a; }
+
+.thermometer-container {
+  position: relative;
+  height: 24px;
+  display: flex;
+  align-items: center;
+}
+
+.thermometer-input {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.thermometer-track {
+  width: 100%;
+  height: 10px;
+  background: #f0f2f5;
+  border-radius: 5px;
+  overflow: hidden;
+  position: relative;
+  border: 1px solid #e0e0e0;
+}
+
+.thermometer-fill {
+  height: 100%;
+  transition: width 0.3s ease, background 0.3s ease;
 }
 
 .rerank-content {

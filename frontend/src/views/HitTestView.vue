@@ -10,10 +10,11 @@
         <span class="project-info" v-if="projectName">
           当前项目: <strong>{{ projectName }}</strong>
         </span>
+        <button class="supplement-btn" @click="startSupplement">➕ 补充知识</button>
       </div>
     </header>
 
-    <main class="hit-test-main" :class="{ 'viewer-open': showDocViewer }">
+    <main class="hit-test-main" :class="{ 'viewer-open': showDocViewer || isSupplementMode }">
       <!-- Left: Graph Visualization -->
       <div class="graph-section">
         <GraphPanel
@@ -129,16 +130,37 @@
         </div>
 
         <!-- Document Viewer Panel (Flex-in) -->
-        <div class="doc-viewer-panel" :class="{ 'open': showDocViewer }">
+        <div class="doc-viewer-panel" :class="{ 'open': showDocViewer || isSupplementMode, 'supplement-mode': isSupplementMode }">
           <div class="viewer-header">
-            <span class="viewer-filename">{{ currentDoc.filename }}</span>
-            <button class="close-viewer" @click="showDocViewer = false">✕</button>
+            <template v-if="!isSupplementMode">
+              <span class="viewer-filename">{{ currentDoc.filename }}</span>
+              <button class="close-viewer" @click="showDocViewer = false">✕</button>
+            </template>
+            <template v-else>
+              <div class="supplement-tools">
+                <span class="tool-title">知识补录模式: 请在下方 PDF 区域圈选缺失内容</span>
+                <div class="tool-actions">
+                  <span class="selection-count">已选 {{ selectedRegions.length }} 个区域</span>
+                  <button class="clear-btn" @click="clearSelections" :disabled="!selectedRegions.length">清空</button>
+                  <button class="submit-btn" @click="submitSupplement" :disabled="!selectedRegions.length || supplementing">
+                    <span v-if="!supplementing">✅ 完成补录</span>
+                    <span v-else class="spinner-sm"></span>
+                  </button>
+                  <button class="exit-btn" @click="exitSupplement">取消退出</button>
+                </div>
+              </div>
+            </template>
           </div>
           <div class="viewer-body" ref="viewerContainer">
-            <div class="pdf-render-wrapper">
+            <div class="pdf-render-wrapper"
+                 @mousedown="handleSelectionStart"
+                 @mousemove="handleSelectionMove"
+                 @mouseup="handleSelectionEnd"
+                 :class="{ 'crosshair-cursor': isSupplementMode }">
               <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
-              <!-- Highlight SVG Overlay -->
-              <svg v-if="currentDoc.bbox && currentDoc.bbox.length === 4" class="pdf-highlight-overlay" :viewBox="`0 0 ${currentDoc.pageWidth || 600} ${currentDoc.pageHeight || 800}`">
+
+              <!-- Highlight SVG Overlay (Locate mode only) -->
+              <svg v-if="!isSupplementMode && currentDoc.bbox && currentDoc.bbox.length === 4" class="pdf-highlight-overlay" :viewBox="`0 0 ${currentDoc.pageWidth || 600} ${currentDoc.pageHeight || 800}`">
                 <rect
                   :x="currentDoc.bbox[0]"
                   :y="currentDoc.bbox[1]"
@@ -147,7 +169,39 @@
                   class="highlight-rect"
                 />
               </svg>
+
+              <!-- Active Drawing Rect -->
+              <div v-if="isDraggingSelection" class="drawing-rect" :style="drawingRectStyle"></div>
+
+              <!-- Finished Selection Rects -->
+              <div v-for="(region, ridx) in selectedRegions" :key="ridx"
+                   v-show="region.page === currentDoc.page"
+                   class="saved-rect"
+                   :style="getSavedRectStyle(region)">
+                <span class="rect-idx">{{ ridx + 1 }}</span>
+                <button class="remove-rect" @click.stop="removeRegion(ridx)">×</button>
+              </div>
             </div>
+
+            <!-- Page Navigation for Supplement Mode -->
+            <div v-if="isSupplementMode" class="page-nav-floating">
+              <button @click="changePage(-1)" :disabled="currentDoc.page <= 1">◀</button>
+              <div class="page-jump">
+                <span>第 </span>
+                <input
+                  type="number"
+                  v-model.number="jumpPage"
+                  @keyup.enter="handleJumpPage"
+                  @blur="handleJumpPage"
+                  min="1"
+                  :max="totalDocPages"
+                  class="page-input"
+                />
+                <span> / {{ totalDocPages }} 页</span>
+              </div>
+              <button @click="changePage(1)" :disabled="currentDoc.page >= totalDocPages">▶</button>
+            </div>
+
             <div v-if="pdfLoading" class="viewer-loading">
               <div class="spinner-sm"></div>
             </div>
@@ -185,6 +239,239 @@ const highlightedNodeId = ref(null)
 const selectedNodeId = ref(null) // Persistent selection from click
 const graphPanelRef = ref(null)
 
+// --- Knowledge Supplement Mode ---
+const isSupplementMode = ref(false)
+const supplementing = ref(false)
+const selectedRegions = ref([]) // [{page, bbox: [x0,y0,x1,y1], screenRect: {left, top, width, height}}]
+const totalDocPages = ref(0)
+const fullPdfBuffer = ref(null)
+const jumpPage = ref(1)
+
+const isDraggingSelection = ref(false)
+
+const selectionStart = ref({ x: 0, y: 0 })
+const currentDragPos = ref({ x: 0, y: 0 })
+
+const startSupplement = async () => {
+  try {
+    // 1. Determine which file to use: current viewed or first available
+    let fileToLoad = currentDoc.value.filename
+    let initialPage = currentDoc.value.page || 1
+
+    if (!fileToLoad) {
+      const projectRes = await getProject(projectId)
+      if (!projectRes.success || !projectRes.data.files.length) {
+        alert('项目中没有可用文档')
+        return
+      }
+      fileToLoad = projectRes.data.files[0].filename
+      initialPage = 1
+    }
+
+    isSupplementMode.value = true
+    showDocViewer.value = false
+
+    // Wait for DOM to expand the panel
+    nextTick(async () => {
+      await loadFullDocumentForSupplement(fileToLoad, initialPage)
+    })
+  } catch (err) {
+    console.error('Failed to start supplement:', err)
+  }
+}
+
+const loadFullDocumentForSupplement = async (filename, pageNum = 1) => {
+  try {
+    pdfLoading.value = true
+    const identifier = graphId.value || projectId
+    const apiUrl = `${window.location.origin}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}?t=${Date.now()}`
+
+    if (!pdfjsLib.value) await initPdfJs()
+
+    currentDoc.value = {
+      filename,
+      page: pageNum,
+      bbox: null,
+      pageWidth: 0,
+      pageHeight: 0,
+      url: apiUrl
+    }
+    jumpPage.value = pageNum
+
+    // Direct render using URL is more reliable for 304/caching
+    setTimeout(() => {
+      renderPdfPage(apiUrl, pageNum)
+    }, 600)
+  } catch (err) {
+    console.error('Supplement load error:', err)
+    alert('无法加载补录文档: ' + err.message)
+    pdfLoading.value = false
+  }
+}
+
+const changePage = (delta) => {
+  const newPage = currentDoc.value.page + delta
+  if (newPage >= 1 && newPage <= totalDocPages.value) {
+    currentDoc.value.page = newPage
+    jumpPage.value = newPage
+    // Use the URL from currentDoc
+    renderPdfPage(currentDoc.value.url, newPage)
+  }
+}
+
+const handleJumpPage = () => {
+  let page = parseInt(jumpPage.value)
+  if (isNaN(page)) {
+    jumpPage.value = currentDoc.value.page
+    return
+  }
+  if (page < 1) page = 1
+  if (page > totalDocPages.value) page = totalDocPages.value
+
+  jumpPage.value = page
+  if (page !== currentDoc.value.page) {
+    currentDoc.value.page = page
+    renderPdfPage(currentDoc.value.url, page)
+  }
+}
+
+// --- Drawing Logic ---
+const drawingRectStyle = computed(() => {
+  const x = Math.min(selectionStart.value.x, currentDragPos.value.x)
+  const y = Math.min(selectionStart.value.y, currentDragPos.value.y)
+  const width = Math.abs(selectionStart.value.x - currentDragPos.value.x)
+  const height = Math.abs(selectionStart.value.y - currentDragPos.value.y)
+
+  return {
+    left: `${x}px`,
+    top: `${y}px`,
+    width: `${width}px`,
+    height: `${height}px`
+  }
+})
+
+const handleSelectionStart = (e) => {
+  if (!isSupplementMode.value) return
+  const rect = e.currentTarget.getBoundingClientRect()
+  isDraggingSelection.value = true
+  selectionStart.value = {
+    x: e.clientX - rect.left,
+    y: e.clientY - rect.top
+  }
+  currentDragPos.value = { ...selectionStart.value }
+}
+
+const handleSelectionMove = (e) => {
+  if (!isDraggingSelection.value) return
+  const rect = e.currentTarget.getBoundingClientRect()
+  currentDragPos.value = {
+    x: e.clientX - rect.left,
+    y: e.clientY - rect.top
+  }
+}
+
+const handleSelectionEnd = (e) => {
+  if (!isDraggingSelection.value) return
+  isDraggingSelection.value = false
+
+  const rect = e.currentTarget.getBoundingClientRect()
+  const endPos = {
+    x: e.clientX - rect.left,
+    y: e.clientY - rect.top
+  }
+
+  const canvas = pdfCanvas.value
+  if (!canvas) return
+
+  const x0 = Math.min(selectionStart.value.x, endPos.x)
+  const y0 = Math.min(selectionStart.value.y, endPos.y)
+  const x1 = Math.max(selectionStart.value.x, endPos.x)
+  const y1 = Math.max(selectionStart.value.y, endPos.y)
+
+  if (x1 - x0 < 10 && y1 - y0 < 10) return
+
+  // Calculate current scale from canvas width vs original PDF width
+  const currentScale = canvas.width / (currentDoc.value.pageWidth || 600)
+
+  const region = {
+    page: currentDoc.value.page,
+    bbox: [
+      x0 / currentScale,
+      y0 / currentScale,
+      x1 / currentScale,
+      y1 / currentScale
+    ],
+    screenRect: {
+      left: x0,
+      top: y0,
+      width: x1 - x0,
+      height: y1 - y0
+    }
+  }
+
+  selectedRegions.value.push(region)
+}
+
+const getSavedRectStyle = (region) => {
+  return {
+    left: `${region.screenRect.left}px`,
+    top: `${region.screenRect.top}px`,
+    width: `${region.screenRect.width}px`,
+    height: `${region.screenRect.height}px`
+  }
+}
+
+const removeRegion = (idx) => {
+  selectedRegions.value.splice(idx, 1)
+}
+
+const clearSelections = () => {
+  selectedRegions.value = []
+}
+
+const exitSupplement = () => {
+  isSupplementMode.value = false
+  selectedRegions.value = []
+  fullPdfBuffer.value = null
+}
+
+const submitSupplement = async () => {
+  if (!selectedRegions.value.length) return
+
+  supplementing.value = true
+  try {
+    const payload = {
+      project_id: projectId,
+      filename: currentDoc.value.filename,
+      regions: selectedRegions.value.map(r => ({
+        page: r.page,
+        bbox: r.bbox
+      }))
+    }
+
+    const res = await fetch(`${window.location.origin}/api/graph/supplement`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+
+    const data = await res.json()
+    if (data.success) {
+      alert(data.message)
+      exitSupplement()
+      loadFullGraph()
+    } else {
+      alert('补录失败: ' + data.error)
+    }
+  } catch (err) {
+    console.error('Supplement submit error:', err)
+    alert('提交补录时出错')
+  } finally {
+    supplementing.value = false
+  }
+}
+// --- End Supplement Logic ---
+
 // Graph Filtering
 const filteredGraphData = computed(() => {
   if (!filterGraph.value || !results.value.facts.length) {
@@ -194,7 +481,6 @@ const filteredGraphData = computed(() => {
   const resultNodeIds = new Set()
   const resultEdgeIds = new Set()
 
-  // 1. Core nodes and edges from results
   results.value.nodes.forEach(n => resultNodeIds.add(n.uuid))
   results.value.edges.forEach(e => {
     resultEdgeIds.add(e.uuid)
@@ -202,14 +488,12 @@ const filteredGraphData = computed(() => {
     resultNodeIds.add(e.target_node_uuid)
   })
 
-  // Also include the facts themselves if they represent nodes or have source info
   results.value.facts.forEach(f => {
     if (f.source_node_uuid) resultNodeIds.add(f.source_node_uuid)
     if (f.target_node_uuid) resultNodeIds.add(f.target_node_uuid)
     if (f.uuid) resultNodeIds.add(f.uuid)
   })
 
-  // 2. Path extension: include neighbors of the result nodes
   if (fullGraphData.value.edges) {
     fullGraphData.value.edges.forEach(e => {
       if (resultNodeIds.has(e.source_node_uuid) || resultNodeIds.has(e.target_node_uuid)) {
@@ -238,7 +522,6 @@ const toggleExpand = (idx) => {
 const getAssociatedInfo = (fact) => {
   if (!fullGraphData.value.nodes || !fullGraphData.value.edges) return []
 
-  // Case 1: The fact itself represents a direct relation (has both source and target)
   if (fact.source_node_uuid && fact.target_node_uuid) {
     const sourceNode = fullGraphData.value.nodes.find(n => n.uuid === fact.source_node_uuid)
     const targetNode = fullGraphData.value.nodes.find(n => n.uuid === fact.target_node_uuid)
@@ -250,7 +533,6 @@ const getAssociatedInfo = (fact) => {
     }
   }
 
-  // Case 2: The fact is tied to a node, find its neighbors
   const factNodeId = fact.source_node_uuid || fact.uuid
   if (!factNodeId) return []
 
@@ -258,13 +540,11 @@ const getAssociatedInfo = (fact) => {
   if (!factNode) return []
 
   const factNodeName = factNode.name
-
-  // Find nodes connected to the node that produced this fact
   const associated = []
   fullGraphData.value.edges.forEach(e => {
     if (e.source_node_uuid === factNodeId) {
       const targetNode = fullGraphData.value.nodes.find(n => n.uuid === e.target_node_uuid)
-      if (targetNode && targetNode.uuid !== factNodeId) { // Avoid self-loops in extension
+      if (targetNode && targetNode.uuid !== factNodeId) {
         associated.push({
           description: `【${factNodeName}】 --(${e.name || e.fact_type || '关联'})--> 【${targetNode.name}】: ${targetNode.summary || '暂无摘要'}`,
           node: targetNode.name
@@ -281,7 +561,6 @@ const getAssociatedInfo = (fact) => {
     }
   })
 
-  // Deduplicate by description
   const seen = new Set()
   return associated.filter(item => {
     if (seen.has(item.description)) return false
@@ -320,7 +599,6 @@ const loadFullGraph = async () => {
 
 const handleSearch = async () => {
   if (!searchQuery.value.trim() || !graphId.value) return
-
   searching.value = true
   try {
     const res = await searchGraph({
@@ -356,21 +634,18 @@ const highlightInGraph = (fact) => {
 }
 
 const clearHighlight = () => {
-  // Reset to the persistently selected one if it exists, otherwise null
   highlightedNodeId.value = selectedNodeId.value
 }
 
 const selectFact = (fact, idx) => {
   const nodeId = fact.source_node_uuid || fact.uuid
   if (nodeId) {
-    // If clicking the same one, toggle off
     if (selectedNodeId.value === nodeId) {
       selectedNodeId.value = null
       highlightedNodeId.value = null
     } else {
       selectedNodeId.value = nodeId
       highlightedNodeId.value = nodeId
-      // Focus node in graph panel
       if (graphPanelRef.value) {
         graphPanelRef.value.focusNode(nodeId)
       }
@@ -378,25 +653,17 @@ const selectFact = (fact, idx) => {
   }
 }
 
-// Logic to handle clicking nodes in GraphPanel
 const handleNodeClick = (nodeId) => {
   if (!nodeId) {
     selectedNodeId.value = null
     highlightedNodeId.value = null
     return
   }
-
-  // Update selection
   selectedNodeId.value = nodeId
   highlightedNodeId.value = nodeId
-
-  // Find corresponding fact index
   const factIdx = results.value.facts.findIndex(f => (f.source_node_uuid || f.uuid) === nodeId)
   if (factIdx !== -1) {
-    // Auto expand the fact
     expandedFacts.value.add(factIdx)
-
-    // Scroll to the fact item
     nextTick(() => {
       const el = document.getElementById(`fact-item-${factIdx}`)
       if (el) {
@@ -406,7 +673,6 @@ const handleNodeClick = (nodeId) => {
   }
 }
 
-// PDF Utilities
 const initPdfJs = async () => {
   if (window.pdfjsLib) {
     pdfjsLib.value = window.pdfjsLib
@@ -425,36 +691,36 @@ const initPdfJs = async () => {
   })
 }
 
-const renderPdfPage = async (arrayBuffer, pageNum) => {
+const renderPdfPage = async (pdfSource, pageNum) => {
   if (!pdfjsLib.value || !pdfCanvas.value) {
-    console.error('Cannot render PDF: pdfjsLib or pdfCanvas is missing')
+    console.warn('PDF.js lib or canvas not ready')
     return
   }
 
   pdfLoading.value = true
   try {
-    const loadingTask = pdfjsLib.value.getDocument({ data: new Uint8Array(arrayBuffer) })
+    const loadingTask = pdfjsLib.value.getDocument(
+      typeof pdfSource === 'string' ? pdfSource : { data: new Uint8Array(pdfSource) }
+    )
     const pdf = await loadingTask.promise
+    totalDocPages.value = pdf.numPages
     const page = await pdf.getPage(pageNum)
 
     const canvas = pdfCanvas.value
     const context = canvas.getContext('2d')
-
     const containerWidth = viewerContainer.value?.clientWidth || 600
     const unscaledViewport = page.getViewport({ scale: 1 })
     const scale = (containerWidth - 40) / unscaledViewport.width
     const viewport = page.getViewport({ scale })
 
+    currentDoc.value.pageWidth = unscaledViewport.width
+    currentDoc.value.pageHeight = unscaledViewport.height
+
     canvas.height = viewport.height
     canvas.width = viewport.width
 
-    const renderContext = {
-      canvasContext: context,
-      viewport: viewport
-    }
-
-    await page.render(renderContext).promise
-    console.log(`Rendered page ${pageNum} successfully`)
+    await page.render({ canvasContext: context, viewport }).promise
+    console.log(`Rendered page ${pageNum}`)
   } catch (err) {
     console.error('PDF render error:', err)
   } finally {
@@ -464,7 +730,6 @@ const renderPdfPage = async (arrayBuffer, pageNum) => {
 
 const viewDocument = async (fact) => {
   if (!fact.source || fact.source === 'Unknown') return
-
   const identifier = fact.graph_id || graphId.value || projectId
   const filename = fact.source
   const page = fact.page || 1
@@ -472,39 +737,29 @@ const viewDocument = async (fact) => {
   const pageWidth = fact.page_width || 0
   const pageHeight = fact.page_height || 0
 
-  console.log(`Loading document: ${filename}, Page: ${page}, ID: ${identifier}`)
-
   try {
     showDocViewer.value = true
+    isSupplementMode.value = false
     pdfLoading.value = true
 
-    const apiUrl = `${window.location.origin}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}`
-    const response = await fetch(apiUrl)
-    if (!response.ok) throw new Error(`HTTP Error ${response.status}: Failed to fetch document`)
-
-    const blob = await response.blob()
-    const arrayBuffer = await blob.arrayBuffer()
-
+    const apiUrl = `${window.location.origin}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}?t=${Date.now()}`
     if (!pdfjsLib.value) await initPdfJs()
 
     currentDoc.value = {
       filename,
       page,
       bbox,
+      url: apiUrl,
       pageWidth,
-      pageHeight,
-      url: apiUrl
+      pageHeight
     }
 
-    // Wait for DOM transition and refs
     nextTick(() => {
-      setTimeout(() => {
-        renderPdfPage(arrayBuffer, page)
-      }, 500) // Increased delay for sidebar transition
+      setTimeout(() => { renderPdfPage(apiUrl, page) }, 500)
     })
   } catch (err) {
     console.error('viewDocument error:', err)
-    alert('无法加载文档，请重试')
+    alert('无法加载文档')
     pdfLoading.value = false
   }
 }
@@ -515,17 +770,11 @@ onMounted(async () => {
     if (res.success) {
       projectName.value = res.data.name
       graphId.value = res.data.graph_id
-      if (graphId.value) {
-        loadFullGraph()
-      }
+      if (graphId.value) loadFullGraph()
     }
   } catch (err) {
     console.error('Failed to init HitTest:', err)
   }
-})
-
-onUnmounted(() => {
-  // Cleanup
 })
 </script>
 
@@ -575,6 +824,21 @@ onUnmounted(() => {
   color: #666;
 }
 
+.supplement-btn {
+  padding: 6px 16px;
+  background: #409eff;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-left: 16px;
+}
+
+.supplement-btn:hover {
+  background: #66b1ff;
+}
+
 .hit-test-main {
   flex: 1;
   width: 100%;
@@ -585,7 +849,7 @@ onUnmounted(() => {
 }
 
 .graph-section {
-  flex: 7; /* Default 70% */
+  flex: 7;
   min-width: 300px;
   height: 100%;
   border-right: 1px solid #e0e0e0;
@@ -594,11 +858,11 @@ onUnmounted(() => {
 }
 
 .hit-test-main.viewer-open .graph-section {
-  flex: 4; /* 40% when viewer open */
+  flex: 4;
 }
 
 .right-panels-container {
-  flex: 3; /* Default 30% */
+  flex: 3;
   display: flex;
   height: 100%;
   overflow: hidden;
@@ -607,7 +871,7 @@ onUnmounted(() => {
 }
 
 .hit-test-main.viewer-open .right-panels-container {
-  flex: 6; /* 60% (30% search + 30% doc) */
+  flex: 6;
 }
 
 .search-section {
@@ -880,6 +1144,57 @@ onUnmounted(() => {
   opacity: 1;
 }
 
+.doc-viewer-panel.supplement-mode {
+  flex: 10;
+}
+
+.supplement-tools {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.tool-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #409eff;
+}
+
+.tool-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.selection-count {
+  font-size: 12px;
+  color: #666;
+}
+
+.clear-btn, .exit-btn {
+  background: #f0f2f5;
+  border: 1px solid #dcdfe6;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.submit-btn {
+  background: #67c23a;
+  color: #fff;
+  border: none;
+  padding: 4px 16px;
+  border-radius: 4px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.submit-btn:disabled {
+  background: #c2e7b0;
+  cursor: not-allowed;
+}
+
 .viewer-header {
   height: 50px;
   padding: 0 20px;
@@ -905,7 +1220,110 @@ onUnmounted(() => {
   height: fit-content;
 }
 
+.pdf-render-wrapper.crosshair-cursor {
+  cursor: crosshair;
+}
+
+.drawing-rect {
+  position: absolute;
+  border: 2px dashed #409eff;
+  background: rgba(64, 158, 255, 0.2);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.saved-rect {
+  position: absolute;
+  border: 2px solid #67c23a;
+  background: rgba(103, 194, 58, 0.15);
+  z-index: 4;
+}
+
+.rect-idx {
+  position: absolute;
+  top: -20px;
+  left: 0;
+  background: #67c23a;
+  color: #fff;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 2px;
+}
+
+.remove-rect {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid #67c23a;
+  border-radius: 50%;
+  color: #67c23a;
+  font-size: 12px;
+  line-height: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.page-nav-floating {
+  position: absolute;
+  bottom: -430px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 24px;
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  z-index: 100;
+}
+
+.page-nav-floating button {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.page-nav-floating button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.page-jump {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+}
+
+.page-input {
+  width: 45px;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 4px;
+  color: #fff;
+  text-align: center;
+  font-size: 13px;
+  outline: none;
+}
+
+.page-input::-webkit-inner-spin-button,
+.page-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 .pdf-canvas {
+
   box-shadow: 0 5px 15px rgba(0,0,0,0.3);
   background: #fff;
   display: block;
