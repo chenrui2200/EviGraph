@@ -420,6 +420,208 @@ class GraphToolsService:
             self._llm_client = LLMClient()
         return self._llm_client
 
+    @staticmethod
+    def normalize_text(text: str) -> str:
+        """Normalize text for deduplication: lowercase, remove whitespace and punctuation"""
+        if not text:
+            return ""
+        import re
+        # Remove whitespace
+        text = re.sub(r'\s+', '', text)
+        # Remove common punctuation
+        text = re.sub(r'[^\w\s]', '', text)
+        return text.lower()
+
+    def optimize_query(self, query: str) -> str:
+        """Use LLM to extract 3-5 core keywords/phrases from user query"""
+        logger.info(f"Optimizing query: {query[:50]}...")
+
+        extract_prompt = f"""你是一个搜索专家。请从用户的问题中提取出 3-5 个核心关键词或短语，用于在知识图谱中进行检索。
+提取的关键词应能代表问题的核心实体、动作和约束。
+
+### 用户问题:
+{query}
+
+### 要求:
+1. 关键词应简洁、具有代表性。
+2. 以空格分隔返回关键词。
+
+输出示例:
+多孔导管 敷设 规定
+
+请直接输出提取后的关键词字符串："""
+
+        try:
+            optimized_keywords = self.llm.chat(messages=[{"role": "user", "content": extract_prompt}], temperature=0.1)
+            result = optimized_keywords.strip() if optimized_keywords else query
+            logger.info(f"Optimized search query: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Query optimization failed: {str(e)}")
+            return query
+
+    def filter_facts(self, query: str, facts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Use LLM to filter only truly relevant facts for the given query"""
+        if not facts:
+            return []
+
+        if len(facts) == 1:
+            return facts
+
+        fact_list_str = ""
+        for i, f in enumerate(facts):
+            text = f.get('text', '')
+            fact_list_str += f"[{i}] {text}\n"
+
+        filter_prompt = f"""你是一个专业的知识过滤专家。请根据【用户问题】，从【候选事实列表】中筛选出与回答该问题直接相关的记录。
+
+### 用户问题:
+{query}
+
+### 候选事实列表:
+{fact_list_str}
+
+### 任务要求:
+1. 仔细阅读每个候选事实，判断其是否能为回答【用户问题】提供核心证据或必要的背景上下文。
+2. 特别注意：如果问题涉及多个关键词（如“多孔导管”、“敷设”、“规定”），请保留能体现这些关键词及其关联的事实。
+3. 如果候选事实虽然包含关键词但与问题逻辑无关，请将其排除。
+4. 返回结果必须是 JSON 格式，包含一个名为 "relevant_indices" 的整数索引列表。
+
+### 输出格式示例:
+{{"relevant_indices": [0, 2, 5]}}
+
+请输出筛选后的索引列表 JSON："""
+
+        try:
+            # Using a lower temperature for consistent filtering
+            response = self.llm.chat_json(messages=[{"role": "user", "content": filter_prompt}], temperature=0.1)
+            relevant_indices = response.get("relevant_indices", [])
+
+            filtered_facts = []
+            for idx in relevant_indices:
+                if isinstance(idx, int) and 0 <= idx < len(facts):
+                    filtered_facts.append(facts[idx])
+
+            # Fallback: if LLM filters everything but facts were present, keep top 3 as safety
+            if not filtered_facts and facts:
+                logger.warning(f"LLM filtered all facts for query: {query[:50]}, using fallback top 5")
+                return facts[:5]
+
+            return filtered_facts
+        except Exception as e:
+            logger.error(f"LLM Fact Filtering failed: {str(e)}")
+            return facts # Return all if filtering fails
+
+    def search_with_agentic_flow(
+        self,
+        graph_ids: List[str],
+        query: str,
+        limit: int = 20,
+        max_hops: int = 3
+    ) -> SearchResult:
+        """
+        Encapsulated Agentic Retrieval Flow:
+        1. Optimize query keywords
+        2. Multi-hop search
+        3. LLM filtering
+        4. Deduplication
+        """
+        logger.info(f"Starting search_with_agentic_flow for query: {query[:50]}...")
+
+        current_context_facts = []
+        seen_fact_texts = set()
+        seen_fact_uuids = set()
+        retrieval_history = []
+
+        # 1. Initial Query Optimization
+        search_query = self.optimize_query(query)
+
+        # 2. Agentic Multi-hop Loop
+        for hop in range(max_hops):
+            logger.info(f"Agentic Flow: Hop {hop+1}/{max_hops} with query: {search_query}")
+
+            # 2.1 Perform Search
+            search_result = self.search_multi_graphs(graph_ids=graph_ids, query=search_query, limit=limit)
+            new_raw_facts = search_result.facts
+
+            if not new_raw_facts:
+                logger.info(f"Hop {hop+1}: No more facts found.")
+                break
+
+            # 2.2 LLM Filtering
+            filtered_new_facts = self.filter_facts(query, new_raw_facts)
+
+            # 2.3 Merge & Deduplicate
+            new_facts_added = 0
+            for fact in filtered_new_facts:
+                txt = fact.get("text", "")
+                norm_txt = self.normalize_text(txt)
+                fact_uuid = fact.get("uuid", "")
+
+                is_duplicate = False
+                if fact_uuid and fact_uuid in seen_fact_uuids:
+                    is_duplicate = True
+                elif norm_txt and norm_txt in seen_fact_texts:
+                    is_duplicate = True
+
+                if not is_duplicate:
+                    current_context_facts.append(fact)
+                    if norm_txt:
+                        seen_fact_texts.add(norm_txt)
+                    if fact_uuid:
+                        seen_fact_uuids.add(fact_uuid)
+                    new_facts_added += 1
+
+            retrieval_history.append({
+                "hop": hop + 1,
+                "query": search_query,
+                "raw_found": len(new_raw_facts),
+                "added": new_facts_added
+            })
+
+            # 2.4 Multi-hop Reasoning: Do we need more?
+            facts_summary = "\n".join([f"- {f.get('text')} [Source: {f.get('source')}]" for f in current_context_facts])
+
+            reasoning_prompt = f"""You are a knowledge retrieval agent. Analyze the current context and the original question.
+
+### Original Question:
+{query}
+
+### Current Knowledge Context:
+{facts_summary}
+
+### Task:
+1. Identify if the current context contains EXPLICIT references to other sections, clauses, or technical terms that are MISSING but necessary to answer the question (e.g., "See Section 7.6.1", "Refer to standard XYZ").
+2. If more info is needed, respond with ONLY a search query for the next hop in the format: [SEARCH: query]
+3. If the knowledge is sufficient or no clear references are found, respond with ONLY: [READY]
+
+Your response:"""
+
+            try:
+                analysis = self.llm.chat(messages=[{"role": "user", "content": reasoning_prompt}], temperature=0).strip()
+                if "[READY]" in analysis or "[SEARCH:" not in analysis:
+                    logger.info(f"Knowledge sufficient after {hop+1} hops.")
+                    break
+
+                import re
+                match = re.search(r"\[SEARCH:\s*(.*?)\]", analysis)
+                if match:
+                    search_query = match.group(1)
+                else:
+                    break
+            except Exception as e:
+                logger.error(f"Multi-hop reasoning failed: {str(e)}")
+                break
+
+        # Final result assembly
+        return SearchResult(
+            facts=current_context_facts,
+            edges=[], # Not used for QA context usually
+            nodes=[],
+            query=query,
+            total_count=len(current_context_facts)
+        )
+
     # ========== Basic Tools ==========
 
     def search_graph(
@@ -504,6 +706,7 @@ class GraphToolsService:
                                 break
 
                         fact_obj = {
+                            "uuid": edge.get('uuid', ''),
                             "text": fact,
                             "original_text": original_text, # Explicitly store raw text
                             "source": source,
@@ -545,6 +748,7 @@ class GraphToolsService:
                     summary = node.get('summary', '')
                     if summary:
                         facts.append({
+                            "uuid": node_uuid,
                             "text": f"Entity Knowledge: {node.get('name', '')} - {summary}",
                             "source": "Knowledge Graph",
                             "page": None,

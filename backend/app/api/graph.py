@@ -986,79 +986,17 @@ def ai_qa():
         from ..utils.llm_client import LLMClient
         llm = LLMClient()
 
-        # Multi-hop retrieval loop
-        max_hops = 3
-        current_context_facts = []
-        seen_fact_texts = set()
-        retrieval_history = []
-
-        # Initial search query
-        search_query = query
-
         logger.info(f"AI Q&A Agentic Retrieval starting: {query[:50]}...")
 
-        for hop in range(max_hops):
-            logger.info(f"Multi-hop Retrieval: Hop {hop+1}/{max_hops} with query: {search_query}")
+        # Use unified agentic retrieval flow from GraphToolsService
+        search_result = tools.search_with_agentic_flow(graph_ids=graph_ids, query=query, limit=20)
+        current_context_facts = search_result.facts
 
-            # 1. Perform Search
-            search_result = tools.search_multi_graphs(graph_ids=graph_ids, query=search_query, limit=15)
-
-            # 2. Merge unique facts
-            new_facts_added = 0
-            for fact in search_result.facts:
-                txt = fact.get("text", "")
-                if txt and txt not in seen_fact_texts:
-                    current_context_facts.append(fact)
-                    seen_fact_texts.add(txt)
-                    new_facts_added += 1
-
-            retrieval_history.append({
-                "hop": hop + 1,
-                "query": search_query,
-                "new_facts_found": new_facts_added
-            })
-
-            # 3. Analyze if we need more info (Multi-hop Reasoning)
-            # We use a specialized prompt to ask the LLM if it sees any cross-references
-            facts_summary = "\n".join([f"- {f.get('text')} [Source: {f.get('source')}]" for f in current_context_facts])
-
-            reasoning_prompt = f"""You are a knowledge retrieval agent. Analyze the current context and the original question.
-
-### Original Question:
-{query}
-
-### Current Knowledge Context:
-{facts_summary}
-
-### Task:
-1. Identify if the current context contains EXPLICIT references to other sections, clauses, or technical terms that are MISSING but necessary to answer the question (e.g., "See Section 7.6.1", "Refer to standard XYZ").
-2. If more info is needed, respond with ONLY a search query for the next hop in the format: [SEARCH: query]
-3. If the knowledge is sufficient or no clear references are found, respond with ONLY: [READY]
-
-Your response:"""
-
-            analysis = llm.chat(messages=[{"role": "user", "content": reasoning_prompt}], temperature=0).strip()
-
-            if "[READY]" in analysis or "[SEARCH:" not in analysis:
-                logger.info(f"Knowledge sufficient after {hop+1} hops.")
-                break
-
-            # Extract new search query
-            import re
-            match = re.search(r"\[SEARCH:\s*(.*?)\]", analysis)
-            if match:
-                search_query = match.group(1)
-            else:
-                break
-
-        # 4. Final LLM Answer
-        facts_text = "\n".join([
-            f"{i+1}. {f.get('text')} [来源: {f.get('source', '未知')}{f', 页码 ' + str(f.get('page')) if f.get('page') else ''}]\n原文上下文: {f.get('original_text', '无')}"
-            for i, f in enumerate(current_context_facts)
-        ])
+        # Prepare context for answering
+        facts_text = search_result.to_text()
 
         system_prompt = "你是一个专业的工程标准知识助手。你的任务是基于提供的多跳检索到的【知识参考详情】深度回答用户问题。\n\n回答要求：\n1. 请先在 <thought> 标签内分析所有检索到的条文关联，确引用的完整性。\n2. 给出最终结论，必须引用具体的条款编号（如：根据 7.6.49 条规定...）。\n3. 如果知识涉及多个关联条款，请理清它们的逻辑先后关系。\n4. 若信息不足，请如实告知缺失的具体标准名称或编号。"
-        user_prompt = f"### 多跳检索结果汇总 (Context from {len(retrieval_history)} hops):\n{facts_text}\n\n### 用户当前问题 (User Query):\n{query}\n\n请进行深度推理并回答："
+        user_prompt = f"### 多跳检索结果汇总 (Context from Knowledge Graph):\n{facts_text}\n\n### 用户当前问题 (User Query):\n{query}\n\n请进行深度推理并回答："
 
         logger.info("Calling LLM for final agentic Q&A answer...")
         answer = llm.chat(messages=[
@@ -1072,7 +1010,6 @@ Your response:"""
                 "query": query,
                 "answer": answer,
                 "retrieved_facts": current_context_facts,
-                "retrieval_history": retrieval_history,
                 "graph_ids": graph_ids
             }
         })
