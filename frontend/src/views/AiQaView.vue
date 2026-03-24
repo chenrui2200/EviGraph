@@ -188,6 +188,9 @@
                     <div v-for="(fact, idx) in results.facts" :key="idx" class="evidence-item">
                       <div class="evidence-meta">
                         <span class="source-tag">来源 {{ idx + 1 }}: {{ fact.source }} <template v-if="fact.page">(P{{ fact.page }})</template></span>
+                        <span v-if="fact.relevance_score" class="evidence-score-badge" :style="{ background: getThresholdColor(fact.relevance_score) }">
+                          {{ fact.relevance_score }}分
+                        </span>
                       </div>
                       <!-- The "Screenshot" Canvas -->
                       <div class="evidence-screenshot-box">
@@ -354,6 +357,9 @@
                 <div class="evidence-header">
                   <span class="evidence-idx">#{{ idx + 1 }}</span>
                   <span class="evidence-source">{{ fact.source }} <template v-if="fact.page">(第 {{ fact.page }} 页)</template></span>
+                  <span v-if="fact.relevance_score" class="full-evidence-score" :style="{ color: getThresholdColor(fact.relevance_score) }">
+                    得分: {{ fact.relevance_score }}
+                  </span>
                 </div>
                 <div class="full-evidence-screenshot">
                   <canvas :ref="el => setEvidenceRef(el, idx, 'modal')" class="full-evidence-canvas"></canvas>
@@ -1862,9 +1868,21 @@ onUnmounted(() => {
   padding: 4px 8px;
   background: #fafafa;
   border-bottom: 1px solid #f0f0f0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.evidence-score-badge {
+  font-size: 10px;
+  color: #fff;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 700;
 }
 
 .source-tag {
+
   font-size: 10px;
   color: #909399;
   font-weight: 600;
@@ -2060,9 +2078,20 @@ onUnmounted(() => {
   font-size: 13px;
   font-weight: 600;
   color: #495057;
+  flex: 1;
+}
+
+.full-evidence-score {
+  font-size: 13px;
+  font-weight: 800;
+  background: #f8f9fa;
+  padding: 2px 10px;
+  border-radius: 12px;
+  border: 1px solid #dee2e6;
 }
 
 .full-evidence-screenshot {
+
   padding: 20px;
   display: flex;
   flex-direction: column;
