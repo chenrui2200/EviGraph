@@ -99,14 +99,13 @@
                   </div>
 
                   <!-- Expanded Associated Info -->
-                  <div v-if="expandedFacts.has(idx)" class="associated-info-box">
+                  <div v-if="expandedFacts.has(idx) && getAssociatedInfo(fact).length > 0" class="associated-info-box">
                     <div class="associated-header">🔗 关联知识扩展 (图谱关系描述)</div>
-                    <div v-if="getAssociatedInfo(fact).length > 0" class="associated-list">
+                    <div class="associated-list">
                       <div v-for="(assoc, aIdx) in getAssociatedInfo(fact)" :key="aIdx" class="assoc-item">
                         <p class="assoc-description">{{ assoc.description }}</p>
                       </div>
                     </div>
-                    <div v-else class="no-assoc-hint">暂无直接关联的详细扩展信息</div>
                   </div>
 
                   <div class="fact-meta">
@@ -114,7 +113,13 @@
                       📄 {{ fact.source }}
                       <span v-if="fact.page">(P{{ fact.page }})</span>
                     </span>
-                    <button class="locate-btn" @click.stop="viewDocument(fact)">定位文档</button>
+                    <button
+                      v-if="fact.page && fact.source !== 'Knowledge Graph' && fact.source !== 'Graph Path Extension' && fact.source !== 'Local Search'"
+                      class="locate-btn"
+                      @click.stop="viewDocument(fact)"
+                    >
+                      定位文档
+                    </button>
                   </div>
                 </div>
               </div>
@@ -130,7 +135,19 @@
             <button class="close-viewer" @click="showDocViewer = false">✕</button>
           </div>
           <div class="viewer-body" ref="viewerContainer">
-            <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
+            <div class="pdf-render-wrapper">
+              <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
+              <!-- Highlight SVG Overlay -->
+              <svg v-if="currentDoc.bbox && currentDoc.bbox.length === 4" class="pdf-highlight-overlay" :viewBox="`0 0 ${currentDoc.pageWidth || 600} ${currentDoc.pageHeight || 800}`">
+                <rect
+                  :x="currentDoc.bbox[0]"
+                  :y="currentDoc.bbox[1]"
+                  :width="currentDoc.bbox[2] - currentDoc.bbox[0]"
+                  :height="currentDoc.bbox[3] - currentDoc.bbox[1]"
+                  class="highlight-rect"
+                />
+              </svg>
+            </div>
             <div v-if="pdfLoading" class="viewer-loading">
               <div class="spinner-sm"></div>
             </div>
@@ -178,7 +195,6 @@ const filteredGraphData = computed(() => {
   const resultEdgeIds = new Set()
 
   // 1. Core nodes and edges from results
-  // Make sure we handle both UUIDs and specific node/edge objects
   results.value.nodes.forEach(n => resultNodeIds.add(n.uuid))
   results.value.edges.forEach(e => {
     resultEdgeIds.add(e.uuid)
@@ -274,11 +290,18 @@ const getAssociatedInfo = (fact) => {
   })
 }
 
-// PDF Viewer
+// PDF Viewer Refs
 const pdfCanvas = ref(null)
 const viewerContainer = ref(null)
 const pdfjsLib = ref(null)
-const currentDoc = ref({ filename: '', url: '', page: 1, bbox: null })
+const currentDoc = ref({
+  filename: '',
+  url: '',
+  page: 1,
+  bbox: null,
+  pageWidth: 0,
+  pageHeight: 0
+})
 
 const loadFullGraph = async () => {
   if (!graphId.value) return
@@ -383,7 +406,7 @@ const handleNodeClick = (nodeId) => {
   }
 }
 
-// PDF Utilities (Same as AiQaView)
+// PDF Utilities
 const initPdfJs = async () => {
   if (window.pdfjsLib) {
     pdfjsLib.value = window.pdfjsLib
@@ -402,42 +425,86 @@ const initPdfJs = async () => {
   })
 }
 
+const renderPdfPage = async (arrayBuffer, pageNum) => {
+  if (!pdfjsLib.value || !pdfCanvas.value) {
+    console.error('Cannot render PDF: pdfjsLib or pdfCanvas is missing')
+    return
+  }
+
+  pdfLoading.value = true
+  try {
+    const loadingTask = pdfjsLib.value.getDocument({ data: new Uint8Array(arrayBuffer) })
+    const pdf = await loadingTask.promise
+    const page = await pdf.getPage(pageNum)
+
+    const canvas = pdfCanvas.value
+    const context = canvas.getContext('2d')
+
+    const containerWidth = viewerContainer.value?.clientWidth || 600
+    const unscaledViewport = page.getViewport({ scale: 1 })
+    const scale = (containerWidth - 40) / unscaledViewport.width
+    const viewport = page.getViewport({ scale })
+
+    canvas.height = viewport.height
+    canvas.width = viewport.width
+
+    const renderContext = {
+      canvasContext: context,
+      viewport: viewport
+    }
+
+    await page.render(renderContext).promise
+    console.log(`Rendered page ${pageNum} successfully`)
+  } catch (err) {
+    console.error('PDF render error:', err)
+  } finally {
+    pdfLoading.value = false
+  }
+}
+
 const viewDocument = async (fact) => {
   if (!fact.source || fact.source === 'Unknown') return
+
+  const identifier = fact.graph_id || graphId.value || projectId
+  const filename = fact.source
+  const page = fact.page || 1
+  const bbox = fact.bbox || null
+  const pageWidth = fact.page_width || 0
+  const pageHeight = fact.page_height || 0
+
+  console.log(`Loading document: ${filename}, Page: ${page}, ID: ${identifier}`)
 
   try {
     showDocViewer.value = true
     pdfLoading.value = true
 
-    const apiUrl = `${window.location.origin}/api/graph/project/${projectId}/document/${encodeURIComponent(fact.source)}`
+    const apiUrl = `${window.location.origin}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}`
     const response = await fetch(apiUrl)
-    if (!response.ok) throw new Error('Failed to fetch document')
+    if (!response.ok) throw new Error(`HTTP Error ${response.status}: Failed to fetch document`)
+
     const blob = await response.blob()
     const arrayBuffer = await blob.arrayBuffer()
 
     if (!pdfjsLib.value) await initPdfJs()
 
-    const loadingTask = pdfjsLib.value.getDocument({ data: arrayBuffer })
-    const pdf = await loadingTask.promise
-    const page = await pdf.getPage(fact.page || 1)
-
-    const canvas = pdfCanvas.value
-    const context = canvas.getContext('2d')
-    const viewport = page.getViewport({ scale: 1.5 })
-
-    canvas.height = viewport.height
-    canvas.width = viewport.width
-
-    await page.render({ canvasContext: context, viewport }).promise
-
     currentDoc.value = {
-      filename: fact.source,
-      page: fact.page || 1
+      filename,
+      page,
+      bbox,
+      pageWidth,
+      pageHeight,
+      url: apiUrl
     }
+
+    // Wait for DOM transition and refs
+    nextTick(() => {
+      setTimeout(() => {
+        renderPdfPage(arrayBuffer, page)
+      }, 500) // Increased delay for sidebar transition
+    })
   } catch (err) {
-    console.error('PDF error:', err)
-    alert('无法加载文档')
-  } finally {
+    console.error('viewDocument error:', err)
+    alert('无法加载文档，请重试')
     pdfLoading.value = false
   }
 }
@@ -455,6 +522,10 @@ onMounted(async () => {
   } catch (err) {
     console.error('Failed to init HitTest:', err)
   }
+})
+
+onUnmounted(() => {
+  // Cleanup
 })
 </script>
 
@@ -829,9 +900,39 @@ onMounted(async () => {
   padding: 20px;
 }
 
+.pdf-render-wrapper {
+  position: relative;
+  height: fit-content;
+}
+
 .pdf-canvas {
   box-shadow: 0 5px 15px rgba(0,0,0,0.3);
   background: #fff;
+  display: block;
+}
+
+.pdf-highlight-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.highlight-rect {
+  fill: rgba(255, 165, 0, 0.35);
+  stroke: #ff4500;
+  stroke-width: 1.5px;
+  stroke-dasharray: 2;
+  animation: pulse-highlight 2s infinite;
+}
+
+@keyframes pulse-highlight {
+  0% { fill: rgba(255, 165, 0, 0.25); }
+  50% { fill: rgba(255, 165, 0, 0.45); }
+  100% { fill: rgba(255, 165, 0, 0.25); }
 }
 
 .close-viewer {
