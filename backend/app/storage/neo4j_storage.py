@@ -13,7 +13,7 @@ import logging
 import traceback
 import concurrent.futures
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Callable, Union
+from typing import Dict, Any, List, Optional, Callable, Union, TYPE_CHECKING
 
 from neo4j import GraphDatabase, Session as Neo4jSession
 from neo4j.exceptions import (
@@ -71,12 +71,154 @@ class Neo4jStorage(GraphStorage):
 
     def _ensure_schema(self):
         """Create indexes and constraints if they don't exist."""
+        logger.info("=== Starting schema initialization ===")
         with self._driver.session() as session:
-            for query in neo4j_schema.ALL_SCHEMA_QUERIES:
+            # Check Neo4j version for vector index compatibility
+            self._check_neo4j_version(session)
+
+            # First, check existing indexes to avoid redundant operations
+            existing_indexes = self._get_existing_indexes(session)
+            logger.info(f"Existing indexes found: {list(existing_indexes.keys())}")
+
+            # Debug: Directly query for any index containing 'embed'
+            try:
+                embed_check = session.run("SHOW INDEXES WHERE name CONTAINS 'embed'")
+                embed_indexes = [dict(r) for r in embed_check]
+                logger.info(f"[INDEX DEBUG] Indexes containing 'embed': {embed_indexes}")
+            except Exception as e:
+                logger.warning(f"[INDEX DEBUG] Could not query embed indexes: {e}")
+
+            # Separate queries into critical (constraints, regular indexes) and optional (vector indexes)
+            critical_queries = [
+                neo4j_schema.CREATE_GRAPH_UUID_CONSTRAINT,
+                neo4j_schema.CREATE_ENTITY_UUID_CONSTRAINT,
+                neo4j_schema.CREATE_EPISODE_UUID_CONSTRAINT,
+                neo4j_schema.CREATE_DOCUMENT_UUID_CONSTRAINT,
+                neo4j_schema.CREATE_PAGE_UUID_CONSTRAINT,
+                neo4j_schema.CREATE_ENTITY_GRAPH_ID_INDEX,
+                neo4j_schema.CREATE_ENTITY_NAME_LOWER_INDEX,
+                neo4j_schema.CREATE_DOC_GRAPH_ID_INDEX,
+                neo4j_schema.CREATE_PAGE_GRAPH_ID_INDEX,
+                neo4j_schema.CREATE_EPISODE_GRAPH_ID_INDEX,
+                neo4j_schema.CREATE_EPISODE_SOURCE_INDEX,
+                neo4j_schema.CREATE_EPISODE_CHUNK_INDEX,
+            ]
+
+            # 1. Create critical indexes first
+            for query in critical_queries:
                 try:
                     session.run(query)
+                    logger.debug(f"Schema query executed: {query[:50]}...")
                 except Exception as e:
-                    logger.warning(f"Schema query warning (may already exist): {e}")
+                    logger.warning(f"Critical schema query failed: {e}")
+
+            # 2. Create vector indexes (require Neo4j 5.11+)
+            vector_index_queries = [
+                ("entity_embedding", neo4j_schema.get_entity_vector_index_query(Config.EMBEDDING_DIMENSION)),
+                ("episode_embedding", neo4j_schema.get_episode_vector_index_query(Config.EMBEDDING_DIMENSION)),
+                ("fact_embedding", neo4j_schema.get_relation_vector_index_query(Config.EMBEDDING_DIMENSION)),
+            ]
+
+            for index_name, query in vector_index_queries:
+                try:
+                    if index_name not in existing_indexes:
+                        logger.info(f"Creating vector index '{index_name}'...")
+                        logger.debug(f"[VECTOR CREATE] Running query: {query}")
+                        session.run(query)
+                        logger.info(f"✅ Vector index '{index_name}' created/verified")
+                    else:
+                        logger.info(f"⏭️ Vector index '{index_name}' already exists")
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.warning(f"❌ Vector index '{index_name}' creation failed: {error_msg}")
+                    # Provide helpful troubleshooting info
+                    if "VECTOR" in error_msg.upper() or "not exist" in error_msg.lower():
+                        logger.warning(f"   💡 Hint: Vector indexes require Neo4j 5.11+ with vector plugin enabled")
+                        logger.warning(f"   💡 Alternative: Check if db.index.vector procedure exists")
+                    logger.warning(f"   Vector search will be disabled for this index")
+
+            # 3. Create fulltext indexes
+            fulltext_queries = [
+                ("entity_fulltext", neo4j_schema.CREATE_ENTITY_FULLTEXT_INDEX),
+                ("fact_fulltext", neo4j_schema.CREATE_FACT_FULLTEXT_INDEX),
+                ("episode_fulltext", neo4j_schema.CREATE_EPISODE_FULLTEXT_INDEX),
+            ]
+
+            for index_name, query in fulltext_queries:
+                try:
+                    if index_name not in existing_indexes:
+                        session.run(query)
+                        logger.info(f"✅ Fulltext index '{index_name}' created/verified")
+                    else:
+                        logger.info(f"⏭️ Fulltext index '{index_name}' already exists")
+                except Exception as e:
+                    logger.warning(f"❌ Fulltext index '{index_name}' creation failed: {e}")
+
+            # 4. Verify all required indexes after creation
+            self._verify_indexes(session)
+
+    def _check_neo4j_version(self, session):
+        """Check Neo4j version for vector index compatibility."""
+        try:
+            result = session.run("CALL dbms.components() YIELD name, versions RETURN name, versions")
+            for record in result:
+                if record["name"] == "Neo4j Kernel":
+                    versions = record["versions"]
+                    if versions:
+                        version_str = versions[0]
+                        logger.info(f"Neo4j version: {version_str}")
+                        # Parse major.minor version
+                        major, minor = map(int, version_str.split('.')[:2])
+                        if major < 5 or (major == 5 and minor < 11):
+                            logger.warning(
+                                f"⚠️ Neo4j {version_str} detected. "
+                                f"Vector indexes require Neo4j 5.11 or later. "
+                                f"Semantic search will be disabled."
+                            )
+                        else:
+                            logger.info("✅ Neo4j version supports vector indexes")
+                        break
+        except Exception as e:
+            logger.warning(f"Could not determine Neo4j version: {e}")
+
+    def _get_existing_indexes(self, session) -> Dict[str, str]:
+        """Get existing indexes from Neo4j."""
+        try:
+            result = session.run("SHOW INDEXES")
+            indexes = {}
+            for record in result:
+                # Log raw record for debugging
+                logger.debug(f"[INDEX DEBUG] Raw record: {dict(record)}")
+
+                # Handle different Neo4j versions (index name might be in different fields)
+                index_name = record.get("name") or record.get("indexName", "") or record.get("id", "")
+                index_type = str(record.get("type", record.get("indexType", "")))
+                if index_name:
+                    indexes[index_name] = index_type
+                    logger.debug(f"[INDEX DEBUG] Found index: name='{index_name}', type='{index_type}'")
+
+            logger.info(f"[INDEX DEBUG] All existing indexes: {indexes}")
+            return indexes
+        except Exception as e:
+            logger.warning(f"Failed to query existing indexes: {e}")
+            return {}
+
+    def _verify_indexes(self, session):
+        """Verify critical indexes exist and log status."""
+        required_indexes = [
+            "graph_uuid", "entity_uuid", "episode_uuid",
+            "entity_graph_id", "entity_name_lower",
+            "entity_embedding", "episode_embedding", "fact_embedding"
+        ]
+
+        existing = self._get_existing_indexes(session)
+        existing_names = set(existing.keys())
+
+        for idx_name in required_indexes:
+            if idx_name in existing_names:
+                logger.info(f"✅ Index '{idx_name}' is ready")
+            else:
+                logger.warning(f"⚠️ Index '{idx_name}' is MISSING - some features may not work")
 
     # ----------------------------------------------------------------
     # Retry wrapper
@@ -271,6 +413,11 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             def _create_skeleton(tx):
                 logger.info(f"💾 [STEP 2/6] [{episode_id[:8]}] Creating/Merging Episode node in Neo4j...")
+
+                # Extract indexing properties from metadata for direct storage
+                filename = metadata.get("source") if metadata else None
+                chunk_idx = metadata.get("chunk_index", 0) if metadata else 0
+
                 # Use MERGE instead of CREATE to handle episodes that were created but not fully processed
                 tx.run(
                     """
@@ -278,6 +425,8 @@ class Neo4jStorage(GraphStorage):
                     ON CREATE SET
                         ep.graph_id = $graph_id,
                         ep.data = $data,
+                        ep.source = $source,
+                        ep.chunk_index = $chunk_index,
                         ep.metadata_json = $metadata_json,
                         ep.processed = false,
                         ep.embedding = $embedding,
@@ -285,39 +434,46 @@ class Neo4jStorage(GraphStorage):
                     ON MATCH SET
                         ep.graph_id = $graph_id,
                         ep.data = $data,
+                        ep.source = $source,
+                        ep.chunk_index = $chunk_index,
                         ep.metadata_json = $metadata_json,
                         ep.embedding = $embedding
                     """,
                     uuid=episode_id,
                     graph_id=graph_id,
                     data=text,
+                    source=filename,
+                    chunk_index=chunk_idx,
                     metadata_json=metadata_json,
                     embedding=chunk_embedding,
                     created_at=now,
                 )
 
+                # Apply hierarchy labels to Episode node if present in metadata
+                hierarchy_type = metadata.get("hierarchy_type") if metadata else None
+                if hierarchy_type:
+                    # Convert to PascalCase for Neo4j label (e.g., 'chapter' -> 'Chapter')
+                    label = hierarchy_type.capitalize()
+                    tx.run(f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{label}`", uuid=episode_id)
+
                 # Link to Page/Document if metadata is available
                 if metadata:
-                    filename = metadata.get("source")
                     page_num = metadata.get("page")
-                    chunk_idx = metadata.get("chunk_index", 0)
                     if filename:
                         doc_uuid = self._ensure_document(tx, graph_id, filename)
 
-                        # Sequential linking
+                        # Sequential linking - Optimized to use indexed properties
                         if chunk_idx > 0:
                             tx.run(
                                 """
-                                MATCH (prev:Episode {graph_id: $gid})
-                                WHERE prev.metadata_json CONTAINS $filename
-                                  AND prev.metadata_json CONTAINS $prev_idx_str
+                                MATCH (prev:Episode {graph_id: $gid, source: $filename, chunk_index: $prev_idx})
                                 MATCH (curr:Episode {uuid: $curr_uuid})
                                 MERGE (prev)-[r:NEXT_EPISODE]->(curr)
                                 ON CREATE SET r.graph_id = $gid
                                 """,
                                 gid=graph_id,
-                                filename=f'"source": "{filename}"',
-                                prev_idx_str=f'"chunk_index": {chunk_idx - 1}',
+                                filename=filename,
+                                prev_idx=chunk_idx - 1,
                                 curr_uuid=episode_id
                             )
 
@@ -449,12 +605,16 @@ class Neo4jStorage(GraphStorage):
                     if _type and _type != "Entity":
                         tx.run(f"MATCH (n:Entity {{uuid: $uuid}}) SET n:`{_type}`", uuid=e_uuid)
 
-                    # 3. Auto-Hierarchy for Clauses
+                    # 3. Auto-Hierarchy for Chapters, Sections, and Clauses
                     import re
-                    clause_match = re.match(r'^(\d+\.\d+)\.\d+$', _name) # matches 3.1.1
+                    # Match clause like 3.1.1 (links to 3.1)
+                    clause_match = re.match(r'^(\d+\.\d+)\.\d+$', _name)
+                    # Match section like 3.1 (links to Chapter 3)
+                    section_match = re.match(r'^(\d+)\.\d+$', _name)
+
                     if clause_match:
                         parent_name = clause_match.group(1)
-                        # Create/Link to parent clause automatically
+                        # Create/Link to parent section automatically
                         tx.run(
                             """
                             MERGE (p:Entity {graph_id: $gid, name_lower: $p_name_lower})
@@ -464,7 +624,26 @@ class Neo4jStorage(GraphStorage):
                                 p.created_at = datetime()
                             WITH p
                             MATCH (c:Entity {uuid: $c_uuid})
-                            MERGE (c)-[r:SUB_CLAUSE_OF]->(p)
+                            MERGE (c)-[r:PART_OF]->(p)
+                            ON CREATE SET r.graph_id = $gid
+                            """,
+                            gid=graph_id, p_name_lower=parent_name.lower(), p_name=parent_name,
+                            c_uuid=e_uuid
+                        )
+                    elif section_match:
+                        chapter_num = section_match.group(1)
+                        parent_name = f"第{chapter_num}章"
+                        # Create/Link to parent chapter automatically
+                        tx.run(
+                            """
+                            MERGE (p:Entity {graph_id: $gid, name_lower: $p_name_lower})
+                            ON CREATE SET
+                                p.uuid = randomUUID(),
+                                p.name = $p_name,
+                                p.created_at = datetime()
+                            WITH p
+                            MATCH (c:Entity {uuid: $c_uuid})
+                            MERGE (c)-[r:PART_OF]->(p)
                             ON CREATE SET r.graph_id = $gid
                             """,
                             gid=graph_id, p_name_lower=parent_name.lower(), p_name=parent_name,
@@ -1016,3 +1195,808 @@ class Neo4jStorage(GraphStorage):
             "expired_at": props.get("expired_at"),
             "episode_ids": episode_ids,
         }
+
+    # ========================================================================
+    # 多层级分块支持（新增）
+    # ========================================================================
+
+    def add_hierarchical_chunk(
+        self,
+        graph_id: str,
+        chunk_data: Dict[str, Any]
+    ) -> str:
+        """
+        存储多层级chunk及其引用关系
+
+        Args:
+            graph_id: 图谱ID
+            chunk_data: 包含以下字段的字典：
+                - level: 1/2/3
+                - content: 文本内容
+                - chunk_type: section/clause/element
+                - metadata: 元数据字典
+
+        Returns:
+            episode_uuid
+        """
+        level = chunk_data.get("level", 2)
+        content = chunk_data.get("content", "")
+        chunk_type = chunk_data.get("chunk_type", "clause")
+        metadata = chunk_data.get("metadata", {})
+
+        # 生成稳定UUID
+        content_seed = f"{graph_id}:{content}".encode('utf-8')
+        episode_id = str(uuid.UUID(hashlib.md5(content_seed).hexdigest()))
+
+        now = datetime.now(timezone.utc).isoformat()
+        metadata_json = json.dumps(metadata, ensure_ascii=False)
+
+        # 生成embedding
+        embedding = []
+        try:
+            embedding = self._embedding.embed(content)
+        except Exception as e:
+            logger.warning(f"[hierarchical] Embedding failed: {e}")
+
+        with self._driver.session() as session:
+            def _create_hierarchical_episode(tx):
+                # 创建Episode节点
+                tx.run(
+                    """
+                    MERGE (ep:Episode {uuid: $uuid})
+                    ON CREATE SET
+                        ep.graph_id = $graph_id,
+                        ep.data = $data,
+                        ep.metadata_json = $metadata_json,
+                        ep.processed = true,
+                        ep.embedding = $embedding,
+                        ep.created_at = $created_at
+                    ON MATCH SET
+                        ep.graph_id = $graph_id,
+                        ep.data = $data,
+                        ep.metadata_json = $metadata_json,
+                        ep.embedding = $embedding
+                    """,
+                    uuid=episode_id,
+                    graph_id=graph_id,
+                    data=content,
+                    metadata_json=metadata_json,
+                    embedding=embedding,
+                    created_at=now,
+                )
+
+                # 添加层级标签
+                level_label = f"Level{level}"
+                tx.run(
+                    f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{level_label}`",
+                    uuid=episode_id
+                )
+
+                # 添加类型标签
+                if chunk_type:
+                    type_label = chunk_type.capitalize()
+                    tx.run(
+                        f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{type_label}`",
+                        uuid=episode_id
+                    )
+
+                # 如果是条文，提取clause_id并添加标签
+                clause_id = metadata.get("clause_id")
+                if clause_id:
+                    tx.run(
+                        """
+                        MATCH (ep:Episode {uuid: $uuid})
+                        SET ep.clause_id = $clause_id
+                        """,
+                        uuid=episode_id,
+                        clause_id=clause_id
+                    )
+
+            self._call_with_retry(session.execute_write, _create_hierarchical_episode)
+
+        logger.info(f"[hierarchical] Created episode {episode_id[:8]} (Level{level}, {chunk_type})")
+        return episode_id
+
+    def add_hierarchical_chunks_batch(
+        self,
+        graph_id: str,
+        chunks: List[Dict[str, Any]],
+        progress_callback: Optional[Callable] = None
+    ) -> List[str]:
+        """
+        批量存储多层级chunks
+
+        Args:
+            graph_id: 图谱ID
+            chunks: chunk列表
+            progress_callback: 进度回调
+
+        Returns:
+            episode_uuid列表
+        """
+        episode_ids = []
+        total = len(chunks)
+
+        for idx, chunk in enumerate(chunks):
+            try:
+                episode_id = self.add_hierarchical_chunk(graph_id, chunk)
+                episode_ids.append(episode_id)
+            except Exception as e:
+                logger.error(f"[hierarchical] Failed to add chunk: {e}")
+
+            if progress_callback and (idx + 1) % 10 == 0:
+                progress_callback((idx + 1) / total)
+
+        return episode_ids
+
+    def add_clause_relations(
+        self,
+        graph_id: str,
+        clause_uuid: str,
+        relations: List[Dict[str, Any]],
+        episode_ids: List[str]
+    ) -> None:
+        """
+        为条文添加语义关系（由SemanticEnricher生成）
+
+        Args:
+            graph_id: 图谱ID
+            clause_uuid: 条文节点UUID
+            relations: 关系列表，格式：
+                [{"type": "MANDATES", "target": "xxx", "fact": "xxx"}, ...]
+            episode_ids: 来源episode列表
+        """
+        with self._driver.session() as session:
+            for rel in relations:
+                rel_type = rel.get("type", "RELATION")
+                target_name = rel.get("target", "")
+                fact = rel.get("fact", "")
+
+                if not target_name:
+                    continue
+
+                def _add_relation(tx, _clause_uuid=clause_uuid, _rel_type=rel_type,
+                                  _target=target_name, _fact=fact, _ep_ids=episode_ids):
+                    # 创建/获取目标实体
+                    target_lower = target_name.lower()
+                    target_uuid_result = tx.run(
+                        """
+                        MERGE (t:Entity {graph_id: $gid, name_lower: $name_lower})
+                        ON CREATE SET
+                            t.uuid = randomUUID(),
+                            t.name = $name,
+                            t.created_at = datetime()
+                        RETURN t.uuid AS uuid
+                        """,
+                        gid=graph_id,
+                        name_lower=target_lower,
+                        name=target_name
+                    ).single()
+
+                    if not target_uuid_result:
+                        return
+
+                    target_uuid = target_uuid_result["uuid"]
+
+                    # 添加目标类型标签
+                    target_type = rel.get("target_type", "Entity")
+                    if target_type != "Entity":
+                        tx.run(
+                            f"MATCH (n:Entity {{uuid: $uuid}}) SET n:`{target_type}`",
+                            uuid=target_uuid
+                        )
+
+                    # 创建关系
+                    tx.run(
+                        """
+                        MATCH (src:Entity {uuid: $src_uuid}), (tgt:Entity {uuid: $tgt_uuid})
+                        MERGE (src)-[r:RELATION {graph_id: $gid, name: $rel_type}]->(tgt)
+                        ON CREATE SET
+                            r.uuid = randomUUID(),
+                            r.fact = $fact,
+                            r.episode_ids = $ep_ids,
+                            r.created_at = datetime()
+                        ON MATCH SET
+                            r.episode_ids = CASE
+                                WHEN r.episode_ids IS NULL THEN $ep_ids
+                                ELSE r.episode_ids + $ep_ids
+                            END
+                        """,
+                        src_uuid=_clause_uuid,
+                        tgt_uuid=target_uuid,
+                        gid=graph_id,
+                        rel_type=_rel_type,
+                        fact=_fact,
+                        ep_ids=_ep_ids
+                    )
+
+                try:
+                    self._call_with_retry(session.execute_write, _add_relation)
+                except Exception as e:
+                    logger.warning(f"[hierarchical] Failed to add relation {_rel_type}: {e}")
+
+    def get_unenriched_clauses(
+        self,
+        graph_id: str,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        获取未语义化的条文（用于LLM补充）
+
+        Args:
+            graph_id: 图谱ID
+            limit: 返回数量限制
+
+        Returns:
+            条文列表
+        """
+        with self._driver.session() as session:
+            result = session.run(
+                """
+                MATCH (ep:Episode:Level2 {graph_id: $gid})
+                WHERE ep.semantics_enriched <> true
+                RETURN ep.uuid AS uuid,
+                       ep.clause_id AS clause_id,
+                       ep.data AS content,
+                       ep.metadata_json AS metadata_json
+                LIMIT $limit
+                """,
+                gid=graph_id,
+                limit=limit
+            )
+
+            clauses = []
+            for record in result:
+                meta_json = record["metadata_json"] or "{}"
+                try:
+                    metadata = json.loads(meta_json)
+                except:
+                    metadata = {}
+
+                clauses.append({
+                    "uuid": record["uuid"],
+                    "clause_id": record["clause_id"] or "",
+                    "content": record["content"] or "",
+                    "metadata": metadata
+                })
+
+            return clauses
+
+    def mark_clause_enriched(self, clause_uuid: str) -> None:
+        """
+        标记条文已语义化
+
+        Args:
+            clause_uuid: 条文Episode的UUID
+        """
+        with self._driver.session() as session:
+            session.run(
+                """
+                MATCH (ep:Episode {uuid: $uuid})
+                SET ep.semantics_enriched = true
+                """,
+                uuid=clause_uuid
+            )
+
+    def build_cross_ref_relations(self, graph_id: str) -> int:
+        """
+        根据条文元数据中的cross_refs构建交叉引用关系
+
+        Args:
+            graph_id: 图谱ID
+
+        Returns:
+            构建的关系数量
+        """
+        count = 0
+
+        with self._driver.session() as session:
+            # 获取所有条文
+            result = session.run(
+                """
+                MATCH (ep:Episode:Level2 {graph_id: $gid})
+                WHERE ep.clause_id IS NOT NULL
+                RETURN ep.uuid AS uuid, ep.clause_id AS clause_id
+                """,
+                gid=graph_id
+            )
+
+            clause_map = {}
+            for record in result:
+                clause_map[record["clause_id"]] = record["uuid"]
+
+            # 构建交叉引用关系
+            for clause_id, source_uuid in clause_map.items():
+                # 获取该条文的引用
+                ref_result = session.run(
+                    """
+                    MATCH (ep:Episode {uuid: $uuid})
+                    RETURN ep.metadata_json AS metadata_json
+                    """,
+                    uuid=source_uuid
+                ).single()
+
+                if not ref_result:
+                    continue
+
+                try:
+                    metadata = json.loads(ref_result["metadata_json"] or "{}")
+                except:
+                    continue
+
+                cross_refs = metadata.get("cross_refs", [])
+                if isinstance(cross_refs, str):
+                    cross_refs = [cross_refs]
+
+                for ref_id in cross_refs:
+                    if ref_id in clause_map:
+                        target_uuid = clause_map[ref_id]
+                        if target_uuid != source_uuid:
+                            try:
+                                session.run(
+                                    """
+                                    MATCH (src:Episode {uuid: $src_uuid}), (tgt:Episode {uuid: $tgt_uuid})
+                                    MERGE (src)-[r:CROSS_REFERENCE]->(tgt)
+                                    ON CREATE SET r.graph_id = $gid
+                                    """,
+                                    src_uuid=source_uuid,
+                                    tgt_uuid=target_uuid,
+                                    gid=graph_id
+                                )
+                                count += 1
+                            except Exception as e:
+                                logger.debug(f"[hierarchical] Failed to create cross-ref: {e}")
+
+        logger.info(f"[hierarchical] Built {count} cross-reference relations")
+        return count
+
+    def add_hierarchical_chunk_with_entities(
+        self,
+        graph_id: str,
+        chunk_data: Dict[str, Any]
+    ) -> str:
+        """
+        存储多层级chunk，同时创建Episode和Entity节点及关系
+
+        Args:
+            graph_id: 图谱ID
+            chunk_data: 包含以下字段的字典：
+                - level: 1/2/3
+                - content: 文本内容 (也支持 "text" 字段)
+                - chunk_type: section/clause/element
+                - metadata: 元数据字典
+
+        Returns:
+            episode_uuid or None if chunk is empty
+        """
+        level = chunk_data.get("level", 2)
+        # Support both "content" (standard) and "text" (from HierarchicalChunk.to_episode_dict)
+        content = chunk_data.get("content") or chunk_data.get("text", "")
+        chunk_type = chunk_data.get("chunk_type", "clause")
+        metadata = chunk_data.get("metadata", {})
+
+        # Skip empty chunks
+        if not content or not content.strip():
+            logger.warning(f"[hierarchical] Skipping empty chunk: {chunk_data}")
+            return None
+
+        # 生成稳定UUID
+        content_seed = f"{graph_id}:{content}".encode('utf-8')
+        episode_id = str(uuid.UUID(hashlib.md5(content_seed).hexdigest()))
+
+        now = datetime.now(timezone.utc).isoformat()
+        metadata_json = json.dumps(metadata, ensure_ascii=False)
+
+        # 生成embedding
+        embedding = []
+        try:
+            embedding = self._embedding.embed(content)
+        except Exception as e:
+            logger.warning(f"[hierarchical] Embedding failed: {e}")
+
+        with self._driver.session() as session:
+            def _create_episode_and_entities(tx):
+                # 1. 创建Episode节点
+                tx.run(
+                    """
+                    MERGE (ep:Episode {uuid: $uuid})
+                    ON CREATE SET
+                        ep.graph_id = $graph_id,
+                        ep.data = $data,
+                        ep.metadata_json = $metadata_json,
+                        ep.processed = true,
+                        ep.embedding = $embedding,
+                        ep.created_at = $created_at
+                    ON MATCH SET
+                        ep.graph_id = $graph_id,
+                        ep.data = $data,
+                        ep.metadata_json = $metadata_json,
+                        ep.embedding = $embedding
+                    """,
+                    uuid=episode_id,
+                    graph_id=graph_id,
+                    data=content,
+                    metadata_json=metadata_json,
+                    embedding=embedding,
+                    created_at=now,
+                )
+
+                # 2. 添加层级标签
+                level_label = f"Level{level}"
+                tx.run(
+                    f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{level_label}`",
+                    uuid=episode_id
+                )
+
+                # 3. 根据chunk_type创建Entity节点
+                if chunk_type == "clause":
+                    clause_id = metadata.get("clause_id", "")
+                    if clause_id:
+                        # 创建Clause实体
+                        self._create_entity_for_clause(tx, graph_id, episode_id, clause_id, content, embedding, metadata)
+                elif chunk_type == "section":
+                    title = metadata.get("title", content[:50])
+                    self._create_section_entity(tx, graph_id, episode_id, title, metadata, embedding)
+                elif chunk_type == "element":
+                    element_type = metadata.get("element_type", "parameter")
+                    key = metadata.get("key", content[:50])
+                    self._create_element_entity(tx, graph_id, episode_id, element_type, key, metadata, embedding)
+
+            self._call_with_retry(session.execute_write, _create_episode_and_entities)
+
+        logger.info(f"[hierarchical] Created episode {episode_id[:8]} with entities (Level{level}, {chunk_type})")
+        return episode_id
+
+    def _create_entity_for_clause(self, tx, graph_id: str, episode_id: str,
+                                  clause_id: str, content: str,
+                                  embedding: List[float], metadata: Dict):
+        """为Clause创建Entity节点"""
+        clause_name = f"条款{clause_id}"
+
+        # 生成Entity UUID
+        entity_seed = f"{graph_id}:{clause_name}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        # 创建Clause Entity节点
+        tx.run(
+            """
+            MERGE (e:Entity:Clause {graph_id: $gid, name_lower: $name_lower})
+            ON CREATE SET
+                e.uuid = $uuid,
+                e.name = $name,
+                e.summary = $summary,
+                e.embedding = $embedding,
+                e.created_at = datetime()
+            ON MATCH SET
+                e.embedding = $embedding,
+                e.summary = COALESCE(e.summary, $summary)
+            """,
+            gid=graph_id,
+            name_lower=clause_name.lower(),
+            uuid=entity_uuid,
+            name=clause_name,
+            summary=content[:500] if content else "",
+            embedding=embedding
+        )
+
+        # 链接Episode -> Entity (MENTIONS)
+        tx.run(
+            """
+            MATCH (ep:Episode {uuid: $ep_uuid}), (e:Entity {uuid: $e_uuid})
+            MERGE (ep)-[r:MENTIONS]->(e)
+            ON CREATE SET r.graph_id = $gid
+            """,
+            ep_uuid=episode_id,
+            e_uuid=entity_uuid,
+            gid=graph_id
+        )
+
+        # 如果有formula_refs，创建Formula实体
+        formula_refs = metadata.get("formula_refs", [])
+        if isinstance(formula_refs, str):
+            formula_refs = [formula_refs]
+        for formula_id in formula_refs:
+            if formula_id:
+                self._create_formula_entity(tx, graph_id, episode_id, entity_uuid, formula_id)
+
+        # 如果有table_refs，创建Parameter实体
+        table_refs = metadata.get("table_refs", [])
+        if isinstance(table_refs, str):
+            table_refs = [table_refs]
+        for table_ref in table_refs:
+            if table_ref:
+                self._create_table_parameter_entity(tx, graph_id, episode_id, entity_uuid, table_ref)
+
+    def _create_section_entity(self, tx, graph_id: str, episode_id: str,
+                               title: str, metadata: Dict, embedding: List[float]):
+        """为Section创建Entity节点"""
+        section_name = title if title else metadata.get("title", "未命名章节")
+
+        # 构建 summary
+        chapter_num = metadata.get("chapter_number")
+        section_num = metadata.get("section_number")
+        summary = f"章节 {chapter_num}.{section_num if section_num else ''} - {section_name}" if chapter_num else section_name
+
+        entity_seed = f"{graph_id}:Section:{section_name}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        tx.run(
+            """
+            MERGE (e:Entity:Section {graph_id: $gid, name_lower: $name_lower})
+            ON CREATE SET
+                e.uuid = $uuid,
+                e.name = $name,
+                e.summary = $summary,
+                e.embedding = $embedding,
+                e.created_at = datetime()
+            ON MATCH SET
+                e.embedding = $embedding,
+                e.summary = CASE WHEN e.summary = '' OR e.summary IS NULL THEN $summary ELSE e.summary END
+            """,
+            gid=graph_id,
+            name_lower=section_name.lower(),
+            uuid=entity_uuid,
+            name=section_name,
+            summary=summary,
+            embedding=embedding
+        )
+
+        # 链接Episode -> Entity
+        tx.run(
+            """
+            MATCH (ep:Episode {uuid: $ep_uuid}), (e:Entity {uuid: $e_uuid})
+            MERGE (ep)-[r:MENTIONS]->(e)
+            ON CREATE SET r.graph_id = $gid
+            """,
+            ep_uuid=episode_id,
+            e_uuid=entity_uuid,
+            gid=graph_id
+        )
+
+    def _create_element_entity(self, tx, graph_id: str, episode_id: str,
+                               element_type: str, key: str,
+                               metadata: Dict, embedding: List[float]):
+        """为Element（Formula/Parameter/Term）创建Entity节点"""
+        entity_type = element_type.capitalize()
+        if entity_type not in ["Formula", "Parameter", "Term"]:
+            entity_type = "Parameter"
+
+        entity_name = key if key else f"{element_type}_{metadata.get('source_id', 'unknown')}"
+
+        # 构建 summary：从 metadata 中提取有用信息
+        value = metadata.get("value", "")
+        unit = metadata.get("unit", "")
+        condition = metadata.get("condition", "")
+        source_id = metadata.get("source_id", "")
+
+        # 生成 summary 描述
+        summary_parts = []
+        if source_id:
+            summary_parts.append(f"来源: {source_id}")
+        if value:
+            summary_parts.append(f"值: {value}")
+        if unit:
+            summary_parts.append(f"单位: {unit}")
+        if condition:
+            summary_parts.append(f"条件: {condition}")
+        summary = " | ".join(summary_parts) if summary_parts else f"{entity_type}类型要素"
+
+        entity_seed = f"{graph_id}:{entity_type}:{entity_name}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        tx.run(
+            f"""
+            MERGE (e:Entity:`{entity_type}` {{graph_id: $gid, name_lower: $name_lower}})
+            ON CREATE SET
+                e.uuid = $uuid,
+                e.name = $name,
+                e.summary = $summary,
+                e.embedding = $embedding,
+                e.created_at = datetime()
+            ON MATCH SET
+                e.embedding = $embedding,
+                e.summary = CASE WHEN e.summary = '' OR e.summary IS NULL THEN $summary ELSE e.summary END
+            """,
+            gid=graph_id,
+            name_lower=entity_name.lower(),
+            uuid=entity_uuid,
+            name=entity_name,
+            summary=summary,
+            embedding=embedding
+        )
+
+        # 链接Episode -> Entity
+        tx.run(
+            """
+            MATCH (ep:Episode {uuid: $ep_uuid}), (e:Entity {uuid: $e_uuid})
+            MERGE (ep)-[r:MENTIONS]->(e)
+            ON CREATE SET r.graph_id = $gid
+            """,
+            ep_uuid=episode_id,
+            e_uuid=entity_uuid,
+            gid=graph_id
+        )
+
+    def _create_formula_entity(self, tx, graph_id: str, episode_id: str,
+                               clause_entity_uuid: str, formula_id: str):
+        """创建Formula实体"""
+        formula_name = f"公式{formula_id}"
+
+        entity_seed = f"{graph_id}:Formula:{formula_id}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        try:
+            tx.run(
+                """
+                MERGE (e:Entity:Formula {graph_id: $gid, name_lower: $name_lower})
+                ON CREATE SET
+                    e.uuid = $uuid,
+                    e.name = $name,
+                    e.created_at = datetime()
+                """,
+                gid=graph_id,
+                name_lower=formula_name.lower(),
+                uuid=entity_uuid,
+                name=formula_name
+            )
+
+            # 链接Clause -> REFERENCES -> Formula
+            tx.run(
+                """
+                MATCH (clause:Entity {uuid: $clause_uuid}), (f:Entity {uuid: $formula_uuid})
+                MERGE (clause)-[r:RELATION {graph_id: $gid, name: 'REFERENCES'}]->(f)
+                ON CREATE SET r.graph_id = $gid
+                """,
+                clause_uuid=clause_entity_uuid,
+                formula_uuid=entity_uuid,
+                gid=graph_id
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create formula entity: {e}")
+
+    def _create_table_parameter_entity(self, tx, graph_id: str, episode_id: str,
+                                      clause_entity_uuid: str, table_ref: str):
+        """创建Table/Parameter实体"""
+        param_name = f"{table_ref}"
+
+        entity_seed = f"{graph_id}:Parameter:{param_name}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        try:
+            tx.run(
+                """
+                MERGE (e:Entity:Parameter {graph_id: $gid, name_lower: $name_lower})
+                ON CREATE SET
+                    e.uuid = $uuid,
+                    e.name = $name,
+                    e.created_at = datetime()
+                """,
+                gid=graph_id,
+                name_lower=param_name.lower(),
+                uuid=entity_uuid,
+                name=param_name
+            )
+
+            # 链接Clause -> HAS_VALUE -> Parameter
+            tx.run(
+                """
+                MATCH (clause:Entity {uuid: $clause_uuid}), (p:Entity {uuid: $param_uuid})
+                MERGE (clause)-[r:RELATION {graph_id: $gid, name: 'HAS_VALUE'}]->(p)
+                ON CREATE SET r.graph_id = $gid
+                """,
+                clause_uuid=clause_entity_uuid,
+                param_uuid=entity_uuid,
+                gid=graph_id
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create parameter entity: {e}")
+
+    def build_hierarchical_relations(self, graph_id: str) -> int:
+        """
+        构建层级关系（PART_OF）
+
+        - Clause 5.2.8 PART_OF Section 5.2
+        - Section 5.2 PART_OF Section 5 (Chapter)
+
+        Returns:
+            构建的关系数量
+        """
+        count = 0
+
+        with self._driver.session() as session:
+            # 获取所有Clause实体
+            result = session.run(
+                """
+                MATCH (c:Entity:Clause {graph_id: $gid})
+                WHERE c.name_lower STARTS WITH '条款'
+                RETURN c.uuid AS uuid, c.name AS name
+                """,
+                gid=graph_id
+            )
+
+            clause_map = {}
+            for record in result:
+                name = record["name"] or ""
+                # 提取条款编号，如 "条款5.2.8" -> "5.2.8"
+                import re
+                match = re.search(r'(\d+\.\d+\.\d+)', name)
+                if match:
+                    clause_num = match.group(1)
+                    clause_map[clause_num] = record["uuid"]
+
+            # 构建Clause的PART_OF关系
+            for clause_num, clause_uuid in clause_map.items():
+                parts = clause_num.split('.')
+                if len(parts) >= 2:
+                    # 5.2.8 -> parent 5.2
+                    parent_num = '.'.join(parts[:-1])
+
+                    if parent_num in clause_map:
+                        try:
+                            session.run(
+                                """
+                                MATCH (child:Entity {uuid: $child_uuid}), (parent:Entity {uuid: $parent_uuid})
+                                MERGE (child)-[r:PART_OF]->(parent)
+                                ON CREATE SET r.graph_id = $gid
+                                """,
+                                child_uuid=clause_uuid,
+                                parent_uuid=clause_map[parent_num],
+                                gid=graph_id
+                            )
+                            count += 1
+                        except Exception as e:
+                            logger.debug(f"Failed to create PART_OF: {e}")
+
+            # 构建Section的层级关系
+            section_result = session.run(
+                """
+                MATCH (s:Entity:Section {graph_id: $gid})
+                RETURN s.uuid AS uuid, s.name AS name
+                """,
+                gid=graph_id
+            )
+
+            for record in section_result:
+                name = record["name"] or ""
+                # 尝试提取章节编号
+                import re
+                match = re.search(r'^第?(\d+)\.?\d*\s', name)
+                if match:
+                    chapter_num = match.group(1)
+                    chapter_name = f"第{chapter_num}章"
+                    # 创建Chapter实体
+                    chapter_seed = f"{graph_id}:Section:{chapter_name}".encode('utf-8')
+                    chapter_uuid = str(uuid.UUID(hashlib.md5(chapter_seed).hexdigest()))
+
+                    try:
+                        session.run(
+                            """
+                            MERGE (c:Entity:Section {graph_id: $gid, name_lower: $name_lower})
+                            ON CREATE SET
+                                c.uuid = $uuid,
+                                c.name = $name,
+                                c.created_at = datetime()
+                            """,
+                            gid=graph_id,
+                            name_lower=chapter_name.lower(),
+                            uuid=chapter_uuid,
+                            name=chapter_name
+                        )
+
+                        # Section PART_OF Chapter
+                        session.run(
+                            """
+                            MATCH (s:Entity {uuid: $s_uuid}), (c:Entity {uuid: $c_uuid})
+                            MERGE (s)-[r:PART_OF]->(c)
+                            ON CREATE SET r.graph_id = $gid
+                            """,
+                            s_uuid=record["uuid"],
+                            c_uuid=chapter_uuid,
+                            gid=graph_id
+                        )
+                        count += 1
+                    except Exception as e:
+                        logger.debug(f"Failed to create Section hierarchy: {e}")
+
+        logger.info(f"[hierarchical] Built {count} hierarchical relations")
+        return count

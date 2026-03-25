@@ -47,47 +47,98 @@ class TextProcessor:
     ) -> List[TextChunk]:
         """
         Split list of TextChunks into smaller chunks while preserving metadata.
-        Skip splitting for special types like 'table'.
+        Crucial: Merges consecutive text blocks to avoid cutting by page boundary.
 
         Args:
-            chunks: List of TextChunks
-            chunk_size: Target chunk size (chars)
-            overlap: Overlap size (chars)
-            semantic: Whether to use semantic similarity for splitting
+            chunks: List of TextChunks (e.g., from PDF fitz_blocks)
+            chunk_size: Target chunk size
+            overlap: Overlap size
+            semantic: Whether to use semantic similarity
         """
+        # 1. Group chunks by source and type
+        # Special types like 'table' should be kept separate
+
+        processed_groups = []
+        current_text_group = [] # List of TextChunks to be merged
+
+        for chunk in chunks:
+            if chunk.metadata.get("type") == "table":
+                # Tables are always their own group
+                if current_text_group:
+                    processed_groups.append(("text", current_text_group))
+                    current_text_group = []
+                processed_groups.append(("table", [chunk]))
+            else:
+                # Text blocks - merge if same source
+                if current_text_group and current_text_group[0].metadata.get("source") != chunk.metadata.get("source"):
+                    processed_groups.append(("text", current_text_group))
+                    current_text_group = [chunk]
+                else:
+                    current_text_group.append(chunk)
+
+        if current_text_group:
+            processed_groups.append(("text", current_text_group))
+
         result_chunks = []
+        source_counters = {}
 
-        # Initialize embedding service for semantic split if needed
-        embed_service = None
-        if semantic:
-            from ..storage.embedding_service import EmbeddingService
-            embed_service = EmbeddingService()
+        # 2. Process each group
+        for gtype, gchunks in processed_groups:
+            if not gchunks: continue
 
-        for original_chunk in chunks:
-            text = original_chunk.text
-            metadata = original_chunk.metadata
+            source = gchunks[0].metadata.get("source", "unknown")
+            if source not in source_counters:
+                source_counters[source] = 0
 
-            # If it's a table, keep it whole as requested by user
-            if metadata.get("type") == "table":
-                result_chunks.append(original_chunk)
+            if gtype == "table":
+                # Handle table (usually just one chunk per call, but handled as list for safety)
+                for tab_chunk in gchunks:
+                    new_metadata = tab_chunk.metadata.copy()
+                    new_metadata["chunk_index"] = source_counters[source]
+                    source_counters[source] += 1
+                    result_chunks.append(TextChunk(text=tab_chunk.text, metadata=new_metadata))
                 continue
 
-            # Choose splitting strategy
-            if semantic and len(text) > chunk_size and embed_service:
-                split_texts = TextProcessor._semantic_split(text, embed_service, chunk_size, overlap)
-            else:
-                # Use existing rule-based splitter logic
-                split_texts = split_text_into_chunks(text, chunk_size, overlap)
+            # Merge text from text group to avoid page-centric cutting
+            merged_text = "\n".join([c.text for c in gchunks])
+            # Keep representative metadata (from first chunk of group)
+            base_metadata = gchunks[0].metadata.copy()
 
-            for i, split_text in enumerate(split_texts):
-                # Copy metadata and add sub-chunk info
-                new_metadata = metadata.copy()
-                new_metadata["chunk_index"] = i
+            # Choose splitting strategy
+            if semantic and len(merged_text) > chunk_size:
+                from ..storage.embedding_service import EmbeddingService
+                embed_service = EmbeddingService()
+                split_texts = TextProcessor._semantic_split(merged_text, embed_service, chunk_size, overlap)
+            else:
+                split_texts = split_text_into_chunks(merged_text, chunk_size, overlap)
+
+            for split_text in split_texts:
+                new_metadata = base_metadata.copy()
+                new_metadata["chunk_index"] = source_counters[source]
+                source_counters[source] += 1
+
+                # Detect chunk type based on GB standard patterns
+                import re
+                # Clean up text for detection
+                clean_text = split_text.lstrip()
+
+                if re.match(r'^第[一二三四五六七八九十\d]+[章篇]', clean_text):
+                    new_metadata["hierarchy_type"] = "chapter"
+                elif re.match(r'^\d+\.\d+\s+', clean_text):
+                    new_metadata["hierarchy_type"] = "section"
+                elif re.match(r'^\d+\.\d+\.\d+', clean_text):
+                    if clean_text.startswith("2.0."):
+                        new_metadata["hierarchy_type"] = "term"
+                    else:
+                        new_metadata["hierarchy_type"] = "clause"
+                elif re.match(r'^\(\s*[A-Z]?\.\d+\.\d+(?:-\d+)?\s*\)', clean_text):
+                    new_metadata["hierarchy_type"] = "formula"
 
                 result_chunks.append(TextChunk(
                     text=split_text,
                     metadata=new_metadata
                 ))
+
         return result_chunks
 
     @staticmethod
@@ -204,4 +255,83 @@ class TextProcessor:
             "total_lines": text.count('\n') + 1,
             "total_words": len(text.split()),
         }
+
+    # ========================================================================
+    # 多层级语义分块（新增）
+    # ========================================================================
+
+    @staticmethod
+    def hierarchical_chunk(
+        text_chunks: List[TextChunk],
+        strategy: str = "full"
+    ) -> "HierarchicalChunkResult":
+        """
+        多层级语义分块 - 替代Ontology动态生成
+
+        实现三级分块策略：
+        - Level-1: 章节级（导航层）
+        - Level-2: 条文级（主检索层）
+        - Level-3: 要素级（精准层）
+
+        Args:
+            text_chunks: 原始TextChunk列表
+            strategy: 分块策略
+                - "full": 完整三级分块
+                - "level2_only": 仅条文级
+
+        Returns:
+            HierarchicalChunkResult: 包含所有层级分块的结果
+        """
+        from .hierarchical_chunker import HierarchicalChunker
+
+        chunker = HierarchicalChunker()
+        result = chunker.chunk(text_chunks)
+
+        if strategy == "level2_only":
+            # 仅返回条文级
+            from ..models.clause import HierarchicalChunkResult as HCR
+            return HCR(
+                sections=[],
+                clauses=result.clauses,
+                elements=[]
+            )
+
+        return result
+
+    @staticmethod
+    def hierarchical_chunk_text(text: str) -> "HierarchicalChunkResult":
+        """
+        对单个文本进行多层级分块
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            HierarchicalChunkResult
+        """
+        from .hierarchical_chunker import HierarchicalChunker
+
+        chunker = HierarchicalChunker()
+        return chunker.chunk_single_text(text)
+
+    @staticmethod
+    def get_fixed_ontology() -> dict:
+        """
+        获取固定本体定义 - 替代OntologyGenerator
+
+        Returns:
+            dict: 标准工程规范本体定义
+        """
+        from .normative_ontology import NormativeOntology
+        return NormativeOntology.get_ontology()
+
+    @staticmethod
+    def get_ontology_prompt_context() -> str:
+        """
+        获取本体提示词上下文
+
+        用于LLM抽取时的本体说明
+        """
+        from .normative_ontology import NormativeOntology
+        return NormativeOntology.get_prompt_context()
 

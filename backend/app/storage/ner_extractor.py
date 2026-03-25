@@ -15,45 +15,64 @@ from ..utils.llm_client import LLMClient
 logger = logging.getLogger('mirofish.ner_extractor')
 
 # Core system prompt components
-_BASE_INSTRUCTION = """You are a high-precision Knowledge Extraction Engine. Your task is to transform unstructured text into a structured graph based on the provided ontology.
+_BASE_INSTRUCTION = """你是一个高精度的知识抽取引擎。你的任务是根据提供的本体（Ontology），将非结构化文本转换为结构化图谱。
 
-## 📚 Context: The Ontology
-You MUST strictly adhere to the following ontology. If an entity or relation doesn't fit, use fallback types or discard it.
+## 🌐 语言要求
+**必须使用简体中文**：所有提取的实体名称、描述、关系事实（fact）以及属性值，必须统一使用简体中文。即使原文包含英文术语，也请提供中文翻译或在括号内保留英文。
+
+## 📚 上下文：本体定义
+你必须严格遵守以下本体。如果某个实体或关系不符合定义的类型，请使用备选类型或将其丢弃。
 {ontology_description}
 
-## 🛠 Extraction Rules
-1. **Canonical Naming**: Use official full names. Instead of "the equipment", use "Circuit Breaker (Model X)".
-2. **Strict Relation Extraction**: Relationship `type` MUST be one of the names defined in the Relation Types list above.
-3. **High-Quality "Fact" Sentences**: The `fact` field must be a clear, self-contained sentence explaining the EXACT nature of the connection.
-4. **Resolution**: DO NOT use pronouns (he, she, they, it). Resolve them to full entity names.
+## 🛠 提取规则
+1. **规范命名**：使用官方全称。避免使用“该设备”，应使用“断路器（型号 X）”。
+2. **严格的关系提取**：关系 `type` 必须是上述关系类型列表中的名称之一。
+3. **高质量的“事实”描述**：`fact` 字段必须是一个清晰、自洽的中文句子，解释连接的具体性质。
+4. **指代消解**：不要使用代词（他、她、它们、它）。请将它们还原为完整的实体名称。
 """
 
 _SOCIAL_MODE_PROMPT = """
-## 🎭 Domain Mode: Social Persona Reconstruction
-- **Focus**: Individuals, organizations, and their interactions.
-- **Actor Guideline**: Only extract entities that can be "Actors" (voice opinions, own accounts).
-- **Negative Constraints**: DO NOT extract abstract concepts like "Safety" or "Risk".
+## 🎭 领域模式：社交画像重构
+- **核心关注**：个人、组织及其互动。
+- **参与者准则**：仅提取可以作为“行动者”的实体（能发表意见、拥有账户）。
+- **负向约束**：不要提取像“安全”或“风险”这样的抽象概念。
 """
 
 _ENGINEERING_MODE_PROMPT = """
-## ⚙️ Domain Mode: Engineering & Logic Specification
-- **Exhaustive Extraction**: Capture ALL technical entities mentioned. Do not group distinct components (e.g., "Transformer", "Switch") into a single "Equipment" type if the ontology allows for specificity.
-- **Structural Integrity**: Ensure clause numbers (e.g., "3.1.1", "7.6.49") are captured as distinct `Clause` or `Requirement` entities. The `name` MUST include the number and title (e.g., "Clause 7.6.49: Laying of Porous Ducts").
-- **Content Preservation**: For clauses, store the full detailed text of all sub-items (1, 2, 3...) in the `summary` field. DO NOT truncate the regulatory requirements.
-- **Hierarchy Detection**: If the text indicates a containment or parent-child relationship (e.g., "Section 3 includes Clause 3.1", "The panel contains a breaker"), EXPLICITLY extract this as a relationship (e.g., `SUB_CLAUSE_OF`, `PART_OF`).
-- **Logical Chaining**: Extract relationships like "REFERENCES", "CONSTRAINS", or "REQUIRES" even if they involve abstract concepts.
-- **Parameter Precision**: Capture units (A, V, m, %) and limit types (min/max/greater than) accurately in the `attributes`.
+## ⚙️ 领域模式：工程与规范逻辑提取
+你的目标是提取技术知识，重点关注“规定性逻辑”（前提条件 -> 规定动作）。
+
+### 1. 强制性核心实体
+- **Clause (条款)**：用于带编号的项目（如“条款 3.1.1”）。名称格式必须为“条款 [编号]: [标题]”。
+- **Condition (前提条件)**：前提、环境因素或系统类型（如“在 TN-C 系统中”、“室内敷设”）。
+- **Action (规定动作)**：强制性措施或物理要求（如“安装隔离开关”、“距离 >= 2.5m”）。
+- **Component (组件/实体)**：设备、系统或材料（如“隔离装置”、“多孔导管”）。
+- **Parameter (参数)**：来自表格或文本的数值（如“系数 k=1.2”）。
+
+### 2. 强制性核心关系
+- **HAS_CONDITION**：将“条款”或“动作”链接到其前提“条件”。（这对“在什么情况下”的查询至关重要）。
+- **MANDATES / PROHIBITS**：将“条款”链接到其规定的强制或禁止“动作”。
+- **IN_SITUATION**：条件与动作之间的直接链接，用于快速推理。
+- **APPLIES_TO**：将“条款/动作/条件”链接到特定的“组件”。
+
+### 3. 提取精度
+- **规范命名**：对于条款，捕获精确的编号。
+- **逻辑重于文本**：如果句子说“当发生 X 时，必须执行 Y”，请提取：
+  - 实体(type=Condition, name="发生 X")
+  - 实体(type=Action, name="执行 Y")
+  - 关系(source="发生 X", target="执行 Y", type="IN_SITUATION")
 """
 
+
 _OUTPUT_FORMAT = """
-## 📥 Output Format
-Return ONLY valid JSON:
+## 📥 输出格式
+仅返回有效的 JSON 格式：
 {{
   "entities": [
-    {{"name": "Full Name", "type": "OntologyType", "description": "Concise but meaningful summary of what this is based on text", "attributes": {{"key": "value"}}}}
+    {{"name": "完整名称", "type": "本体类型", "description": "基于文本的简明中文摘要", "attributes": {{"键": "值"}}}}
   ],
   "relations": [
-    {{"source": "Full Name", "target": "Full Name", "type": "ONTOLOGY_TYPE", "fact": "Detailed context."}}
+    {{"source": "完整名称", "target": "完整名称", "type": "关系类型", "fact": "详细的中文上下文描述。"}}
   ]
 }}"""
 

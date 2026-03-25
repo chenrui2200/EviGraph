@@ -5,6 +5,7 @@ Supports text extraction from PDF, Markdown, TXT files with metadata tracking
 
 import os
 import json
+import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
@@ -97,6 +98,7 @@ class FileParser:
     def _extract_chunks_from_pdf(file_path: str, filename: str) -> List[TextChunk]:
         """Extract text from PDF page by page with coordinates and table support"""
         import logging
+        import time
         logger = logging.getLogger('mirofish.file_parser')
 
         try:
@@ -106,6 +108,7 @@ class FileParser:
             return FileParser._extract_chunks_with_pypdf(file_path, filename)
 
         chunks = []
+        start_time = time.time()
         try:
             with fitz.open(file_path) as doc:
                 total_pages = len(doc)
@@ -113,8 +116,23 @@ class FileParser:
                     logger.warning(f"PDF {filename} has 0 pages.")
                     return []
 
+                logger.info(f"[PDF START] {filename}: Opening PDF with {total_pages} pages...")
+                logger.info(f"[PDF START] Estimated time: {total_pages * 0.5:.1f} seconds (based on 0.5s/page)")
+
                 for i, page in enumerate(doc):
                     page_num = i + 1
+                    page_start = time.time()
+
+                    # Log every page for better tracking
+                    if page_num % 5 == 0 or page_num == 1 or page_num == total_pages:
+                        elapsed = time.time() - start_time
+                        avg_time = elapsed / page_num if page_num > 0 else 0
+                        eta = avg_time * (total_pages - page_num)
+                        logger.info(
+                            f"[PDF PROGRESS] {filename}: page {page_num}/{total_pages} "
+                            f"({page_num*100//total_pages}%) | elapsed: {elapsed:.1f}s | ETA: {eta:.1f}s"
+                        )
+
                     # Get page size (width, height)
                     page_rect = page.rect
                     pw, ph = page_rect.width, page_rect.height
@@ -223,6 +241,21 @@ class FileParser:
 
                     if page_chunks:
                         chunks.extend(page_chunks)
+
+                    # Page-level timing log
+                    page_elapsed = time.time() - page_start
+                    if page_num % 10 == 0 or page_num == total_pages:
+                        logger.debug(f"[PDF PAGE] {filename}: page {page_num} completed in {page_elapsed:.2f}s")
+
+                # Final summary
+                total_elapsed = time.time() - start_time
+                table_count = sum(1 for c in chunks if c.metadata.get("type") == "table")
+                text_count = sum(1 for c in chunks if c.metadata.get("type") == "pdf")
+                logger.info(
+                    f"[PDF COMPLETE] {filename}: extracted {len(chunks)} chunks "
+                    f"({table_count} tables + {text_count} text blocks) "
+                    f"in {total_elapsed:.1f}s ({total_pages} pages)"
+                )
 
         except Exception as e:
             import traceback
@@ -413,49 +446,69 @@ def split_text_into_chunks(
 ) -> List[str]:
     """
     Enhanced text splitter for engineering standards.
-    Priority:
-    1. Split by clause patterns (e.g., 3.1.1, 第x.x条)
-    2. Split by double newlines (paragraphs)
-    3. Split by standard sentence ends
+    Supports hierarchical patterns (Chapter, Section, Clause, Term).
     """
     import re
 
-    # Pattern for clause headers: 1.1.1, 3.2, 第五条, etc.
-    # Matches digits at start of line or after double newline
-    clause_pattern = r'(?:\n\n|^)(\d+\.\d+(?:\.\d+)?)\s+'
+    # Hierarchy patterns for GB standards:
+    # 1. Chapter (第x章)
+    # 2. Section (x.x)
+    # 3. Clause (x.x.x)
+    # 4. Term (Specific to definitions, often 2.0.x)
+    # 5. Formula (e.g., (7.2.1-1) or 公式 7.2.1)
+
+    patterns = [
+        # Chapter header (e.g., 第7章 布线)
+        r'(?:\n\n|^)(第[一二三四五六七八九十\d]+[章篇]\s+[^\n]+)',
+        # Section header (e.g., 7.6 配电箱)
+        r'(?:\n\n|^)(\d+\.\d+\s+[^\n]+)',
+        # Clause header (e.g., 7.6.20 条款内容)
+        r'(?:\n\n|^)(\d+\.\d+\.\d+(?:\s+[^\n]+)?)',
+        # Term header (e.g., 2.0.1 预期接触电压)
+        r'(?:\n\n|^)(2\.0\.\d+\s+[^\n]+)',
+        # Formula reference/header (e.g., (A.0.1-1) at start of line)
+        r'(?:\n\n|^)(\(\s*[A-Z]?\.\d+\.\d+(?:-\d+)?\s*\))'
+    ]
+
+    combined_pattern = '|'.join(patterns)
 
     if len(text) <= chunk_size:
         return [text] if text.strip() else []
 
-    # First, try to identify positions of clause headers
-    # We use these as "hard" break points to avoid cutting a rule in half
+    # Identify break points
     break_points = [0]
-    for match in re.finditer(clause_pattern, text):
+    for match in re.finditer(combined_pattern, text):
         break_points.append(match.start())
     break_points.append(len(text))
 
-    # Refine break points to ensure chunks are within reasonable size
-    # If a section between two clause headers is too long, we use standard splitters
+    # Deduplicate and sort break points
+    break_points = sorted(list(set(break_points)))
+
     refined_chunks = []
     for i in range(len(break_points) - 1):
         section = text[break_points[i]:break_points[i+1]].strip()
         if not section:
             continue
 
+        # If a single section is too large, split it further by paragraphs/sentences
         if len(section) <= chunk_size * 1.5:
             refined_chunks.append(section)
         else:
-            # Section too long, split further using standard logic
+            # Further split long sections
             start = 0
             while start < len(section):
                 end = start + chunk_size
                 if end < len(section):
-                    # Try to find a good separator within the look-back window
-                    for sep in ['\n\n', '。', '！', '？', '.\n', '?\n', '. ']:
+                    # Prefer splitting at paragraph or sentence
+                    best_sep = -1
+                    for sep in ['\n\n', '。', '！', '？', '.\n', '?\n']:
                         last_sep = section[start:end].rfind(sep)
                         if last_sep != -1 and last_sep > chunk_size * 0.4:
-                            end = start + last_sep + len(sep)
+                            best_sep = last_sep + len(sep)
                             break
+
+                    if best_sep != -1:
+                        end = start + best_sep
 
                 chunk = section[start:end].strip()
                 if chunk:

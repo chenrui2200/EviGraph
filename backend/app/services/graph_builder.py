@@ -252,3 +252,149 @@ class GraphBuilderService:
     def delete_graph(self, graph_id: str):
         """Delete graph"""
         self.storage.delete_graph(graph_id)
+
+    # ========================================================================
+    # 多层级分块支持（新增）
+    # ========================================================================
+
+    def add_hierarchical_chunks(
+        self,
+        graph_id: str,
+        hierarchical_result: "HierarchicalChunkResult",
+        progress_callback: Optional[Callable] = None
+    ) -> List[str]:
+        """
+        添加多层级分块到图谱
+
+        同时创建Episode节点和Entity节点，构建知识图谱：
+        - Clause -> Entity节点（Clause类型）
+        - Formula/Parameter -> Entity节点（相应类型）
+        - Episode -> Entity的MENTIONS关系
+        - 实体之间的交叉引用关系
+
+        Args:
+            graph_id: 图谱ID
+            hierarchical_result: HierarchicalChunkResult对象
+            progress_callback: 进度回调
+
+        Returns:
+            episode_uuid列表
+        """
+        from ..models.clause import HierarchicalChunkResult
+
+        all_chunks = hierarchical_result.to_episode_list()
+        total = len(all_chunks)
+        episode_ids = []
+
+        logger.info(f"[hierarchical] Processing {total} hierarchical chunks")
+
+        def wrapped_callback(processed, total_chunks):
+            """包装回调，将processed/total转换为进度百分比"""
+            if progress_callback:
+                # progress_ratio: 0-1 的浮点数
+                progress_ratio = processed / total_chunks if total_chunks > 0 else 0
+                # 映射到15-75%的进度
+                mapped_progress = 15 + int(progress_ratio * 60)
+                # 回调签名: (msg, progress_ratio, log=None)
+                log_msg = f"Processed {processed}/{total_chunks} chunks"
+                progress_callback(log_msg, mapped_progress / 100)
+
+        # 批量存储
+        for idx, chunk_dict in enumerate(all_chunks):
+            try:
+                # 使用add_hierarchical_chunk_with_entities创建Episode和Entity
+                episode_id = self.storage.add_hierarchical_chunk_with_entities(graph_id, chunk_dict)
+                if episode_id:  # Skip empty chunks
+                    episode_ids.append(episode_id)
+            except Exception as e:
+                logger.error(f"[hierarchical] Failed to add chunk: {e}")
+
+            if (idx + 1) % 10 == 0:
+                wrapped_callback(idx + 1, total)
+                logger.info(f"[hierarchical] Progress: {idx + 1}/{total}")
+
+        # 构建交叉引用关系
+        try:
+            logger.info("[hierarchical] Building cross-reference relations...")
+            cross_ref_count = self.storage.build_cross_ref_relations(graph_id)
+            logger.info(f"[hierarchical] Built {cross_ref_count} cross-reference relations")
+        except Exception as e:
+            logger.warning(f"[hierarchical] Failed to build cross-refs: {e}")
+
+        # 构建PART_OF层级关系
+        try:
+            logger.info("[hierarchical] Building hierarchical relations...")
+            hier_count = self.storage.build_hierarchical_relations(graph_id)
+            logger.info(f"[hierarchical] Built {hier_count} hierarchical relations")
+        except Exception as e:
+            logger.warning(f"[hierarchical] Failed to build hierarchical relations: {e}")
+
+        logger.info(f"[hierarchical] Complete: {len(episode_ids)} episodes created")
+        return episode_ids
+
+    def enrich_clauses_semantics(
+        self,
+        graph_id: str,
+        progress_callback: Optional[Callable] = None
+    ) -> int:
+        """
+        对条文进行LLM语义补充
+
+        Args:
+            graph_id: 图谱ID
+            progress_callback: 进度回调
+
+        Returns:
+            补充的条文数量
+        """
+        from ..services.semantic_enricher import SemanticEnricher
+
+        enricher = SemanticEnricher()
+
+        # 获取未语义化的条文
+        unenriched = self.storage.get_unenriched_clauses(graph_id, limit=100)
+        total = len(unenriched)
+
+        if total == 0:
+            logger.info("[semantic] No unenriched clauses found")
+            return 0
+
+        logger.info(f"[semantic] Enriching {total} clauses...")
+
+        def wrapped_callback(progress_ratio):
+            if progress_callback:
+                progress_callback(progress_ratio)
+
+        # 批量语义补充
+        enrichments = enricher.enrich_clauses(
+            unenriched,
+            progress_callback=wrapped_callback
+        )
+
+        # 更新Neo4j
+        for enrichment in enrichments:
+            try:
+                # 查找对应条文
+                clause_uuid = None
+                for uc in unenriched:
+                    if uc.get('clause_id') == enrichment.clause_id:
+                        clause_uuid = uc.get('uuid')
+                        break
+
+                if clause_uuid:
+                    # 生成关系
+                    relations = enricher.generate_neo4j_relations(enrichment, clause_uuid)
+                    # 添加关系
+                    self.storage.add_clause_relations(
+                        graph_id,
+                        clause_uuid,
+                        relations,
+                        episode_ids=[]
+                    )
+                    # 标记已语义化
+                    self.storage.mark_clause_enriched(clause_uuid)
+            except Exception as e:
+                logger.warning(f"[semantic] Failed to process enrichment: {e}")
+
+        logger.info(f"[semantic] Enriched {len(enrichments)} clauses")
+        return len(enrichments)

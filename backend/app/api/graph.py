@@ -94,30 +94,49 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                     progress=5
                 )
                 chunks_data = ProjectManager.get_chunks(project_id)
+                use_hierarchical = True  # 启用多层级分块
+
                 if chunks_data:
                     # Convert dicts back to TextChunk objects
                     from ..utils.file_parser import TextChunk
                     initial_chunks = [TextChunk(c["text"], c["metadata"]) for c in chunks_data]
 
-                    # Split into smaller chunks preserving metadata
-                    chunks = TextProcessor.split_chunks(
-                        initial_chunks,
-                        chunk_size=project.chunk_size,
-                        overlap=project.chunk_overlap,
-                        semantic=project.use_semantic
-                    )
-                    build_logger.info(f"Using {len(chunks)} chunks with metadata from chunks.json")
+                    if use_hierarchical:
+                        # 使用多层级语义分块（替代原有split_chunks）
+                        build_logger.info(f"Using hierarchical chunking (Level-1/2/3)")
+                        task_manager.update_task(
+                            task_id,
+                            message="Performing hierarchical semantic chunking...",
+                            progress=5
+                        )
+                        hierarchical_result = TextProcessor.hierarchical_chunk(initial_chunks)
+                        total_chunks = hierarchical_result.total_chunks
+                        build_logger.info(f"Hierarchical chunking complete: {total_chunks} chunks")
+                    else:
+                        # Split into smaller chunks preserving metadata (legacy)
+                        chunks = TextProcessor.split_chunks(
+                            initial_chunks,
+                            chunk_size=project.chunk_size,
+                            overlap=project.chunk_overlap,
+                            semantic=project.use_semantic
+                        )
+                        total_chunks = len(chunks)
+                        build_logger.info(f"Using {len(chunks)} chunks with metadata from chunks.json")
                 else:
                     # Fallback to plain text splitting
                     build_logger.warning("chunks.json not found, falling back to plain text splitting")
                     text = ProjectManager.get_extracted_text(project_id)
-                    chunks = TextProcessor.split_text(
-                        text,
-                        chunk_size=project.chunk_size,
-                        overlap=project.chunk_overlap
-                    )
-
-                total_chunks = len(chunks)
+                    if use_hierarchical:
+                        build_logger.info("Using hierarchical chunking for fallback text")
+                        hierarchical_result = TextProcessor.hierarchical_chunk_text(text)
+                        total_chunks = hierarchical_result.total_chunks
+                    else:
+                        chunks = TextProcessor.split_text(
+                            text,
+                            chunk_size=project.chunk_size,
+                            overlap=project.chunk_overlap
+                        )
+                        total_chunks = len(chunks)
 
                 # Create graph (OR RESUME EXISTING)
                 if project.graph_id and not force:
@@ -166,12 +185,20 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                     progress=15
                 )
 
-                episode_uuids = builder.add_text_batches(
-                    graph_id,
-                    chunks,
-                    batch_size=5,
-                    progress_callback=add_progress_callback
-                )
+                if use_hierarchical and 'hierarchical_result' in dir():
+                    # 使用多层级分块存储
+                    episode_uuids = builder.add_hierarchical_chunks(
+                        graph_id,
+                        hierarchical_result,
+                        progress_callback=add_progress_callback
+                    )
+                else:
+                    episode_uuids = builder.add_text_batches(
+                        graph_id,
+                        chunks,
+                        batch_size=5,
+                        progress_callback=add_progress_callback
+                    )
 
                 # Update status to embedding generation
                 project.status = ProjectStatus.GRAPH_EMBEDDING
@@ -592,16 +619,27 @@ def generate_ontology():
                     document_texts = [existing_text]
                 else:
                     task_manager.update_task(task_id, status=TaskStatus.PROCESSING, progress=5, message="Starting text extraction...")
-                    for file_info in saved_files:
+                    total_files = len(saved_files)
+                    for idx, file_info in enumerate(saved_files):
                         orig_name = file_info["original_filename"]
-                        task_manager.update_task(task_id, log=f"Extracting chunks from {orig_name}...")
+                        # Range 5% - 35%
+                        current_progress = 5 + int((idx / total_files) * 30)
+
+                        msg = f"Extracting text from {orig_name} ({idx + 1}/{total_files})..."
+                        task_manager.update_task(
+                            task_id,
+                            progress=current_progress,
+                            message=msg,
+                            log=msg
+                        )
 
                         try:
                             chunks = FileParser.extract_chunks(file_info["path"], override_filename=orig_name)
                             if not chunks:
                                 task_manager.update_task(task_id, log=f"Warning: No text extracted from {orig_name}")
                             else:
-                                task_manager.update_task(task_id, log=f"Successfully extracted {len(chunks)} chunks from {orig_name}")
+                                success_msg = f"Successfully extracted {len(chunks)} chunks from {orig_name}"
+                                task_manager.update_task(task_id, log=success_msg)
                         except Exception as ee:
                             task_manager.update_task(task_id, log=f"Extraction failed for {orig_name}: {str(ee)}")
                             # Fallback
@@ -620,23 +658,14 @@ def generate_ontology():
                     ProjectManager.save_extracted_text(project.project_id, all_text)
                     ProjectManager.save_chunks(project.project_id, all_chunks_data)
 
-                task_manager.update_task(task_id, progress=40, message=f"Text ready ({len(all_text)} chars). Calling LLM...")
-                task_manager.update_task(task_id, log="Analyzing document structure for ontology generation...")
+                task_manager.update_task(task_id, progress=40, message=f"Text ready ({len(all_text)} chars). Loading fixed ontology...")
+                task_manager.update_task(task_id, log="Using fixed NormativeEngineeringOntology (replaces dynamic generation)...")
 
-                # Generate ontology
-                generator = OntologyGenerator()
-                task_manager.update_task(task_id, log="Calling LLM (Iterative Structural Analysis)...")
+                # 使用固定本体替代动态生成
+                from ..services.normative_ontology import NORMATIVE_ONTOLOGY
+                ontology = NORMATIVE_ONTOLOGY
 
-                all_chunks_objs = [TextChunk(c["text"], c["metadata"]) for c in all_chunks_data]
-
-                ontology = generator.generate(
-                    document_texts=document_texts,
-                    simulation_requirement=simulation_requirement,
-                    additional_context=additional_context if additional_context else None,
-                    chunks=all_chunks_objs
-                )
-
-                task_manager.update_task(task_id, log="LLM generation completed. Saving ontology schema...")
+                task_manager.update_task(task_id, log="Fixed ontology loaded. Saving to project...")
 
                 # Save to project
                 if ontology:
@@ -644,7 +673,7 @@ def generate_ontology():
                         "entity_types": ontology.get("entity_types", []),
                         "edge_types": ontology.get("edge_types", [])
                     }
-                    project.analysis_summary = ontology.get("analysis_summary", "")
+                    project.analysis_summary = "使用固定工程规范本体定义（Section, Clause, Term, Component, Condition, Action, Requirement, Parameter, Formula）"
                 else:
                     project.ontology = {"entity_types": [], "edge_types": []}
                     project.analysis_summary = ""

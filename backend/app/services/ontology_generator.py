@@ -14,205 +14,154 @@ logger = get_logger('mirofish.ontology_generator')
 
 
 # System prompt for ontology generation
-ONTOLOGY_SYSTEM_PROMPT = """You are a professional knowledge graph ontology design expert specializing in **Social Media Simulation and Digital Twins**.
+ONTOLOGY_SYSTEM_PROMPT = """你是一位专业的知识图谱本体设计专家，专注于**社交媒体仿真与数字孪生**。
 
-Your task is to analyze text content and design a schema (Ontology) that will be used to extract entities and relationships. This schema is the foundation for creating AI Agents that simulate real-world behavior on social media.
+你的任务是分析文本内容并设计一个模式（Ontology），该模式将用于提取实体和关系。这个模式是创建模拟社交媒体现实行为的 AI Agent 的基础。
 
-**Important: You must output valid JSON format data, do not output anything else.**
+**重要：你必须输出有效的 JSON 格式数据，不要输出任何其他内容。**
 
-## 🎯 Design Goal: Creating a "Simulatable" World
+## 🌐 语言要求
+**必须使用简体中文**：所有定义的实体类型名称（PascalCase 英文除外）、描述、属性名称及描述、关系类型描述，必须统一使用简体中文。
 
-We are building a **Social Media Opinion Simulation System**. To make this effective, your ontology must focus on **ACTORS**—entities that can post, respond, influence, and be influenced.
+## 🎯 设计目标：创建一个“可仿真”的世界
 
-### 1. Entity Guidelines
-- **Real-World Subjects Only**: Every entity must be a subject capable of voicing opinions or being a stakeholder.
-- **Hierarchical Thinking**: Design specific roles (e.g., `GraduateStudent`, `TechCEO`, `StateMedia`) instead of just broad categories.
-- **NO Abstract Concepts**: Do not define "Public Opinion", "Emotion", or "Event" as entities. These are properties or contexts, not actors.
+我们正在构建一个**社交媒体舆情仿真系统**。为了使其有效，你的本体必须关注**行动者（ACTORS）**——即能够发布、响应、影响和被影响的实体。
 
-### 2. Relationship Guidelines
-- **Structural Links**: Employment, affiliation, family (e.g., `WORKS_FOR`, `MEMBER_OF`).
-- **Interaction/Attitude Links**: Support, opposition, regulation, reporting (e.g., `SUPPORTS`, `CRITICIZES`, `REGULATES`).
-- **Information Flow**: Who influences whom, who provides information to whom.
+### 1. 实体准则
+- **仅限现实世界主体**：每个实体必须是能够表达观点或作为利益相关者的主体。
+- **层次化思维**：设计具体的角色（例如 `研究生`、`技术CEO`、`官方媒体`）而不仅仅是宽泛的类别。
+- **禁止抽象概念**：不要将“舆论”、“情绪”或“事件”定义为实体。这些是属性或上下文，而不是行动者。
 
-### 3. Attribute Guidelines (For Persona Creation)
-- Attributes should help define an AI Agent's "Personality" and "Social Identity".
-- Recommended: `vulnerability`, `political_stance`, `social_influence`, `expertise_area`.
-- **System Reserved Words (DO NOT USE as attribute names)**: `name`, `uuid`, `group_id`, `created_at`, `summary`.
+### 2. 关系准则
+- **结构化链接**：雇佣、从属、家庭（例如 `WORKS_FOR`、`MEMBER_OF`）。
+- **互动/态度链接**：支持、反对、监管、报道（例如 `SUPPORTS`、`CRITICIZES`、`REGULATES`）。
+- **信息流**：谁影响谁，谁向谁提供信息。
 
-## 📋 Output Format (JSON)
+### 3. 属性准则（用于画像创建）
+- 属性应有助于定义 AI Agent 的“性格”和“社会身份”。
+- 推荐：`脆弱性`、`政治立场`、`社会影响力`、`专业领域`。
+- **系统保留词（请勿用作属性名）**：`name`、`uuid`、`group_id`、`created_at`、`summary`。
+
+## 📋 输出格式 (JSON)
 
 ```json
 {
     "entity_types": [
         {
             "name": "EntityTypeName (PascalCase)",
-            "description": "Definition focusing on their role in social media (English, <100 chars)",
+            "description": "简明的中文定义，说明其在社交媒体中的角色（不超过100字）",
             "attributes": [
                 {
                     "name": "attribute_name (snake_case)",
                     "type": "text",
-                    "description": "How this affects their behavior or opinions"
+                    "description": "说明此属性如何影响其行为或观点"
                 }
             ],
-            "examples": ["Real names or specific roles"]
+            "examples": ["中文具体角色或名称示例"]
         }
     ],
     "edge_types": [
         {
             "name": "RELATIONSHIP_NAME (UPPER_SNAKE_CASE)",
-            "description": "The nature of the connection (English, <100 chars)",
+            "description": "中文描述连接的性质（不超过100字）",
             "source_targets": [
                 {"source": "SourceType", "target": "TargetType"}
             ],
             "attributes": []
         }
     ],
-    "analysis_summary": "Analysis of the core conflicts and key actors in the text"
+    "analysis_summary": "对文本中核心冲突和关键行动者的中文分析总结"
 }
 ```
 
-## 📏 Strict Design Constraints
+## 📏 严格设计约束
 
-1. **Exact Quantity**: You must define **exactly 10 entity types**.
-2. **Fallback Strategy**: The last 2 types in your list MUST be:
-   - `Person`: Fallback for any natural person not fitting other categories.
-   - `Organization`: Fallback for any group or institution not fitting other categories.
-3. **Actor Focus**: At least 8 of your 10 entities should be types that can "own" a social media account.
-4. **Relationship Quantity**: Define 8-10 meaningful relationship types.
+1. **精确数量**：你必须定义**正好 10 个实体类型**。
+2. **备选策略**：列表中的最后两个类型必须是：
+   - `Person`: 用于不符合其他类别的任何自然人的备选。
+   - `Organization`: 用于不符合其他类别的任何团体或机构的备选。
+3. **行动者关注**：10 个实体中至少有 8 个应该是可以拥有社交媒体账号的类型。
+4. **关系数量**：定义 8-10 个有意义的关系类型。
 """
 
 
 # System prompt for ontology generation (Engineering Standard Mode)
-ENGINEERING_ONTOLOGY_PROMPT = """You are a professional knowledge graph ontology design expert specializing in **Industrial Engineering Standards, Technical Specifications, and Regulatory Compliance**.
+ENGINEERING_ONTOLOGY_PROMPT = """你是一位专业的知识图谱本体设计专家，专注于**工业工程标准、技术规范和监管合规**。
 
-Your task is to analyze engineering documents (like Power Distribution Codes, Safety Manuals, or Design Standards) and design a rigorous schema (Ontology) that captures the technical requirements with extreme precision.
+你的任务是分析工程文档（如配电规范、安全手册或设计标准），并设计一个能够支持“场景驱动推理”的规定性模式（Ontology）。
 
-**Important: You must output valid JSON format data, do not output anything else.**
+## 🌐 语言要求
+**必须使用简体中文**：除类型名称（英文）外，所有描述、属性及逻辑分析必须使用简体中文。
 
-## 🎯 Design Goal: Structural Knowledge for Reasoning and Verification
-We are building an **AI Engineering Compliance Auditor**. Every entity and relation must support logical validation and parameter checking.
+## 🎯 设计目标：结构化的规定性逻辑
+我们正在构建一个 **AI 工程合规审计员**。每个实体和关系必须支持逻辑验证：“在场景 X 中，针对组件 Z，强制执行什么动作 Y？”。
 
-### 1. Entity Guidelines
-- **Structural Nodes**: `Chapter`, `Section`, `Clause` (e.g., Clause 7.6.49), `SubItem`.
-- **Physical/Technical Entities**: Specific equipment models, materials (e.g., `ConcretePavement`, `PorousDuct`), specific components.
-- **Logic & Constraints**: `Requirement` (The core rule), `Parameter` (e.g., Slope, Depth, Thickness), `Threshold` (Limit values), `Condition` (When the rule applies).
-- **Metric-Focused Attributes**: For parameters, always include `unit` (e.g., %, m, mm), `min_value`, `max_value`, and `operator` (>=, <, etc.).
+### 1. 强制性核心实体类型
+你的设计中必须包含以下 8 种类型：
+- `Section`: 层级结构（如“第7章 布线”）。
+- `Clause`: 最小可执行单元（如“条款 3.1.1”）。
+- `Term`: 技术术语定义（如“预期接触电压”）。
+- `Component`: 物理主体（如“隔离装置”、“TN-C 系统”、“矿物绝缘电缆”）。
+- `Condition`: 前提条件或场景（如“室内明敷”、“短路条件”）。
+- `Action`: 具体措施或要求（如“安装隔离开关”、“采取防火封堵”）。
+- `Requirement`: 语气标签（如“必须”、“应”、“宜”、“严禁”）。
+- `Parameter`: 数值或表格（如“最小净距”、“系数 k”）。
+- `Formula`: 计算公式或逻辑表达式（如“附录 A 中的系数计算公式”）。
 
-### 2. Relationship Guidelines
-- **Structural (CRITICAL)**: `SUB_CLAUSE_OF`, `PART_OF`, `CONTAINED_IN`.
-- **Logical Flow**: `GOVERNS` (A clause governs a component), `SPECIFIES` (A clause specifies a parameter), `REFERENCES`, `REQUIRES`, `CONSTRAINS`.
-- **Constraint Links**: `HAS_PARAMETER`, `APPLIES_WHEN` (Linking requirements to specific scenarios).
+### 2. 强制性核心关系类型
+建立以下逻辑链接：
+- `DEFINES`: 术语 <-> 条款。
+- `PART_OF`: 条款 -> 章节。
+- `APPLIES_TO`: 条款 -> 组件。
+- `HAS_CONDITION`: 条款 -> 条件（将规则与其场景关联）。
+- `MANDATES` / `RECOMMENDS` / `PROHIBITS`: 条款 -> 动作（根据语气强度使用不同边）。
+- `IN_SITUATION`: 条件 -> 动作（加速推理的快捷方式）。
+- `REFERENCES`: 条款 -> 条款 / 外部标准。
+- `HAS_VALUE`: 参数 -> 条件 / 组件。
 
-## 📋 Output Format (JSON)
-[Same JSON structure as standard mode]
+## 📋 输出格式 (JSON)
+[与标准模式相同的 JSON 结构]
 
-## 📏 Strict Design Constraints
-1. **Granularity**: Do not group "Depth" and "Slope" into a single "Parameter". Define specific types if they have different validation logic.
-2. **Quantity**: Define **at least 20 and up to 40** specific entity types to ensure maximum technical detail retention.
-3. **Hierarchy**: At least 5 relationship types must represent hierarchical containment or logical derivation.
-4. **Standard Fallbacks**: Last 2 must be `Person` and `Organization`.
-"""
-
-# System prompt for iterative ontology generation (Engineering Standard Mode)
-ITERATIVE_ENGINEERING_PROMPT = """You are a professional knowledge graph ontology design expert specializing in **Industrial Engineering Standards and Regulatory Compliance**.
-
-## 🎯 Task: Iterative Structural Ontology Discovery
-Your task is to analyze a specific **Text Chunk** from a technical document and update/expand the current knowledge schema (Ontology).
-
-### 1. Document Structure Awareness
-Technical documents have rigorous hierarchy. You MUST identify:
-- **Structural Links**: How chunks relate via writing order (e.g., `PRECEDES`, `FOLLOWS`, `DEFINES_SCOPE_FOR`).
-- **Hierarchy**: `Clause` -> `SubItem` relationship.
-
-### 2. Descriptive Association
-Identify how technical nouns relate through description:
-- `DESCRIBES`: Technical specs describing equipment.
-- `CONSTRAINS`: Safety requirements constraining installation.
-- `LOCATES_AT`: Physical location relationship mentioned in text.
-
-### 3. Entity Precision
-Capture technical entities with maximum detail (e.g., `PorousDuct`, `CatchBasin`, `ConcreteBed`).
-
-## 📋 Input Context
-- **Current Draft Ontology**: The entity and edge types we have discovered so far.
-- **Current Text Chunk**: The new content to analyze.
-
-## 📤 Output Requirement
-Return ONLY valid JSON with two fields:
-1. `new_entity_types`: List of entity type definitions discovered in THIS chunk.
-2. `new_edge_types`: List of relationship type definitions discovered in THIS chunk.
-3. `structural_context`: A brief description of this chunk's position in the document (e.g., "Part of Chapter 7 regarding conduit laying").
-
-**Constraints**:
-- Keep descriptions concise.
-- Focus on technical nouns and logical verbs.
-"""
-
-# System prompt for iterative ontology generation (Engineering Standard Mode)
-ITERATIVE_ENGINEERING_PROMPT = """You are a professional knowledge graph ontology design expert specializing in **Industrial Engineering Standards, Technical Specifications, and Regulatory Compliance**.
-
-## 🎯 Task: High-Density Structural Ontology Discovery
-You are analyzing a sequence of **Multiple Text Chunks** from a technical document. Your goal is to design a schema (Ontology) that captures not just entities, but the **Writing Logic** and **Descriptive Associations** inherent in engineering standards.
-
-### 1. Identify Writing & Structural Logic
-Technical documents follow a strict flow. Identify relationship types like:
-- `PREREQUISITE_FOR`: One requirement must be met before another.
-- `ELABORATES_ON`: A later chunk provides details for a term mentioned earlier.
-- `GOVERNED_BY`: A component is governed by a specific safety clause.
-- `LOGICAL_FLOW`: Sequential steps in a process.
-
-### 2. Identify Descriptive & Functional Associations
-Identify how technical nouns (Entities) relate beyond simple physical connection:
-- `DEFINES`: A clause defines a technical term.
-- `SPECIFIES_LIMIT`: Linking equipment to its technical parameters (slope, depth, etc.).
-- `APPLIES_TO`: Linking a rule to a specific material or condition.
-
-### 3. Entity Precision
-Capture technical entities with maximum detail (e.g., `PorousDuct`, `CatchBasin`, `ConcreteBed`).
-
-## 📤 Output Requirement
-Return ONLY valid JSON with two fields:
-1. `new_entity_types`: List of entity type definitions discovered in these chunks.
-2. `new_edge_types`: List of relationship type definitions that capture the logical and descriptive links found.
-3. `analysis_summary`: A summary of the technical logic and document structure found in this window.
-
-**Constraint**: Focus on the logic between the lines.
+## 📏 严格设计约束
+1. **场景关注**：优先识别“条件”如何通过“条款”触发特定的“动作”。
+2. **精确性**：使用专业领域词汇捕获技术实体（例如使用 `PorousDuct` 而不仅仅是 `Duct`）。
+3. **数量**：定义 **15 到 30 个** 具体的实体类型，以确保技术细节的完整性。
 """
 
 # System prompt for iterative ontology generation (High-Fidelity Engineering KG)
-ITERATIVE_ENGINEERING_PROMPT = """You are a high-fidelity Knowledge Graph Architect specializing in **Technical Standard Digitization**.
+ITERATIVE_ENGINEERING_PROMPT = """你是一位专注于**技术标准数字化**的高保真知识图谱架构师。
 
-## 🎯 Mission: Exhaustive Structural Discovery
-Analyze the provided **Text Chunks** and design an UNRESTRICTED schema (Ontology) that perfectly maps the document's knowledge.
+## 🌐 语言要求
+**必须使用简体中文**：所有描述、逻辑分析及属性值必须使用简体中文。
 
-### 1. Technical Noun & Attribute Discovery (Entities)
-- Identify EVERY technical noun, material, equipment, and abstract technical concept.
-- If a noun has unique attributes (e.g., "Catch Basin" has "Drainage Capacity"), define a specific Entity Type for it.
-- **NO LIMITS**: Do not merge distinct concepts. Precision is paramount.
+## 🎯 任务：规定性逻辑映射
+分析提供的**文本块**，设计一个能够映射工程标准中“条件 -> 动作”逻辑的模式（Ontology）。
 
-### 2. Chunk as a Semantic Anchor
-- Treat `DocumentChunk` as a first-class entity.
-- Identify **Cross-References**: If text says "See Section X", "Refer to table Y", or "Consistent with rule Z", extract these as relationships between Chunks or between an Entity and a Chunk.
+### 1. 实体发现（要点）
+- **结构化**：`Section` (章节), `Clause` (条款 - 捕获如 7.6.20 这样的编号)。
+- **领域主体**：`Component` (设备、材料), `Term` (定义)。
+- **监管逻辑**：`Condition` ("如果/当"部分), `Action` ("执行/应"部分), `Requirement` ("必须/应该"的强度)。
+- **数据**：`Parameter` (表格数值), `Formula` (公式)。
 
-### 3. Deep Semantic Edge Discovery
-Exhaustively identify how entities relate:
-- **Structural**: `PART_OF`, `MEMBER_OF`, `COMPOSED_OF`.
-- **Descriptive**: `DEFINES` (Clause defines a term), `DESCRIBES_SPECS` (Text describes equipment properties).
-- **Logical/Regulatory**: `CONSTRAINS` (A rule restricts a parameter), `PREREQUISITE_FOR`, `GOVERNS`.
-- **Positional**: `FOLLOWS` (Writing sequence), `LOCATED_IN`.
+### 2. 语义边发现（逻辑）
+- **层级**：`PART_OF`, `SUB_CLAUSE_OF`。
+- **规定链**：`HAS_CONDITION` (将规则链接到上下文), `MANDATES/PROHIBITS` (将规则链接到动作)。
+- **模糊链接**：`APPLIES_TO`, `REFERENCES`, `DEFINES`。
+- **数据绑定**：`HAS_VALUE` (将参数链接到组件/条件)。
 
-## 📤 Output Requirement
-Return ONLY valid JSON:
+## 📤 输出要求
+仅返回有效的 JSON 格式：
 {
   "new_entity_types": [
-    {"name": "PreciseType", "description": "Strict technical definition", "attributes": [{"name": "attr", "type": "text"}]}
+    {"name": "PreciseType", "description": "中文严谨定义", "attributes": [{"name": "attr", "type": "text"}]}
   ],
   "new_edge_types": [
-    {"name": "DEEP_RELATION_NAME", "description": "Specific nature of linkage", "source_targets": [{"source": "TypeA", "target": "TypeB"}]}
+    {"name": "LOGIC_RELATION_NAME", "description": "中文描述连接的性质", "source_targets": [{"source": "TypeA", "target": "TypeB"}]}
   ],
-  "logic_analysis": "Briefly explain the document flow and noun associations found here."
+  "logic_analysis": "简要分析并用中文说明在这些文本块中发现的规定性逻辑（条件 -> 动作）。"
 }
 """
+
 
 class OntologyGenerator:
     """

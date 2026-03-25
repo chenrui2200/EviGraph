@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">MIROFISH OFFLINE</div>
+        <div class="brand" @click="router.push('/')">Knowledge EviGrap</div>
       </div>
       
       <div class="header-center">
@@ -132,7 +132,7 @@ const statusText = computed(() => {
   if (error.value) return 'Error'
   if (currentPhase.value >= 2) return 'Ready'
   if (currentPhase.value === 1) return 'Building Graph'
-  if (currentPhase.value === 0) return 'Generating Ontology'
+  if (currentPhase.value === 0) return 'Analyzing Chunks'
   return 'Initializing'
 })
 
@@ -234,9 +234,9 @@ const handleNewProject = async () => {
         startPollingTask(taskId, 'ontology')
       }
 
-      addLog(`Ontology generation task started for project ${res.data.project_id}`)
+      addLog(`Chunks analysis task started for project ${res.data.project_id}`)
     } else {
-      error.value = res.error || 'Ontology generation failed'
+      error.value = res.error || 'Chunks analysis failed'
       addLog(`Error generating ontology: ${error.value}`)
     }
   } catch (err) {
@@ -304,7 +304,7 @@ const updatePhaseByStatus = (status) => {
     case 'graph_chunking':
     case 'graph_embedding':
     case 'graph_indexing':
-      currentPhase.value = 1; break; // Ontology done, graph build in progress
+      currentPhase.value = 1; break; // Chunks done, graph build in progress
     case 'graph_completed':
       currentPhase.value = 2; break;
     case 'failed':
@@ -447,7 +447,7 @@ const updateTaskUI = (taskData, type) => {
 
 const handleTaskFinished = async (taskData, type) => {
   if (taskData.status === 'completed') {
-    addLog(`${type === 'ontology' ? 'Ontology generation' : 'Graph build'} task completed.`)
+    addLog(`${type === 'ontology' ? 'Chunks analysis' : 'Graph build'} task completed.`)
 
     if (type === 'ontology') {
       ontologyProgress.value = null
@@ -467,7 +467,7 @@ const handleTaskFinished = async (taskData, type) => {
     }
   } else if (taskData.status === 'failed') {
     error.value = taskData.error || 'Task failed'
-    addLog(`${type === 'ontology' ? 'Ontology generation' : 'Graph build'} task failed: ${taskData.error}`)
+    addLog(`${type === 'ontology' ? 'Chunks analysis' : 'Graph build'} task failed: ${taskData.error}`)
   }
 }
 

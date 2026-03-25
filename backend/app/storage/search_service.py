@@ -3,6 +3,7 @@ SearchService — hybrid search (vector + keyword) over Neo4j graph data.
 
 Replaces Zep Cloud's built-in search with reranker.
 Scoring: 0.7 * vector_score + 0.3 * keyword_score (BM25 via fulltext index).
+Features graceful degradation when vector indexes are not available.
 """
 
 import logging
@@ -13,6 +14,48 @@ from neo4j import Session as Neo4jSession
 from .embedding_service import EmbeddingService
 
 logger = logging.getLogger('mirofish.search')
+
+
+class IndexStatus:
+    """Track vector index availability for graceful degradation."""
+
+    def __init__(self):
+        self.entity_embedding: bool = False
+        self.episode_embedding: bool = False
+        self.fact_embedding: bool = False
+        self._checked: bool = False
+
+    def check_indexes(self, session: Neo4jSession):
+        """Check which vector indexes exist in the database."""
+        if self._checked:
+            return
+
+        try:
+            result = session.run("SHOW INDEXES")
+            existing = [record.get("name") or record.get("indexName", "") for record in result]
+
+            self.entity_embedding = "entity_embedding" in existing
+            self.episode_embedding = "episode_embedding" in existing
+            self.fact_embedding = "fact_embedding" in existing
+
+            if not all([self.entity_embedding, self.episode_embedding, self.fact_embedding]):
+                logger.warning(
+                    f"⚠️ Vector indexes missing - using keyword search only. "
+                    f"Available: entity={self.entity_embedding}, "
+                    f"episode={self.episode_embedding}, "
+                    f"fact={self.fact_embedding}"
+                )
+            else:
+                logger.info("✅ All vector indexes are available for semantic search")
+
+            self._checked = True
+        except Exception as e:
+            logger.warning(f"Failed to check index status: {e}")
+            self._checked = True
+
+
+# Global index status tracker
+_index_status = IndexStatus()
 
 # Cypher for vector search on edges (facts)
 _VECTOR_SEARCH_EDGES = """
@@ -92,12 +135,19 @@ class SearchService:
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         """Search raw text chunks (episodes)."""
+        # Check index availability
+        _index_status.check_indexes(session)
+
         query_vector = self.embedding.embed(query)
 
-        # Vector search
-        vector_results = self._run_episode_vector_search(
-            session, graph_id, query_vector, limit * 2
-        )
+        # Vector search (if index available)
+        vector_results = []
+        if _index_status.episode_embedding:
+            vector_results = self._run_episode_vector_search(
+                session, graph_id, query_vector, limit * 2
+            )
+        else:
+            logger.debug("Skipping episode vector search (index not available)")
 
         # Keyword search
         keyword_results = self._run_episode_keyword_search(
@@ -156,12 +206,19 @@ class SearchService:
 
         Returns list of dicts with edge properties + 'score'.
         """
+        # Check index availability
+        _index_status.check_indexes(session)
+
         query_vector = self.embedding.embed(query)
 
-        # Vector search
-        vector_results = self._run_edge_vector_search(
-            session, graph_id, query_vector, limit * 2
-        )
+        # Vector search (if index available)
+        vector_results = []
+        if _index_status.fact_embedding:
+            vector_results = self._run_edge_vector_search(
+                session, graph_id, query_vector, limit * 2
+            )
+        else:
+            logger.debug("Skipping edge vector search (index not available)")
 
         # Keyword search
         keyword_results = self._run_edge_keyword_search(
@@ -186,11 +243,19 @@ class SearchService:
 
         Returns list of dicts with node properties + 'score'.
         """
+        # Check index availability
+        _index_status.check_indexes(session)
+
         query_vector = self.embedding.embed(query)
 
-        vector_results = self._run_node_vector_search(
-            session, graph_id, query_vector, limit * 2
-        )
+        # Vector search (if index available)
+        vector_results = []
+        if _index_status.entity_embedding:
+            vector_results = self._run_node_vector_search(
+                session, graph_id, query_vector, limit * 2
+            )
+        else:
+            logger.debug("Skipping node vector search (index not available)")
 
         keyword_results = self._run_node_keyword_search(
             session, graph_id, query, limit * 2

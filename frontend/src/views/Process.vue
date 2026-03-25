@@ -2,7 +2,7 @@
   <div class="process-page">
     <!-- Top navigation bar -->
     <nav class="navbar">
-      <div class="nav-brand" @click="goHome">MIROFISH OFFLINE</div>
+      <div class="nav-brand" @click="goHome">Knowledge EviGrap</div>
 
       <!-- Center step indicator -->
       <div class="nav-center">
@@ -189,7 +189,7 @@
                 <line x1="50" y1="72" x2="74" y2="66" stroke="#000" stroke-width="1"/>
               </svg>
             </div>
-            <p class="waiting-text">Waiting for ontology generation</p>
+            <p class="waiting-text">Waiting for chunks analysis</p>
             <p class="waiting-hint">Graph construction will start automatically after generation completes</p>
           </div>
           
@@ -234,7 +234,7 @@
             <div class="phase-header">
               <span class="phase-num">01</span>
               <div class="phase-info">
-                <div class="phase-title">本体建模 (Ontology)</div>
+                <div class="phase-title">智能Chunks分析</div>
                 <div class="phase-api">/api/graph/ontology/generate</div>
               </div>
               <span class="phase-status" :class="getPhaseStatusClass(0)">
@@ -246,7 +246,7 @@
               <div class="detail-section">
                 <div class="detail-label">阶段描述</div>
                 <div class="detail-content">
-                  上传文档后，LLM 会分析内容并自动生成适用于知识图谱仿真的本体结构（包括实体类型和关系类型）。
+                  上传文档后，系统会进行多层级语义分块，提取条文、公式、表格等结构化信息，构建工程规范本体。
                 </div>
               </div>
               
@@ -295,7 +295,7 @@
               
               <!-- Waiting state -->
               <div class="detail-section waiting-state" v-if="!projectData?.ontology && currentPhase === 0 && !ontologyProgress">
-                <div class="waiting-hint">Waiting for ontology generation...</div>
+                <div class="waiting-hint">Waiting for chunks analysis...</div>
               </div>
             </div>
           </div>
@@ -321,9 +321,9 @@
                 </div>
               </div>
 
-              <!-- Waiting for ontology completion -->
+              <!-- Waiting for chunks analysis completion -->
               <div class="detail-section waiting-state" v-if="currentPhase < 1">
-                <div class="waiting-hint">等待本体生成完成...</div>
+                <div class="waiting-hint">等待Chunks分析完成...</div>
               </div>
               
               <!-- Build progress -->
@@ -484,7 +484,7 @@
           <span class="log-id">{{ currentProjectId || '未关联项目' }}</span>
         </div>
         <div class="header-right">
-          <span v-if="currentPhase === 0" class="log-status pulse">本体生成中</span>
+          <span v-if="currentPhase === 0" class="log-status pulse">Chunks分析中</span>
           <span v-else-if="currentPhase === 1" class="log-status pulse">图谱构建中</span>
           <span v-else-if="currentPhase === 2" class="log-status success">已完成</span>
         </div>
@@ -591,7 +591,7 @@ const statusText = computed(() => {
   if (error.value) return 'Build Failed'
   if (currentPhase.value >= 2) return 'Build Complete'
   if (currentPhase.value === 1) return 'Building Graph'
-  if (currentPhase.value === 0) return 'Generating Ontology'
+  if (currentPhase.value === 0) return 'Analyzing Chunks'
   return 'Initializing'
 })
 
@@ -772,7 +772,7 @@ const handleNewProject = async () => {
 
   try {
     loading.value = true
-    currentPhase.value = 0 // Ontology generation phase
+    currentPhase.value = 0 // Chunks analysis phase
     ontologyProgress.value = { message: 'Uploading files and analyzing documents...' }
 
     // Build FormData
@@ -802,7 +802,7 @@ const handleNewProject = async () => {
       const taskId = response.data.task_id
       startPollingTask(taskId, 'ontology')
     } else {
-      error.value = response.error || 'Ontology generation failed'
+      error.value = response.error || 'Chunks analysis failed'
     }
   } catch (err) {
     console.error('Handle new project error:', err)

@@ -51,6 +51,16 @@ CREATE INDEX episode_graph_id IF NOT EXISTS
 FOR (e:Episode) ON (e.graph_id)
 """
 
+CREATE_EPISODE_SOURCE_INDEX = """
+CREATE INDEX episode_source IF NOT EXISTS
+FOR (e:Episode) ON (e.source)
+"""
+
+CREATE_EPISODE_CHUNK_INDEX = """
+CREATE INDEX episode_chunk_index IF NOT EXISTS
+FOR (e:Episode) ON (e.chunk_index)
+"""
+
 # Vector indexes (Neo4j 5.11+)
 def get_entity_vector_index_query(dimension: int = 768) -> str:
     return f"""
@@ -116,6 +126,8 @@ def get_all_schema_queries(dimension: int = 768) -> list:
         CREATE_DOC_GRAPH_ID_INDEX,
         CREATE_PAGE_GRAPH_ID_INDEX,
         CREATE_EPISODE_GRAPH_ID_INDEX,
+        CREATE_EPISODE_SOURCE_INDEX,
+        CREATE_EPISODE_CHUNK_INDEX,
         get_entity_vector_index_query(dimension),
         get_relation_vector_index_query(dimension),
         get_episode_vector_index_query(dimension),
