@@ -128,8 +128,8 @@ class HierarchicalChunker:
         """
         result = HierarchicalChunkResult()
 
-        # 收集每个chunk的来源信息
-        chunk_sources: Dict[int, Dict[str, Any]] = {}  # text_position -> {source, page}
+        # 收集每个chunk的来源信息 - position -> {source, page}
+        chunk_sources: Dict[int, Dict[str, Any]] = {}
 
         # 合并所有文本，同时记录每个字符的来源
         text_parts = []
@@ -148,32 +148,66 @@ class HierarchicalChunker:
 
         self.logger.info(f"开始多层级分块，原始文本长度: {len(full_text)}")
 
-        # Level-1: 章节分割
+        # Level-1: 章节分割 (返回位置信息)
         sections = self._split_by_chapters(full_text)
-        # 为每个section添加来源信息
+        # 为每个section添加来源信息 (基于位置匹配)
         for section in sections:
-            self._assign_source_info(section, chunk_sources)
+            # 查找章节在全文中的位置
+            section_pos = full_text.find(section.content)
+            if section_pos >= 0:
+                self._assign_source_info_by_pos(section, chunk_sources, section_pos)
+            else:
+                self._assign_source_info(section, chunk_sources)
         result.sections = sections
         self.logger.info(f"Level-1 章节级: {len(sections)} 个章节")
 
-        # Level-2: 条文解析
-        clauses = self._extract_clauses_from_text(full_text)
-        # 为每个clause添加来源信息
-        for clause in clauses:
-            self._assign_source_info(clause, chunk_sources)
-        result.clauses = clauses
-        self.logger.info(f"Level-2 条文级: {len(clauses)} 个条文")
+        # Level-2: 条文解析 (返回位置信息)
+        clauses_with_pos = self._extract_clauses_from_text(full_text)
+        # 为每个clause添加来源信息 (基于位置匹配)
+        for clause, start_pos in clauses_with_pos:
+            self._assign_source_info_by_pos(clause, chunk_sources, start_pos)
+        result.clauses = [c[0] for c in clauses_with_pos]
+        self.logger.info(f"Level-2 条文级: {len(clauses_with_pos)} 个条文")
 
-        # Level-3: 要素提取
-        elements = self._extract_elements(full_text)
-        # 为每个element添加来源信息
-        for element in elements:
-            self._assign_source_info(element, chunk_sources)
-        result.elements = elements
-        self.logger.info(f"Level-3 要素级: {len(elements)} 个要素")
+        # Level-3: 要素提取 (返回位置信息)
+        elements_with_pos = self._extract_elements(full_text)
+        # 为每个element添加来源信息 (基于位置匹配)
+        for element, start_pos in elements_with_pos:
+            self._assign_source_info_by_pos(element, chunk_sources, start_pos)
+        result.elements = [e[0] for e in elements_with_pos]
+        self.logger.info(f"Level-3 要素级: {len(elements_with_pos)} 个要素")
 
         self.logger.info(f"分块完成，总计: {result.total_chunks} 个chunk")
         return result
+
+    def _assign_source_info_by_pos(self, chunk: 'HierarchicalChunk',
+                                     chunk_sources: Dict[int, Dict[str, Any]],
+                                     chunk_pos: int) -> None:
+        """
+        根据chunk在全文中的位置，匹配正确的source和page
+
+        遍历chunk_sources，找到chunk_pos所在的source区间
+        """
+        if not chunk.content or not chunk_sources:
+            return
+
+        # 找到chunk_pos所在的source区间
+        sorted_positions = sorted(chunk_sources.keys())
+
+        # 找到最后一个 <= chunk_pos 的位置
+        matched_pos = None
+        for pos in sorted_positions:
+            if pos <= chunk_pos:
+                matched_pos = pos
+            else:
+                break
+
+        if matched_pos is not None:
+            source_info = chunk_sources[matched_pos]
+            if source_info.get("source"):
+                chunk.source = source_info.get("source")
+            if source_info.get("page") is not None:
+                chunk.page = source_info.get("page")
 
     def _assign_source_info(self, chunk: 'HierarchicalChunk', chunk_sources: Dict[int, Dict[str, Any]]) -> None:
         """
@@ -277,11 +311,12 @@ class HierarchicalChunker:
 
         return sections
 
-    def _extract_clauses_from_text(self, text: str) -> List[ClauseSegment]:
+    def _extract_clauses_from_text(self, text: str) -> List[Tuple[ClauseSegment, int]]:
         """
         Level-2: 从文本中提取条文
 
         使用正则识别条文编号和结构
+        返回: List[Tuple[ClauseSegment, int]] - (clause对象, 在全文中的起始位置)
         """
         clauses = []
 
@@ -291,6 +326,7 @@ class HierarchicalChunker:
         for i, match in enumerate(matches):
             clause_id = match.group(1)
             clause_content = match.group(2).strip()
+            start_pos = match.start()  # 记录在全文中的起始位置
 
             # 提取款/项
             paragraphs = self._extract_paragraphs(clause_content)
@@ -326,7 +362,7 @@ class HierarchicalChunker:
                 requirement_type=req_type,
                 cross_refs=cross_refs
             )
-            clauses.append(clause)
+            clauses.append((clause, start_pos))
 
         return clauses
 
@@ -401,9 +437,10 @@ class HierarchicalChunker:
             first_line = first_line[:100] + "..."
         return first_line
 
-    def _extract_elements(self, text: str) -> List[ElementSegment]:
+    def _extract_elements(self, text: str) -> List[Tuple[ElementSegment, int]]:
         """
         Level-3: 提取表格行、公式、术语等要素
+        返回: List[Tuple[ElementSegment, int]] - (element对象, 在全文中的起始位置)
         """
         elements = []
 
@@ -421,22 +458,26 @@ class HierarchicalChunker:
 
         return elements
 
-    def _extract_table_rows(self, text: str) -> List[ElementSegment]:
-        """提取表格行"""
+    def _extract_table_rows(self, text: str) -> List[Tuple[ElementSegment, int]]:
+        """提取表格行，返回 (element, position) 列表"""
         elements = []
         # 简单的markdown表格行提取
         lines = text.split('\n')
         current_table_id = None
+        current_pos = 0
 
         for line in lines:
+            line_start_pos = current_pos
             # 检测表格开始
             table_header_match = re.search(r'表\s*(\d+(?:\.\d+)?)', line, re.IGNORECASE)
             if table_header_match:
                 current_table_id = f"表{table_header_match.group(1)}"
+                current_pos += len(line) + 1
                 continue
 
             # 检测表格分隔线
             if re.match(r'^\s*[-|:\s]+\s*$', line):
+                current_pos += len(line) + 1
                 continue
 
             # 提取表格行
@@ -444,49 +485,61 @@ class HierarchicalChunker:
                 row_match = re.match(r'^\s*(\d+(?:\.\d+)?)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*(?:\||$)', line)
                 if row_match:
                     row_idx, col1, col2 = row_match.groups()
-                    elements.append(ElementSegment(
-                        element_type=ElementType.TABLE_ROW,
-                        source_id=current_table_id,
-                        row_index=int(row_idx) if row_idx.isdigit() else None,
-                        content=line.strip(),
-                        key=col1.strip(),
-                        value=col2.strip()
+                    elements.append((
+                        ElementSegment(
+                            element_type=ElementType.TABLE_ROW,
+                            source_id=current_table_id,
+                            row_index=int(row_idx) if row_idx.isdigit() else None,
+                            content=line.strip(),
+                            key=col1.strip(),
+                            value=col2.strip()
+                        ),
+                        line_start_pos
                     ))
                 elif line.strip() and not line.strip().startswith('|'):
                     current_table_id = None  # 表格结束
 
+            current_pos += len(line) + 1
+
         return elements
 
-    def _extract_terms(self, text: str) -> List[ElementSegment]:
-        """提取术语定义"""
+    def _extract_terms(self, text: str) -> List[Tuple[ElementSegment, int]]:
+        """提取术语定义，返回 (element, position) 列表"""
         elements = []
-        matches = TERM_PATTERN.findall(text)
-        for term_id, term_name, definition in matches:
-            elements.append(ElementSegment(
-                element_type=ElementType.TERM,
-                source_id=term_id,
-                content=f"{term_id} {term_name}: {definition}",
-                key=term_name.strip(),
-                value=definition.strip()
+        for match in TERM_PATTERN.finditer(text):
+            term_id, term_name, definition = match.groups()
+            elements.append((
+                ElementSegment(
+                    element_type=ElementType.TERM,
+                    source_id=term_id,
+                    content=f"{term_id} {term_name}: {definition}",
+                    key=term_name.strip(),
+                    value=definition.strip()
+                ),
+                match.start()
             ))
         return elements
 
-    def _extract_formulas(self, text: str) -> List[ElementSegment]:
-        """提取公式"""
+    def _extract_formulas(self, text: str) -> List[Tuple[ElementSegment, int]]:
+        """提取公式，返回 (element, position) 列表"""
         elements = []
-        # 识别公式块 (通常在行首或独占一行)
-        formula_blocks = re.findall(
+        # 识别公式块 (使用 finditer 获取位置)
+        formula_pattern = re.compile(
             r'(?:^|\n)\s*[\(（]?\s*([A-Z]?\.\d+\.\d+(?:-\d+)?)\s*[\)）]?\s*\n\s*([^\n]+?)(?=\n\n|\n[A-Z]|\Z)',
-            text,
             re.MULTILINE
         )
-        for formula_id, formula_expr in formula_blocks:
-            elements.append(ElementSegment(
-                element_type=ElementType.FORMULA,
-                source_id=formula_id.strip(),
-                content=formula_expr.strip(),
-                key=formula_id.strip(),
-                value=formula_expr.strip()
+        for match in formula_pattern.finditer(text):
+            formula_id = match.group(1)
+            formula_expr = match.group(2)
+            elements.append((
+                ElementSegment(
+                    element_type=ElementType.FORMULA,
+                    source_id=formula_id.strip(),
+                    content=formula_expr.strip(),
+                    key=formula_id.strip(),
+                    value=formula_expr.strip()
+                ),
+                match.start()
             ))
         return elements
 

@@ -123,18 +123,31 @@ class Neo4jStorage(GraphStorage):
                 try:
                     if index_name not in existing_indexes:
                         logger.info(f"Creating vector index '{index_name}'...")
-                        logger.debug(f"[VECTOR CREATE] Running query: {query}")
+                        logger.info(f"[VECTOR CREATE] Query:\n{query.strip()}")
                         session.run(query)
                         logger.info(f"✅ Vector index '{index_name}' created/verified")
                     else:
                         logger.info(f"⏭️ Vector index '{index_name}' already exists")
                 except Exception as e:
                     error_msg = str(e)
-                    logger.warning(f"❌ Vector index '{index_name}' creation failed: {error_msg}")
-                    # Provide helpful troubleshooting info
-                    if "VECTOR" in error_msg.upper() or "not exist" in error_msg.lower():
+                    error_code = getattr(e, 'code', None)
+                    error_description = getattr(e, 'message', str(e))
+
+                    logger.warning(f"❌ Vector index '{index_name}' creation failed:")
+                    logger.warning(f"   Error code: {error_code}")
+                    logger.warning(f"   Error message: {error_description}")
+
+                    # Provide helpful troubleshooting info based on error type
+                    if "VECTOR" in error_msg.upper() or "Unable to create vector index" in error_msg:
                         logger.warning(f"   💡 Hint: Vector indexes require Neo4j 5.11+ with vector plugin enabled")
-                        logger.warning(f"   💡 Alternative: Check if db.index.vector procedure exists")
+                        logger.warning(f"   💡 Solution: Check neo4j.conf for 'dbms.security.procedures.unrestricted'")
+                        logger.warning(f"   💡 Or run: CALL dbms.security.procedures.allowlist()")
+                    elif "index with that name already exists" in error_msg.lower():
+                        logger.warning(f"   💡 Index may exist with different name. Check SHOW INDEXES")
+                    elif "Invalid input" in error_msg or "Syntax error" in error_msg:
+                        logger.warning(f"   💡 Possible syntax error in CREATE INDEX statement")
+                        logger.warning(f"   💡 Verify Neo4j version supports vector indexes")
+
                     logger.warning(f"   Vector search will be disabled for this index")
 
             # 3. Create fulltext indexes
@@ -1705,7 +1718,7 @@ class Neo4jStorage(GraphStorage):
             table_refs = [table_refs]
         for table_ref in table_refs:
             if table_ref:
-                self._create_table_parameter_entity(tx, graph_id, episode_id, entity_uuid, table_ref)
+                self._create_table_parameter_entity(tx, graph_id, episode_id, entity_uuid, table_ref, content)
 
     def _create_section_entity(self, tx, graph_id: str, episode_id: str,
                                title: str, metadata: Dict, embedding: List[float]):
@@ -1855,12 +1868,28 @@ class Neo4jStorage(GraphStorage):
             logger.debug(f"Failed to create formula entity: {e}")
 
     def _create_table_parameter_entity(self, tx, graph_id: str, episode_id: str,
-                                      clause_entity_uuid: str, table_ref: str):
-        """创建Table/Parameter实体"""
+                                      clause_entity_uuid: str, table_ref: str,
+                                      clause_content: str = ""):
+        """
+        创建Table/Parameter实体
+
+        Args:
+            table_ref: 表格编号，如 "表3.2.9"
+            clause_content: 关联的条款内容，用于生成 summary
+        """
         param_name = f"{table_ref}"
 
         entity_seed = f"{graph_id}:Parameter:{param_name}".encode('utf-8')
         entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        # 构建 summary，包含表格编号和条款描述
+        summary_parts = [f"表格编号: {table_ref}"]
+        if clause_content:
+            # 提取条款描述的前100字
+            desc = clause_content[:100].replace('\n', ' ').strip()
+            if desc:
+                summary_parts.append(f"条款描述: {desc}")
+        summary = " | ".join(summary_parts)
 
         try:
             tx.run(
@@ -1869,12 +1898,16 @@ class Neo4jStorage(GraphStorage):
                 ON CREATE SET
                     e.uuid = $uuid,
                     e.name = $name,
+                    e.summary = $summary,
                     e.created_at = datetime()
+                ON MATCH SET
+                    e.summary = COALESCE(e.summary, $summary)
                 """,
                 gid=graph_id,
                 name_lower=param_name.lower(),
                 uuid=entity_uuid,
-                name=param_name
+                name=param_name,
+                summary=summary
             )
 
             # 链接Clause -> HAS_VALUE -> Parameter
