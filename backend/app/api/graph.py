@@ -1149,7 +1149,8 @@ def ai_qa():
             retrieval_start = time.time()
 
             # Perform retrieval
-            search_result = tools.search_with_agentic_flow(graph_ids=graph_ids, query=query, limit=20)
+            # 使用 scope='both' 搜索 edges 和 nodes，确保能找到相关事实
+            search_result = tools.search_with_agentic_flow(graph_ids=graph_ids, query=query, limit=20, scope='both')
             ret_dur = round(time.time() - retrieval_start, 2)
 
             # 2. Retrieval Complete

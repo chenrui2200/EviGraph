@@ -594,7 +594,8 @@ class GraphToolsService:
         graph_ids: List[str],
         query: str,
         limit: int = 20,
-        max_hops: int = 3
+        max_hops: int = 3,
+        scope: str = "both"
     ) -> SearchResult:
         """
         Encapsulated Agentic Retrieval Flow:
@@ -603,8 +604,15 @@ class GraphToolsService:
         3. LLM filtering
         4. Deduplication
         5. Final Reranking Card
+
+        Args:
+            graph_ids: List of graph IDs to search
+            query: Search query
+            limit: Maximum number of facts to return
+            max_hops: Maximum number of reasoning hops
+            scope: Search scope, "edges" or "nodes" or "both" (default: "both")
         """
-        logger.info(f"Starting search_with_agentic_flow for query: {query[:50]}...")
+        logger.info(f"Starting search_with_agentic_flow for query: {query[:50]}..., scope={scope}")
 
         current_context_facts = []
         seen_fact_texts = set()
@@ -619,7 +627,7 @@ class GraphToolsService:
             logger.info(f"Agentic Flow: Hop {hop+1}/{max_hops} with query: {search_query}")
 
             # 2.1 Perform Search
-            search_result = self.search_multi_graphs(graph_ids=graph_ids, query=search_query, limit=limit)
+            search_result = self.search_multi_graphs(graph_ids=graph_ids, query=search_query, limit=limit, scope=scope)
             new_raw_facts = search_result.facts
 
             if not new_raw_facts:

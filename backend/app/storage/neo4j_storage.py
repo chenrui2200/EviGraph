@@ -1475,6 +1475,52 @@ class Neo4jStorage(GraphStorage):
 
             return clauses
 
+    def get_all_clauses_with_metadata(
+        self,
+        graph_id: str,
+        limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        """
+        获取所有条文（用于要素提取）
+
+        Args:
+            graph_id: 图谱ID
+            limit: 返回数量限制
+
+        Returns:
+            条文列表，包含完整metadata
+        """
+        with self._driver.session() as session:
+            result = session.run(
+                """
+                MATCH (ep:Episode:Level2 {graph_id: $gid})
+                RETURN ep.uuid AS uuid,
+                       ep.clause_id AS clause_id,
+                       ep.data AS content,
+                       ep.metadata_json AS metadata_json
+                LIMIT $limit
+                """,
+                gid=graph_id,
+                limit=limit
+            )
+
+            clauses = []
+            for record in result:
+                meta_json = record["metadata_json"] or "{}"
+                try:
+                    metadata = json.loads(meta_json)
+                except:
+                    metadata = {}
+
+                clauses.append({
+                    "uuid": record["uuid"],
+                    "clause_id": record["clause_id"] or "",
+                    "content": record["content"] or "",
+                    "metadata": metadata
+                })
+
+            return clauses
+
     def mark_clause_enriched(self, clause_uuid: str) -> None:
         """
         标记条文已语义化
@@ -2033,3 +2079,148 @@ class Neo4jStorage(GraphStorage):
 
         logger.info(f"[hierarchical] Built {count} hierarchical relations")
         return count
+
+    # ========================================================================
+    # LLM 解析器支持方法（新增）
+    # ========================================================================
+
+    def find_clause_by_id(self, graph_id: str, clause_id: str) -> Optional[Dict[str, Any]]:
+        """
+        根据条款 ID 查找条款 Episode
+
+        Args:
+            graph_id: 图谱ID
+            clause_id: 条款编号（如 "3.2.1"）
+
+        Returns:
+            条款数据或 None
+        """
+        with self._driver.session() as session:
+            result = session.run(
+                """
+                MATCH (ep:Episode:Level2 {graph_id: $gid})
+                WHERE ep.clause_id = $clause_id
+                   OR ep.clause_id = $clause_id_full
+                RETURN ep.uuid AS uuid, ep.data AS content
+                LIMIT 1
+                """,
+                gid=graph_id,
+                clause_id=clause_id,
+                clause_id_full=f"条款{clause_id}"
+            )
+
+            record = result.single()
+            if record:
+                return {
+                    "uuid": record["uuid"],
+                    "content": record["content"]
+                }
+            return None
+
+    def get_or_create_entity(
+        self,
+        graph_id: str,
+        entity_type: str,
+        entity_name: str,
+        description: str = ""
+    ) -> Optional[str]:
+        """
+        获取或创建实体节点
+
+        直接使用 LLM 返回的实体类型，不再硬编码推断
+
+        Args:
+            graph_id: 图谱ID
+            entity_type: 实体类型（如 "Component", "Action", "Condition"）
+            entity_name: 实体名称
+            description: 实体描述
+
+        Returns:
+            实体 UUID
+        """
+        import re
+        # 清理实体名称中的特殊字符用于 name_lower
+        name_clean = re.sub(r'[^\w\u4e00-\u9fff]', '_', entity_name).lower()[:100]
+
+        # 生成稳定 UUID
+        entity_seed = f"{graph_id}:{entity_type}:{entity_name}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        try:
+            with self._driver.session() as session:
+                def _create_entity(tx):
+                    # 使用参数化标签（Neo4j 支持）
+                    tx.run(
+                        f"""
+                        MERGE (e:Entity:{entity_type} {{graph_id: $gid, name_lower: $name_lower}})
+                        ON CREATE SET
+                            e.uuid = $uuid,
+                            e.name = $name,
+                            e.summary = $summary,
+                            e.created_at = datetime()
+                        ON MATCH SET
+                            e.summary = COALESCE(e.summary, $summary)
+                        """,
+                        gid=graph_id,
+                        name_lower=name_clean,
+                        uuid=entity_uuid,
+                        name=entity_name,
+                        summary=description[:500] if description else ""
+                    )
+                    return entity_uuid
+
+                return self._call_with_retry(session.execute_write, _create_entity)
+
+        except Exception as e:
+            logger.warning(f"[entity] Failed to create entity {entity_type}:{entity_name}: {e}")
+            return None
+
+    def add_edge(
+        self,
+        graph_id: str,
+        source_uuid: str,
+        target_uuid: str,
+        properties: Dict[str, Any]
+    ) -> bool:
+        """
+        添加边（关系）
+
+        Args:
+            graph_id: 图谱ID
+            source_uuid: 源节点 UUID
+            target_uuid: 目标节点 UUID
+            properties: 关系属性
+
+        Returns:
+            是否成功
+        """
+        rel_type = properties.get("type", "RELATES_TO")
+
+        try:
+            with self._driver.session() as session:
+                def _create_edge(tx):
+                    tx.run(
+                        f"""
+                        MATCH (s {{uuid: $source_uuid}}), (t {{uuid: $target_uuid}})
+                        MERGE (s)-[r:{rel_type}]->(t)
+                        ON CREATE SET
+                            r.graph_id = $gid,
+                            r.fact = $fact,
+                            r.target_type = $target_type,
+                            r.created_at = datetime()
+                        ON MATCH SET
+                            r.fact = COALESCE(r.fact, $fact)
+                        """,
+                        source_uuid=source_uuid,
+                        target_uuid=target_uuid,
+                        gid=graph_id,
+                        fact=properties.get("fact", ""),
+                        target_type=properties.get("target_type", "")
+                    )
+                    return True
+
+                return self._call_with_retry(session.execute_write, _create_edge)
+
+        except Exception as e:
+            logger.warning(f"[edge] Failed to create edge: {e}")
+            return False

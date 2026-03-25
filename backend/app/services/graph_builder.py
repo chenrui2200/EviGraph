@@ -398,3 +398,295 @@ class GraphBuilderService:
 
         logger.info(f"[semantic] Enriched {len(enrichments)} clauses")
         return len(enrichments)
+
+    def extract_elements_from_clauses(
+        self,
+        graph_id: str,
+        progress_callback: Optional[Callable] = None
+    ) -> int:
+        """
+        从条文提取要素（表格、公式、术语）
+
+        在条文语义补充后调用，将提取的要素存储为 Episode 节点
+
+        Args:
+            graph_id: 图谱ID
+            progress_callback: 进度回调
+
+        Returns:
+            提取的要素数量
+        """
+        from .semantic_enricher import SemanticEnricher
+
+        enricher = SemanticEnricher()
+
+        # 获取所有条文（有metadata的）
+        clauses = self.storage.get_all_clauses_with_metadata(graph_id, limit=200)
+        total = len(clauses)
+
+        if total == 0:
+            logger.info("[elements] No clauses found for element extraction")
+            return 0
+
+        logger.info(f"[elements] Extracting elements from {total} clauses...")
+
+        def wrapped_callback(progress_ratio, msg=""):
+            if progress_callback:
+                progress_callback(progress_ratio)
+
+        # 批量提取要素
+        extractions = enricher.extract_elements(
+            clauses,
+            progress_callback=wrapped_callback
+        )
+
+        # 存储要素为Episode
+        total_elements = 0
+        for extraction in extractions:
+            try:
+                # 找到对应条款的 metadata
+                source_metadata = {"level_name": "Level3"}
+                for clause in clauses:
+                    if clause.get('clause_id') == extraction.clause_id:
+                        # 从 clause metadata 复制 source, page, bbox 等信息
+                        meta = clause.get('metadata', {})
+                        source_metadata.update({
+                            "source": meta.get('source'),
+                            "page": meta.get('page'),
+                            "bbox": meta.get('bbox'),
+                            "page_width": meta.get('page_width'),
+                            "page_height": meta.get('page_height')
+                        })
+                        break
+
+                # 转换为 episodes
+                element_episodes = enricher.elements_to_episodes(
+                    extraction,
+                    source_metadata
+                )
+
+                # 存储每个要素
+                for episode_data in element_episodes:
+                    episode_id = self.storage.add_hierarchical_chunk_with_entities(
+                        graph_id,
+                        {
+                            "content": episode_data["text"],
+                            "metadata": episode_data["metadata"]
+                        }
+                    )
+                    if episode_id:
+                        total_elements += 1
+
+            except Exception as e:
+                logger.warning(f"[elements] Failed to store extraction: {e}")
+
+        logger.info(f"[elements] Extracted {total_elements} elements")
+        return total_elements
+
+    # ========================================================================
+    # LLM 统一解析（新增 - 替代正则分块）
+    # ========================================================================
+
+    def build_graph_with_llm_parser(
+        self,
+        graph_id: str,
+        text_chunks: List[Any],
+        doc_title: str = "未命名文档",
+        progress_callback: Optional[Callable] = None
+    ) -> Dict[str, Any]:
+        """
+        使用 LLM 统一解析器构建图谱
+
+        替代原来的正则分块 + 语义补充流程，统一使用 LLM 解析：
+        1. LLM 解析文本，提取条款、实体、关系
+        2. 存储 Episode 和 Entity 节点
+        3. 构建实体间关系
+
+        Args:
+            graph_id: 图谱ID
+            text_chunks: TextChunk 列表
+            doc_title: 文档标题
+            progress_callback: 进度回调
+
+        Returns:
+            解析统计信息
+        """
+        from .llm_doc_parser import LLMDocParser
+
+        parser = LLMDocParser()
+
+        def wrapped_callback(progress, msg=""):
+            if progress_callback:
+                # 映射到 10-60% 范围
+                mapped = 10 + int(progress * 50)
+                progress_callback(mapped / 100, msg)
+
+        # 解析文档
+        parsed_doc = parser.parse_chunks(
+            text_chunks,
+            doc_title=doc_title,
+            progress_callback=wrapped_callback
+        )
+
+        # 转换为 episodes 并存储
+        episodes = parser.parsed_document_to_episodes(parsed_doc)
+
+        # 存储 episodes
+        episode_count = 0
+        for ep_data in episodes:
+            episode_id = self.storage.add_hierarchical_chunk_with_entities(
+                graph_id,
+                {
+                    "content": ep_data["text"],
+                    "metadata": ep_data["metadata"]
+                }
+            )
+            if episode_id:
+                episode_count += 1
+
+        # 构建实体关系
+        relation_count = self._build_relations_from_parsed_doc(graph_id, parsed_doc)
+
+        # 统计
+        entity_stats = {}
+        for clause in parsed_doc.clauses:
+            for entity in clause.entities:
+                etype = entity.entity_type.value
+                entity_stats[etype] = entity_stats.get(etype, 0) + 1
+
+        result = {
+            "clauses": len(parsed_doc.clauses),
+            "episodes": episode_count,
+            "entities": parsed_doc.total_entities,
+            "relations": relation_count,
+            "entity_stats": entity_stats
+        }
+
+        logger.info(f"[llm_parser] 完成: {result}")
+        return result
+
+    def _build_relations_from_parsed_doc(
+        self,
+        graph_id: str,
+        parsed_doc: "ParsedDocument"
+    ) -> int:
+        """
+        从 ParsedDocument 构建实体关系
+
+        直接使用 LLM 返回的实体类型，不再硬编码推断
+
+        Args:
+            graph_id: 图谱ID
+            parsed_doc: 解析后的文档
+
+        Returns:
+            构建的关系数量
+        """
+        from ..models.normative_entity import EntityType
+
+        relation_count = 0
+
+        # 构建实体名称到类型的映射（LLM 已识别）
+        entity_type_map: Dict[str, str] = {}
+
+        # 第一步：收集所有实体及其类型（来自 LLM）
+        for clause in parsed_doc.clauses:
+            for entity in clause.entities:
+                entity_type_map[entity.name] = entity.entity_type.value
+
+        # 全局实体
+        for entity in parsed_doc.global_entities:
+            entity_type_map[entity.name] = entity.entity_type.value
+
+        # 第二步：创建所有实体节点
+        entity_uuid_map: Dict[str, str] = {}
+        for entity_name, entity_type in entity_type_map.items():
+            uuid = self._get_or_create_entity(graph_id, entity_type, entity_name)
+            if uuid:
+                entity_uuid_map[entity_name] = uuid
+
+        # 第三步：构建关系
+        for clause in parsed_doc.clauses:
+            clause_uuid = self._find_clause_uuid(graph_id, clause.clause_id)
+            if not clause_uuid:
+                continue
+
+            for relation in clause.relations:
+                try:
+                    rel_type = relation.relation_type.value
+                    source_name = relation.source_entity
+                    target_name = relation.target_entity
+
+                    # 直接使用 LLM 识别的类型
+                    target_type = entity_type_map.get(target_name, EntityType.COMPONENT.value)
+                    source_uuid = entity_uuid_map.get(source_name) or clause_uuid
+
+                    # 如果目标实体已创建，添加关系
+                    if target_name in entity_uuid_map:
+                        self.storage.add_clause_relations(
+                            graph_id,
+                            clause_uuid,
+                            [{
+                                "type": rel_type,
+                                "target": target_name,
+                                "fact": relation.fact,
+                                "target_type": target_type,
+                                "episode_ids": [clause_uuid]
+                            }],
+                            episode_ids=[clause_uuid]
+                        )
+                        relation_count += 1
+
+                except Exception as e:
+                    logger.warning(f"[relations] Failed to create relation: {e}")
+
+        # 全局关系
+        for relation in parsed_doc.global_relations:
+            try:
+                source_name = relation.source_entity
+                target_name = relation.target_entity
+                rel_type = relation.relation_type.value
+
+                source_uuid = entity_uuid_map.get(source_name)
+                target_uuid = entity_uuid_map.get(target_name)
+
+                if source_uuid and target_uuid:
+                    target_type = entity_type_map.get(target_name, EntityType.COMPONENT.value)
+                    rel_data = {
+                        "type": rel_type,
+                        "target": target_name,
+                        "fact": relation.fact,
+                        "target_type": target_type
+                    }
+                    self.storage.add_edge(graph_id, source_uuid, target_uuid, rel_data)
+                    relation_count += 1
+
+            except Exception as e:
+                logger.warning(f"[relations] Failed to create global relation: {e}")
+
+        return relation_count
+
+    def _find_clause_uuid(self, graph_id: str, clause_id: str) -> Optional[str]:
+        """查找条款的 UUID"""
+        try:
+            result = self.storage.find_clause_by_id(graph_id, clause_id)
+            return result.get("uuid") if result else None
+        except:
+            return None
+
+    def _get_or_create_entity(
+        self,
+        graph_id: str,
+        entity_type: str,
+        entity_name: str
+    ) -> Optional[str]:
+        """获取或创建实体"""
+        try:
+            return self.storage.get_or_create_entity(
+                graph_id,
+                entity_type,
+                entity_name
+            )
+        except Exception as e:
+            logger.warning(f"[entity] Failed to get/create entity: {e}")
+            return None

@@ -11,7 +11,7 @@ SemanticEnricher - LLM语义补充模块
 import json
 import logging
 from typing import List, Dict, Any, Optional, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .normative_ontology import NormativeOntology
 
@@ -28,6 +28,41 @@ class SemanticEnrichment:
     recommended_actions: List[str]
     requirement_type: str  # mandatory, recommended, prohibited
     related_entities: List[Dict[str, str]]  # 识别的实体
+
+
+@dataclass
+class ElementExtraction:
+    """要素提取结果"""
+    clause_id: str
+    tables: List[Dict[str, Any]] = field(default_factory=list)
+    formulas: List[Dict[str, Any]] = field(default_factory=list)
+    terms: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class TableElement:
+    """表格要素"""
+    table_id: str  # 如 "表3.2.2"
+    description: str  # 表格描述
+    key_parameters: List[str] = field(default_factory=list)  # 关键参数列表
+    unit: str = ""  # 单位（如有）
+
+
+@dataclass
+class FormulaElement:
+    """公式要素"""
+    formula_id: str  # 如 "式(3.2.14)" 或 "3.2.14"
+    expression: str  # 公式表达式
+    description: str = ""  # 公式描述
+    variables: List[Dict[str, str]] = field(default_factory=list)  # 变量定义
+
+
+@dataclass
+class TermElement:
+    """术语要素"""
+    term_id: str  # 如 "2.0.1"
+    term_name: str  # 术语名称
+    definition: str  # 术语定义
 
 
 class SemanticEnricher:
@@ -99,6 +134,87 @@ class SemanticEnricher:
         {{"type": "Action", "name": "具体动作"}}
     ]
 }}
+```
+"""
+
+    # ============================================================================
+    # 要素提取 Prompt（新增）
+    # ============================================================================
+    ELEMENT_SYSTEM_PROMPT = """你是一个工程规范文档的结构化信息提取专家。
+你的任务是从工程规范的条文中提取结构化的要素信息。
+
+## 要素类型
+你需要提取以下三类要素：
+
+1. **表格要素（tables）**：条文引用或描述的表格
+   - 提取表格编号（如"表3.2.2"、"表3.2.3"）
+   - 提取表格用途描述
+   - 提取表格中的关键参数名称
+
+2. **公式要素（formulas）**：条文引用或描述的公式
+   - 提取公式编号（如"式(3.2.14)"、"公式3.2.14"）
+   - 提取公式表达式
+   - 提取变量定义
+
+3. **术语要素（terms）**：条文定义或解释的术语
+   - 提取术语编号（如"2.0.1"、"2.0.2"）
+   - 提取术语名称
+   - 提取术语定义
+
+## 输出格式
+请保持JSON格式输出，如果没有某类要素，返回空列表。
+使用中文输出。
+
+## 注意事项
+- 表格编号格式：如"表3.2.2"，注意"表"字
+- 公式编号格式：如"式(3.2.14)"或"公式3.2.14"
+- 术语编号格式：如"2.0.1"、"2.0.2"
+- 只提取条文**直接包含或引用**的要素，不要推测不存在的内容
+"""
+
+    ELEMENT_USER_PROMPT_TEMPLATE = """请分析以下工程规范条文，提取其中的表格、公式和术语要素。
+
+## 条文内容
+{clause_content}
+
+## 条文编号
+{clause_id}
+
+请以JSON格式输出分析结果：
+```json
+{{
+    "clause_id": "{clause_id}",
+    "tables": [
+        {{
+            "table_id": "表3.2.2",
+            "description": "固定敷设的导体最小截面",
+            "key_parameters": ["敷设方式", "导体最小截面", "铜导体", "铝导体"]
+        }}
+    ],
+    "formulas": [
+        {{
+            "formula_id": "3.2.14",
+            "expression": "S >= I*t/k",
+            "description": "保护导体截面积计算公式",
+            "variables": [
+                {{"name": "S", "description": "导体截面积(mm2)"}},
+                {{"name": "I", "description": "故障电流(A)"}}
+            ]
+        }}
+    ],
+    "terms": [
+        {{
+            "term_id": "2.0.1",
+            "term_name": "预期接触电压",
+            "definition": "人或动物尚未接触到可导电部分时，可能同时触及的可导电部分之间的电压"
+        }}
+    ]
+}}
+```
+
+如果没有某类要素，请返回空列表：
+```json
+{{"tables": [], "formulas": [], "terms": []}}
 ```
 """
 
@@ -294,6 +410,184 @@ class SemanticEnricher:
 
         return relations
 
+    # ============================================================================
+    # 要素提取方法（新增）
+    # ============================================================================
+
+    def extract_elements(
+        self,
+        clauses: List[Dict[str, Any]],
+        progress_callback: Optional[Callable] = None
+    ) -> List[ElementExtraction]:
+        """
+        批量提取要素（表格、公式、术语）
+
+        Args:
+            clauses: 条文列表，每个包含 id, content, clause_id
+            progress_callback: 进度回调函数
+
+        Returns:
+            List[ElementExtraction]: 要素提取结果列表
+        """
+        results = []
+        total = len(clauses)
+
+        self.logger.info(f"开始要素提取，共 {total} 条条文")
+
+        for idx, clause in enumerate(clauses):
+            try:
+                extraction = self._extract_single_clause_elements(clause)
+                if extraction:
+                    results.append(extraction)
+            except Exception as e:
+                self.logger.warning(f"要素提取失败 clause_id={clause.get('clause_id', 'unknown')}: {e}")
+
+            if progress_callback and (idx + 1) % 10 == 0:
+                progress_callback((idx + 1) / total, f"已提取 {idx + 1}/{total} 条")
+
+        self.logger.info(f"要素提取完成，成功 {len(results)}/{total} 条")
+        return results
+
+    def _extract_single_clause_elements(self, clause: Dict[str, Any]) -> Optional[ElementExtraction]:
+        """
+        对单条条文提取要素
+
+        Args:
+            clause: 条文数据，包含 id, content, clause_id
+
+        Returns:
+            ElementExtraction 或 None
+        """
+        clause_id = clause.get('clause_id', clause.get('id', ''))
+        content = clause.get('content', clause.get('data', ''))
+
+        if not content:
+            return None
+
+        user_prompt = self.ELEMENT_USER_PROMPT_TEMPLATE.format(
+            clause_content=content[:1500],  # 限制长度
+            clause_id=clause_id
+        )
+
+        try:
+            response = self._call_llm_for_elements(user_prompt)
+            if response:
+                return self._parse_element_response(response, clause_id)
+        except Exception as e:
+            self.logger.error(f"LLM要素提取调用失败: {e}")
+
+        return None
+
+    def _call_llm_for_elements(self, user_prompt: str) -> Optional[str]:
+        """调用LLM提取要素"""
+        if self.llm_client:
+            response = self.llm_client.chat(
+                system=self.ELEMENT_SYSTEM_PROMPT,
+                user=user_prompt
+            )
+            return response
+        else:
+            from ..utils.llm_client import LLMClient
+            client = LLMClient()
+            response = client.chat_json(
+                system=self.ELEMENT_SYSTEM_PROMPT,
+                user=user_prompt
+            )
+            return json.dumps(response) if response else None
+
+    def _parse_element_response(self, response: str, clause_id: str) -> Optional[ElementExtraction]:
+        """解析LLM要素提取响应"""
+        try:
+            json_match = None
+            if '```json' in response:
+                json_match = response.split('```json')[1].split('```')[0]
+            elif '```' in response:
+                json_match = response.split('```')[1].split('```')[0]
+            else:
+                json_str = response.strip()
+                if json_str.startswith('{'):
+                    json_match = json_str
+
+            if not json_match:
+                return None
+
+            data = json.loads(json_match.strip())
+
+            return ElementExtraction(
+                clause_id=clause_id,
+                tables=data.get('tables', []),
+                formulas=data.get('formulas', []),
+                terms=data.get('terms', [])
+            )
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"JSON解析失败 clause_id={clause_id}: {e}")
+            return None
+
+    def elements_to_episodes(
+        self,
+        extraction: ElementExtraction,
+        source_metadata: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        将要素提取结果转换为Episode数据
+
+        Args:
+            extraction: 要素提取结果
+            source_metadata: 来源元数据（包含page, bbox等）
+
+        Returns:
+            Episode数据列表，可直接存储到Neo4j
+        """
+        episodes = []
+
+        # 表格要素
+        for table in extraction.tables:
+            episodes.append({
+                "text": f"{table.get('table_id', '')}: {table.get('description', '')}",
+                "metadata": {
+                    "chunk_type": "element",
+                    "element_type": "table",
+                    "source_id": table.get('table_id', ''),
+                    "key": table.get('description', ''),
+                    "key_parameters": table.get('key_parameters', []),
+                    "level": 3,
+                    **source_metadata
+                }
+            })
+
+        # 公式要素
+        for formula in extraction.formulas:
+            episodes.append({
+                "text": f"{formula.get('formula_id', '')}: {formula.get('expression', '')}",
+                "metadata": {
+                    "chunk_type": "element",
+                    "element_type": "formula",
+                    "source_id": formula.get('formula_id', ''),
+                    "key": formula.get('description', ''),
+                    "expression": formula.get('expression', ''),
+                    "variables": formula.get('variables', []),
+                    "level": 3,
+                    **source_metadata
+                }
+            })
+
+        # 术语要素
+        for term in extraction.terms:
+            episodes.append({
+                "text": f"{term.get('term_id', '')} {term.get('term_name', '')}: {term.get('definition', '')}",
+                "metadata": {
+                    "chunk_type": "element",
+                    "element_type": "term",
+                    "source_id": term.get('term_id', ''),
+                    "key": term.get('term_name', ''),
+                    "value": term.get('definition', ''),
+                    "level": 3,
+                    **source_metadata
+                }
+            })
+
+        return episodes
+
 
 # ============================================================================
 # 便捷函数
@@ -315,3 +609,21 @@ def enrich_clauses(
     """
     enricher = SemanticEnricher()
     return enricher.enrich_clauses(clauses, progress_callback)
+
+
+def extract_elements(
+    clauses: List[Dict[str, Any]],
+    progress_callback: Optional[Callable] = None
+) -> List[ElementExtraction]:
+    """
+    便捷函数：批量提取要素（表格、公式、术语）
+
+    Args:
+        clauses: 条文列表
+        progress_callback: 进度回调
+
+    Returns:
+        List[ElementExtraction]
+    """
+    enricher = SemanticEnricher()
+    return enricher.extract_elements(clauses, progress_callback)

@@ -128,7 +128,7 @@ class HierarchicalChunker:
         """
         result = HierarchicalChunkResult()
 
-        # 收集每个chunk的来源信息 - position -> {source, page}
+        # 收集每个chunk的来源信息 - position -> {source, page, bbox, page_width, page_height}
         chunk_sources: Dict[int, Dict[str, Any]] = {}
 
         # 合并所有文本，同时记录每个字符的来源
@@ -140,7 +140,10 @@ class HierarchicalChunker:
                 text_parts.append(tc.text)
                 chunk_sources[chunk_start] = {
                     "source": tc.metadata.get("source") if tc.metadata else None,
-                    "page": tc.metadata.get("page") if tc.metadata else None
+                    "page": tc.metadata.get("page") if tc.metadata else None,
+                    "bbox": tc.metadata.get("bbox") if tc.metadata else None,
+                    "page_width": tc.metadata.get("page_width") if tc.metadata else None,
+                    "page_height": tc.metadata.get("page_height") if tc.metadata else None
                 }
                 current_pos += len(tc.text) + 1  # +1 for newline
 
@@ -184,7 +187,7 @@ class HierarchicalChunker:
                                      chunk_sources: Dict[int, Dict[str, Any]],
                                      chunk_pos: int) -> None:
         """
-        根据chunk在全文中的位置，匹配正确的source和page
+        根据chunk在全文中的位置，匹配正确的source、page和bbox
 
         遍历chunk_sources，找到chunk_pos所在的source区间
         """
@@ -208,6 +211,13 @@ class HierarchicalChunker:
                 chunk.source = source_info.get("source")
             if source_info.get("page") is not None:
                 chunk.page = source_info.get("page")
+
+            # 传递 bbox 信息到 metadata
+            bbox = source_info.get("bbox")
+            if bbox:
+                chunk.metadata["bbox"] = bbox
+                chunk.metadata["page_width"] = source_info.get("page_width")
+                chunk.metadata["page_height"] = source_info.get("page_height")
 
     def _assign_source_info(self, chunk: 'HierarchicalChunk', chunk_sources: Dict[int, Dict[str, Any]]) -> None:
         """
