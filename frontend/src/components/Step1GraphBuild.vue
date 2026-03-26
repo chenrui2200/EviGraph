@@ -16,7 +16,6 @@
         </div>
 
         <div class="card-content">
-          <p class="api-note">POST /api/graph/ontology/generate</p>
           <p class="description">
             系统自动进行多层级语义分块，提取条文、公式、表格等结构化信息，构建工程规范本体。
           </p>
@@ -127,10 +126,8 @@
             ↻ 重置
           </button>
         </div>
-        </div>
 
         <div class="card-content">
-          <p class="api-note">POST /api/graph/build</p>
           <p class="description">
             基于多层级分块结果，系统会自动对文档进行切片，并调用 Neo4j 构建知识图谱，提取实体和关系，形成记忆摘要。
           </p>

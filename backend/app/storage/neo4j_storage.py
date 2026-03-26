@@ -1110,9 +1110,14 @@ class Neo4jStorage(GraphStorage):
                 node_map[nd["uuid"]] = nd.get("name") or "Unnamed"
 
             # 2. Get semantic relationships between entities
+            # 匹配所有语义关系类型: RELATION, MANDATES, PROHIBITS, RECOMMENDS, HAS_CONDITION, OPERATES_ON, APPLIES_TO 等
             edge_result = tx.run(
                 """
-                MATCH (src:Entity {graph_id: $gid})-[r:RELATION]->(tgt:Entity {graph_id: $gid})
+                MATCH (src:Entity {graph_id: $gid})-[r]->(tgt:Entity {graph_id: $gid})
+                WHERE type(r) IN ['RELATION', 'MANDATES', 'PROHIBITS', 'RECOMMENDS',
+                                   'HAS_CONDITION', 'OPERATES_ON', 'APPLIES_TO',
+                                   'PART_OF', 'NEXT_EPISODE', 'MENTIONS', 'CROSS_REFERENCE',
+                                   'HAS_DOCUMENT', 'HAS_PAGE', 'HAS_EPISODE']
                 RETURN r, src.uuid AS src_uuid, tgt.uuid AS tgt_uuid,
                        src.name AS src_name, tgt.name AS tgt_name,
                        type(r) AS rel_type
@@ -1716,6 +1721,8 @@ class Neo4jStorage(GraphStorage):
         - Clause -HAS_CONDITION-> Condition
         - Action -OPERATES_ON-> Object
         - Clause -MENTIONS-> Component
+
+        如果 metadata 中缺少 semantic 字段，会尝试从 content 中解析
         """
         clause_name = f"条款{clause_id}"
 
@@ -1752,6 +1759,30 @@ class Neo4jStorage(GraphStorage):
             req_type=requirement_type
         )
 
+        # ========== Fallback: 从 content 中解析语义信息 ==========
+        # 如果 metadata 中没有 semantic 信息，尝试从 content 解析
+        conditions = metadata.get('conditions', [])
+        actions = metadata.get('actions', [])
+        components = metadata.get('components', [])
+        objects = metadata.get('objects', [])
+
+        # 检查是否需要 fallback 解析
+        needs_fallback = (
+            (not conditions or conditions == []) and
+            (not actions or actions == []) and
+            (not components or components == []) and
+            (not objects or objects == []) and
+            content
+        )
+
+        if needs_fallback:
+            logger.info(f"[hierarchical] Fallback: 从 content 解析语义信息 for clause {clause_id}")
+            parsed = self._parse_semantic_from_content(content, clause_id)
+            conditions = parsed.get('conditions', conditions)
+            actions = parsed.get('actions', actions)
+            components = parsed.get('components', components)
+            objects = parsed.get('objects', objects)
+
         # 链接Episode -> Entity (MENTIONS)
         tx.run(
             """
@@ -1767,7 +1798,6 @@ class Neo4jStorage(GraphStorage):
         # ========== 创建语义实体和关系 ==========
 
         # 1. 创建 Conditions（前提条件）
-        conditions = metadata.get('conditions', [])
         if isinstance(conditions, str):
             conditions = [conditions]
         for condition_name in conditions:
@@ -1777,7 +1807,6 @@ class Neo4jStorage(GraphStorage):
                 )
 
         # 2. 创建 Actions（规定动作）
-        actions = metadata.get('actions', [])
         if isinstance(actions, str):
             actions = [actions]
         for action_name in actions:
@@ -1794,7 +1823,6 @@ class Neo4jStorage(GraphStorage):
                     self._create_recommends_relation(tx, entity_uuid, action_uuid)
 
         # 3. 创建 Components（设备/系统/材料）
-        components = metadata.get('components', [])
         if isinstance(components, str):
             components = [components]
         for component_name in components:
@@ -1804,7 +1832,6 @@ class Neo4jStorage(GraphStorage):
                 )
 
         # 4. 创建 Objects（操作对象）
-        objects = metadata.get('objects', [])
         if isinstance(objects, str):
             objects = [objects]
         for object_name in objects:
@@ -1948,6 +1975,101 @@ class Neo4jStorage(GraphStorage):
             e_uuid=entity_uuid,
             gid=graph_id
         )
+
+    def _parse_semantic_from_content(self, content: str, clause_id: str) -> Dict[str, List[str]]:
+        """
+        使用 LLM 从条文内容中解析语义信息（Component/Action/Object/Condition）
+
+        Args:
+            content: 条文内容
+            clause_id: 条文编号（用于日志）
+
+        Returns:
+            包含 conditions, actions, components, objects 的字典
+        """
+        from ..utils.llm_client import LLMClient
+
+        result = {
+            'conditions': [],
+            'actions': [],
+            'components': [],
+            'objects': []
+        }
+
+        if not content:
+            return result
+
+        # 构建 LLM prompt
+        system_prompt = """你是一个工程规范条文语义分析专家。
+
+你的任务是从条文内容中提取以下四类语义要素：
+
+1. **components（组件）**：涉及的设备、系统、材料等实体
+   - 例如：电器、断路器、电缆、配电箱、保护电器
+
+2. **actions（动作）**：规范要求的动作/措施
+   - 例如：选用、应符合、应满足、安装、严禁
+
+3. **objects（对象）**：动作作用的目标（通常是参数或属性）
+   - 例如：额定电压、截面积、产品标准
+
+4. **conditions（条件）**：适用前提、环境、场景
+   - 例如：短路条件下、维护测试时
+
+请直接输出 JSON 格式，不要解释。"""
+
+        user_prompt = f"""分析以下条文，提取语义要素：
+
+条文编号：{clause_id}
+条文内容：{content}
+
+输出 JSON 格式：
+{{
+    "components": ["电器", "断路器"],
+    "actions": ["应符合", "选用"],
+    "objects": ["产品标准", "额定电压"],
+    "conditions": ["短路条件下"]
+}}"""
+
+        try:
+            llm_client = LLMClient()
+            logger.info(f"[semantic_parse] 调用 LLM 分析 clause {clause_id}...")
+            response = llm_client.chat_json(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=1024
+            )
+            logger.info(f"[semantic_parse] LLM 返回: {response}")
+
+            # 解析 LLM 返回结果
+            result['components'] = response.get('components', [])
+            result['actions'] = response.get('actions', [])
+            result['objects'] = response.get('objects', [])
+            result['conditions'] = response.get('conditions', [])
+
+            # 确保是列表
+            if isinstance(result['components'], str):
+                result['components'] = [result['components']]
+            if isinstance(result['actions'], str):
+                result['actions'] = [result['actions']]
+            if isinstance(result['objects'], str):
+                result['objects'] = [result['objects']]
+            if isinstance(result['conditions'], str):
+                result['conditions'] = [result['conditions']]
+
+            logger.info(f"[semantic_parse] LLM 分析 Clause {clause_id}: "
+                        f"components={result['components']}, "
+                        f"actions={result['actions']}, "
+                        f"objects={result['objects']}, "
+                        f"conditions={result['conditions']}")
+
+        except Exception as e:
+            logger.warning(f"[semantic_parse] LLM 调用失败 for clause {clause_id}: {e}")
+
+        return result
 
     def _create_formula_entity(self, tx, graph_id: str, episode_id: str,
                                clause_entity_uuid: str, formula_id: str):
