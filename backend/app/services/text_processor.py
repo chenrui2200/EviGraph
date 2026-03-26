@@ -263,10 +263,12 @@ class TextProcessor:
     @staticmethod
     def hierarchical_chunk(
         text_chunks: List[TextChunk],
-        strategy: str = "full"
+        strategy: str = "full",
+        use_llm: bool = True,
+        progress_callback=None
     ) -> "HierarchicalChunkResult":
         """
-        多层级语义分块 - 替代Ontology动态生成
+        多层级语义分块 - 基于 LLM 的智能分块
 
         实现三级分块策略：
         - Level-1: 章节级（导航层）
@@ -275,44 +277,61 @@ class TextProcessor:
 
         Args:
             text_chunks: 原始TextChunk列表
-            strategy: 分块策略
-                - "full": 完整三级分块
-                - "level2_only": 仅条文级
+            strategy: 分块策略（暂未使用，保留兼容性）
+            use_llm: 是否使用 LLM 驱动的分块器（必须，默认为 True）
+            progress_callback: 进度回调函数，格式: callback(progress, message)
 
         Returns:
             HierarchicalChunkResult: 包含所有层级分块的结果
         """
-        from .hierarchical_chunker import HierarchicalChunker
+        import logging
+        logger = logging.getLogger('mirofish.text_processor')
 
-        chunker = HierarchicalChunker()
-        result = chunker.chunk(text_chunks)
+        # 使用 LLM 驱动的分块器（不支持回退到正则）
+        if use_llm:
+            from .llm_driven_chunker import LLMDrivenChunker
+            logger.info(f"使用 LLM 驱动的分块器")
 
-        if strategy == "level2_only":
-            # 仅返回条文级
-            from ..models.clause import HierarchicalChunkResult as HCR
-            return HCR(
-                sections=[],
-                clauses=result.clauses,
-                elements=[]
-            )
+            chunker = LLMDrivenChunker(progress_callback=progress_callback)
+            return chunker.chunk(text_chunks, progress_callback)
 
-        return result
+        # 不再支持正则分块器作为回退
+        raise NotImplementedError(
+            "LLM 驱动的分块是必须的，不再支持正则分块器。"
+            "请设置 use_llm=True 或确保 Ollama 服务正在运行。"
+        )
 
     @staticmethod
-    def hierarchical_chunk_text(text: str) -> "HierarchicalChunkResult":
+    def hierarchical_chunk_text(
+        text: str,
+        use_llm: bool = True,
+        progress_callback=None
+    ) -> "HierarchicalChunkResult":
         """
         对单个文本进行多层级分块
 
         Args:
             text: 输入文本
+            use_llm: 是否使用 LLM 驱动的分块器（必须，默认为 True）
+            progress_callback: 进度回调函数
 
         Returns:
             HierarchicalChunkResult
         """
-        from .hierarchical_chunker import HierarchicalChunker
+        import logging
+        logger = logging.getLogger('mirofish.text_processor')
 
-        chunker = HierarchicalChunker()
-        return chunker.chunk_single_text(text)
+        # 使用 LLM 驱动的分块器
+        if use_llm:
+            from .llm_driven_chunker import LLMDrivenChunker
+            logger.info(f"使用 LLM 驱动的分块器")
+
+            chunker = LLMDrivenChunker(progress_callback=progress_callback)
+            return chunker.chunk_single_text(text, progress_callback)
+
+        raise NotImplementedError(
+            "LLM 驱动的分块是必须的，不再支持正则分块器。"
+        )
 
     @staticmethod
     def get_fixed_ontology() -> dict:

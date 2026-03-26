@@ -6,7 +6,7 @@
         <div class="card-header">
           <div class="step-info">
             <span class="step-num">01</span>
-            <span class="step-title">智能Chunks分析</span>
+            <span class="step-title">智能Chunks标注分析</span>
           </div>
           <div class="step-status">
             <span v-if="currentPhase > 0" class="badge success">已完成</span>

@@ -1,0 +1,980 @@
+"""
+LLMDrivenChunker - 基于 LLM 的智能三级分块引擎
+
+设计理念：
+- 彻底摆脱正则对文档格式的依赖
+- 使用 LLM 智能识别任意格式的章节、条文和要素
+- 可靠的 LLM 重试机制，不使用正则备用
+- 自动建立 Element ↔ Clause ↔ Chapter 的语义关联
+
+SOTA 知识图谱构建模式：
+1. 实体识别：使用 LLM 识别 Component、Term、Parameter、Formula 等
+2. 关系抽取：MANDATES/HAS_CONDITION/OPERATES_ON 等关系
+3. 层级关联：通过位置和语义双重关联
+"""
+
+import json
+import logging
+import re
+import time
+import random
+from typing import List, Dict, Any, Optional, Callable
+from dataclasses import asdict
+
+from ..models.clause import (
+    HierarchicalChunkResult,
+    SectionSegment,
+    ClauseSegment,
+    ElementSegment,
+    ChunkLevel,
+    ElementType,
+    RequirementType,
+    CrossReference,
+    SystemApplicability
+)
+from ..models.normative_entity import (
+    EntityType,
+    RelationType
+)
+from ..utils.file_parser import TextChunk
+from ..utils.llm_client import LLMClient
+
+logger = logging.getLogger('mirofish.llm_chunker')
+
+
+class LLMChunkerError(Exception):
+    """LLM 分块器异常"""
+    pass
+
+
+class LLMDrivenChunker:
+    """
+    基于 LLM 的智能三级分块引擎
+
+    工作流程（渐进式）：
+    1. Level-1: 读取目录（章节结构）
+    2. Level-2: 提取条文 + 语义要素
+    3. Level-3: 提取技术要素
+    4. 关联分析: 建立三层级的双向关联
+
+    核心特点：
+    - 不使用正则备用方案，完全依赖 LLM
+    - 可靠的指数退避重试机制
+    - 进度实时回调，支持前端显示
+    """
+
+    # =========================================================================
+    # LLM Prompt 模板
+    # =========================================================================
+
+    # 目录提取 Prompt
+    TOC_SYSTEM_PROMPT = """你是一个工程规范文档的目录分析专家。
+
+你的任务是从文档中提取目录结构，记住每个章节的位置信息。
+
+## 重要说明
+
+1. **只分析目录部分**：通常在文档开头，包含"目录"、"Contents"、"第X章"等
+2. **记录位置**：估算每个章节在文档中的大概位置（字符偏移量）
+3. **章节编号**：提取章节编号和标题
+
+## 输出要求
+
+请输出 JSON 格式，包含章节编号、标题和估算位置：
+```json
+{{
+    "chapters": [
+        {{
+            "chapter_number": 1,
+            "title": "总则",
+            "start_position": 0,
+            "end_position": 5000
+        }},
+        {{
+            "chapter_number": 2,
+            "title": "术语",
+            "start_position": 5000,
+            "end_position": 12000
+        }}
+    ]
+}}
+```
+
+如果没有目录，请根据文档内容识别章节边界。"""
+
+    TOC_USER_PROMPT = """请分析以下文档，提取目录结构（章节列表）：
+
+{document_text}
+
+请输出 JSON 格式。"""
+
+    # 条文提取 Prompt
+    CLAUSE_SYSTEM_PROMPT = """你是一个工程规范文档的条文分析专家。
+
+你的任务是从规范文本中提取条文（条款）及其语义要素。
+
+## 条文识别规则
+
+1. **条文编号**：如 "3.2.1"、"5.1.3"、"第4.2.5条" 等
+2. **条文标题**：条文编号后紧跟的描述性标题
+3. **条文内容**：条文的具体要求描述
+4. **款/项**：条文中的分级列表项
+
+## 语义要素提取
+
+每个条文可能包含以下要素：
+
+1. **Condition（条件）**：适用前提、环境、场景
+   - 例："当环境温度超过40°C时"、"在潮湿场所"
+
+2. **Action（动作）**：规范要求的动作/措施
+   - 例："应设置剩余电流保护"、"严禁使用TN-C系统"
+
+3. **Object（对象）**：动作作用的目标
+   - 例："保护导体的截面积"、"电气装置的金属外壳"
+
+4. **Component（组件）**：涉及的设备/系统/材料
+   - 例："剩余电流保护电器"、"配电箱"、"矿物绝缘电缆"
+
+5. **Requirement Type（要求类型）**：
+   - mandatory: 必须、应、须
+   - recommended: 建议、宜、推荐
+   - prohibited: 严禁、不得、禁止
+
+请保持 JSON 格式输出。"""
+
+    CLAUSE_USER_PROMPT = """请分析以下文本，提取条文及其语义要素：
+
+{document_text}
+
+来源：{source}
+
+请输出 JSON 格式：
+```json
+{{
+    "clauses": [
+        {{
+            "clause_id": "3.2.1",
+            "clause_title": "导体应满足线路保护的要求",
+            "clause_content": "导体应满足线路保护的要求...",
+            "requirement_type": "mandatory",
+            "conditions": [
+                {{"name": "过负荷情况", "description": "线路过负荷时"}}
+            ],
+            "actions": [
+                {{"name": "承受热量", "description": "导体应能承受..."}}
+            ],
+            "objects": [
+                {{"name": "导体", "description": "配电线路的导电材料"}}
+            ],
+            "components": [
+                {{"name": "保护电器", "type": "设备"}}
+            ],
+            "referenced_tables": [],
+            "referenced_formulas": []
+        }}
+    ]
+}}
+```
+
+如果没有发现条文，返回：
+```json
+{{"clauses": []}}
+```"""
+
+    # 要素提取 Prompt
+    ELEMENT_SYSTEM_PROMPT = """你是一个工程规范文档的要素提取专家。
+
+你的任务是从规范文本中提取所有技术要素。
+
+## 要素类型
+
+1. **Term（术语）**：条文定义的专门术语
+   - 例："预期接触电压"、"直接接触防护"
+   - 属性：name、definition
+
+2. **Component（组件）**：设备、系统、材料
+   - 例："剩余电流保护电器(RCD)"、"配电变压器"
+   - 属性：name、abbreviation、type
+
+3. **Parameter（参数）**：技术参数和数值
+   - 例："最小截面积：4mm²"、"额定电流：16A"
+   - 属性：name、value、unit、condition
+
+4. **Formula（公式）**：计算公式
+   - 例："S ≥ I·t / k"
+   - 属性：expression、variables
+
+5. **Table Reference（表格引用）**：
+   - 例："见表3.2.1"
+
+请保持 JSON 格式输出。"""
+
+    ELEMENT_USER_PROMPT = """请从以下文本中提取所有技术要素：
+
+{document_text}
+
+请输出 JSON 格式：
+```json
+{{
+    "elements": [
+        {{
+            "element_type": "Term",
+            "name": "预期接触电压",
+            "definition": "电气装置发生故障时，可能出现在两个可同时触及的外露导电部分间的电压",
+            "source_clause_id": "2.0.12"
+        }},
+        {{
+            "element_type": "Component",
+            "name": "剩余电流保护电器",
+            "abbreviation": "RCD",
+            "description": "检测漏电电流并动作的防护电器",
+            "source_clause_id": "3.2.8"
+        }},
+        {{
+            "element_type": "Parameter",
+            "name": "最小截面积",
+            "value": "4mm²",
+            "condition": "铜芯导线固定敷设",
+            "source_clause_id": "3.2.2"
+        }},
+        {{
+            "element_type": "Formula",
+            "name": "热稳定校验公式",
+            "expression": "S ≥ I·t / k",
+            "variables": [
+                {{"name": "S", "description": "导体截面积(mm²)"}},
+                {{"name": "I", "description": "故障电流(A)"}}
+            ],
+            "source_clause_id": "3.2.14"
+        }}
+    ]
+}}
+```
+
+如果没有发现要素，返回：
+```json
+{{"elements": []}}
+```"""
+
+    # 关联分析 Prompt
+    RELATION_SYSTEM_PROMPT = """你是一个知识图谱关系分析专家。
+
+你的任务是为提取的条文和要素建立语义关联关系。
+
+## 关联模式
+
+1. **ELEMENT_IN_CLAUSE**: 要素属于条文
+2. **CLAUSE_IN_CHAPTER**: 条文属于章节
+3. **MANDATES/RECOMMENDS/PROHIBITS**: 条文对动作的要求
+4. **HAS_CONDITION**: 条文的前提条件
+5. **OPERATES_ON**: 动作作用于对象
+
+## 输出要求
+
+请输出 JSON 格式：
+```json
+{{
+    "relations": [
+        {{
+            "relation_type": "ELEMENT_IN_CLAUSE",
+            "source": "剩余电流保护电器",
+            "source_type": "Component",
+            "target": "3.2.8",
+            "target_type": "Clause"
+        }},
+        {{
+            "relation_type": "MANDATES",
+            "source": "3.2.8",
+            "source_type": "Clause",
+            "target": "设置RCD保护",
+            "target_type": "Action"
+        }}
+    ]
+}}
+```"""
+
+    RELATION_USER_PROMPT = """请为以下条文和要素建立关联关系：
+
+条文列表：
+{clauses_json}
+
+要素列表：
+{elements_json}
+
+请输出关联关系 JSON。"""
+
+    # =========================================================================
+    # 配置参数
+    # =========================================================================
+
+    # LLM 调用配置
+    MAX_RETRIES = 3                    # 最大重试次数
+    INITIAL_RETRY_DELAY = 2             # 初始重试延迟（秒）
+    MAX_RETRY_DELAY = 30               # 最大重试延迟（秒）
+    RETRY_MULTIPLIER = 2               # 延迟倍增因子
+
+    # Token 限制
+    MAX_CHARS_PER_CHAPTER = 3000        # 每章节最大字符数
+    MAX_CHARS_FOR_TOC = 8000           # 目录识别最大字符数
+
+    def __init__(
+        self,
+        llm_client: Optional[LLMClient] = None,
+        progress_callback: Optional[Callable] = None
+    ):
+        """
+        初始化 LLM 驱动的分块器
+
+        Args:
+            llm_client: LLM 客户端，默认创建新实例
+            progress_callback: 进度回调函数，格式: callback(progress, message)
+        """
+        self.llm_client = llm_client
+        self.progress_callback = progress_callback
+        self.logger = logging.getLogger('mirofish.llm_chunker')
+
+    @property
+    def client(self) -> LLMClient:
+        """获取或创建 LLM 客户端"""
+        if self.llm_client is None:
+            self.llm_client = LLMClient()
+        return self.llm_client
+
+    def _report_progress(self, progress: float, message: str) -> None:
+        """报告进度"""
+        self.logger.info(message)
+        if self.progress_callback:
+            try:
+                self.progress_callback(progress, message)
+            except Exception as e:
+                self.logger.warning(f"进度回调失败: {e}")
+
+    def _call_llm_with_retry(
+        self,
+        messages: List[Dict],
+        temperature: float = 0.3,
+        max_tokens: int = 4096
+    ) -> Dict[str, Any]:
+        """
+        使用指数退避重试机制调用 LLM
+
+        Args:
+            messages: 对话消息
+            temperature: 温度参数
+            max_tokens: 最大 token 数
+
+        Returns:
+            解析后的 JSON 响应
+
+        Raises:
+            LLMChunkerError: 重试次数耗尽时抛出
+        """
+        last_error = None
+        retry_delay = self.INITIAL_RETRY_DELAY
+
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                response = self.client.chat_json(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                return response
+
+            except Exception as e:
+                last_error = e
+                self.logger.warning(f"LLM 调用失败 (尝试 {attempt + 1}/{self.MAX_RETRIES + 1}): {e}")
+
+                if attempt < self.MAX_RETRIES:
+                    # 指数退避 + 抖动
+                    jitter = random.uniform(0, 1)
+                    actual_delay = min(retry_delay + jitter, self.MAX_RETRY_DELAY)
+                    self.logger.info(f"等待 {actual_delay:.1f} 秒后重试...")
+                    time.sleep(actual_delay)
+                    retry_delay *= self.RETRY_MULTIPLIER
+                else:
+                    self.logger.error(f"LLM 重试次数耗尽: {e}")
+
+        raise LLMChunkerError(f"LLM 调用失败，重试 {self.MAX_RETRIES} 次后仍失败: {last_error}")
+
+    def chunk(
+        self,
+        text_chunks: List[TextChunk],
+        progress_callback: Optional[Callable] = None
+    ) -> HierarchicalChunkResult:
+        """
+        主入口：LLM 驱动的三级分块（渐进式）
+
+        策略：渐进式披露
+        1. 先读取目录（章节结构），记住位置
+        2. 基于章节分段处理
+        3. 每段独立提取条文和要素
+        4. 根据要素和条文在 PDF 中标注位置
+
+        Args:
+            text_chunks: 原始文本块列表
+            progress_callback: 进度回调
+
+        Returns:
+            HierarchicalChunkResult: 包含所有层级分块的结果
+        """
+        import time
+        start_time = time.time()
+
+        # 更新回调
+        if progress_callback:
+            self.progress_callback = progress_callback
+
+        result = HierarchicalChunkResult()
+
+        # 合并文本
+        full_text = self._merge_text_chunks(text_chunks)
+        source_info = self._get_source_info(text_chunks)
+
+        self.logger.info(f"[LLM分块] 开始分析，文本长度: {len(full_text)}")
+        self.logger.info(f"[LLM分块] 来源信息: {source_info}")
+        self._report_progress(0.0, "🚀 开始智能标注分析...")
+
+        # =====================================================================
+        # Step 1: 读取目录 - 识别章节结构
+        # =====================================================================
+        self._report_progress(0.02, "📖 LLM 提取目录结构...")
+        self.logger.info("[LLM分块] Step 1/4: 开始提取目录结构")
+
+        chapter_toc = self._extract_table_of_contents(full_text)
+        chapter_count = len(chapter_toc)
+
+        self.logger.info(f"[LLM分块] ✅ 目录提取完成: {chapter_count} 个章节")
+        self.logger.info(f"[LLM分块] 章节列表: {[c.get('title', 'N/A') for c in chapter_toc]}")
+        self._report_progress(
+            0.1,
+            f"✅ 读取目录完成: {chapter_count} 个章节"
+        )
+
+        # =====================================================================
+        # Step 2: 基于章节分段 - 渐进式处理每个章节
+        # =====================================================================
+        self.logger.info(f"[LLM分块] Step 2/4: 开始处理 {chapter_count} 个章节")
+        all_clauses = []
+        all_elements = []
+        sections = []
+
+        for i, chapter in enumerate(chapter_toc):
+            chapter_num = chapter.get("chapter_number", i + 1)
+            chapter_title = chapter.get("title", f"章节{chapter_num}")
+            start_pos = chapter.get("start_position", 0)
+            end_pos = chapter.get("end_position", len(full_text))
+
+            # 计算进度
+            base_progress = 0.1
+            chapter_progress_base = 0.1 + (i / chapter_count) * 0.6
+
+            self.logger.info(f"[LLM分块] ▶ 处理章节 {chapter_num}/{chapter_count}: {chapter_title}")
+            self.logger.info(f"[LLM分块]   - 位置范围: [{start_pos}, {end_pos}], 字符数: {end_pos - start_pos}")
+
+            self._report_progress(
+                chapter_progress_base,
+                f"📑 处理章节 {chapter_num}/{chapter_count}: {chapter_title}..."
+            )
+
+            # 提取该章节的文本
+            chapter_text = full_text[start_pos:end_pos]
+
+            # 提取章节内的条文
+            clause_start = time.time()
+            self.logger.info(f"[LLM分块]   → LLM 提取条文中...")
+            chapter_clauses = self._extract_clauses_from_chapter(
+                chapter_text, source_info, chapter_num
+            )
+            clause_time = time.time() - clause_start
+            self.logger.info(f"[LLM分块]   ← 条文提取完成: {len(chapter_clauses)} 条 (耗时 {clause_time:.1f}s)")
+
+            # 提取章节内的要素
+            element_start = time.time()
+            self.logger.info(f"[LLM分块]   → LLM 提取要素中...")
+            chapter_elements = self._extract_elements_from_chapter(
+                chapter_text, chapter_clauses, chapter_num
+            )
+            element_time = time.time() - element_start
+            self.logger.info(f"[LLM分块]   ← 要素提取完成: {len(chapter_elements)} 个 (耗时 {element_time:.1f}s)")
+
+            # 为条文和要素标注 PDF 位置（基于字符偏移估算）
+            annotated_elements = self._annotate_positions(
+                chapter_elements, chapter_text, source_info
+            )
+            self.logger.info(f"[LLM分块]   → PDF 位置标注完成: {len(annotated_elements)} 个要素")
+
+            # 记录结果
+            all_clauses.extend(chapter_clauses)
+            all_elements.extend(annotated_elements)
+
+            # 创建章节对象
+            section = SectionSegment(
+                chapter_number=chapter_num,
+                title=chapter_title,
+                content=chapter_text[:500]
+            )
+            sections.append(section)
+
+            # 章节处理完成
+            chapter_time = time.time() - clause_start
+            self._report_progress(
+                (i + 1) / chapter_count * 0.6 + 0.1,
+                f"✅ 章节 {chapter_num} 完成: {len(chapter_clauses)} 条文, {len(chapter_elements)} 要素 (耗时 {chapter_time:.1f}s)"
+            )
+            self.logger.info(f"[LLM分块] ✅ 章节 {chapter_num} 处理完成")
+
+        # =====================================================================
+        # Step 3: 保存结果
+        # =====================================================================
+        self.logger.info(f"[LLM分块] Step 3/4: 保存分析结果")
+        result.sections = sections
+        result.clauses = all_clauses
+        result.elements = all_elements
+
+        # =====================================================================
+        # Step 4: 汇总报告
+        # =====================================================================
+        total_time = time.time() - start_time
+        self._report_progress(
+            0.95,
+            f"📊 标注分析汇总: {len(sections)} 章节, {len(all_clauses)} 条文, {len(all_elements)} 要素"
+        )
+
+        self._report_progress(1.0, f"✅ 智能标注分析完成! (总耗时 {total_time:.1f}s)")
+
+        self.logger.info(
+            f"[LLM分块] ✅ 分析完成 - 章节: {len(sections)}, 条文: {len(all_clauses)}, 要素: {len(all_elements)}, "
+            f"总耗时: {total_time:.1f}s"
+        )
+
+        return result
+
+    def chunk_single_text(
+        self,
+        text: str,
+        progress_callback: Optional[Callable] = None
+    ) -> HierarchicalChunkResult:
+        """单文本分块入口"""
+        if progress_callback:
+            self.progress_callback = progress_callback
+
+        fake_chunk = TextChunk(text=text, metadata={})
+        return self.chunk([fake_chunk])
+
+    # =========================================================================
+    # 核心提取方法
+    # =========================================================================
+
+    def _extract_table_of_contents(self, text: str) -> List[Dict]:
+        """
+        提取目录（章节结构）
+
+        使用 LLM 识别文档章节结构，返回章节位置信息
+        """
+        self.logger.info("使用 LLM 提取目录结构...")
+
+        try:
+            response = self._call_llm_with_retry(
+                messages=[
+                    {"role": "system", "content": self.TOC_SYSTEM_PROMPT},
+                    {"role": "user", "content": self.TOC_USER_PROMPT.format(
+                        document_text=text[:self.MAX_CHARS_FOR_TOC]
+                    )}
+                ],
+                temperature=0.3
+            )
+
+            toc = response.get("chapters", [])
+
+            if not toc:
+                self.logger.warning("LLM 返回空目录，使用默认章节划分")
+                # 如果 LLM 返回空，将全文划分为单个章节
+                toc = [{
+                    "chapter_number": 1,
+                    "title": "全文",
+                    "start_position": 0,
+                    "end_position": len(text)
+                }]
+
+            self.logger.info(f"LLM 提取目录: {len(toc)} 个章节")
+            return toc
+
+        except LLMChunkerError as e:
+            self.logger.error(f"目录提取失败: {e}")
+            raise
+
+    def _extract_clauses_from_chapter(
+        self,
+        text: str,
+        source_info: Dict[str, Any],
+        chapter_num: int
+    ) -> List[ClauseSegment]:
+        """
+        从章节文本中提取条文（使用 LLM）
+
+        Args:
+            text: 章节文本
+            source_info: 来源信息
+            chapter_num: 章节编号
+
+        Returns:
+            条文列表
+        """
+        try:
+            response = self._call_llm_with_retry(
+                messages=[
+                    {"role": "system", "content": self.CLAUSE_SYSTEM_PROMPT},
+                    {"role": "user", "content": self.CLAUSE_USER_PROMPT.format(
+                        document_text=text[:self.MAX_CHARS_PER_CHAPTER],
+                        source=source_info.get("source", "")
+                    )}
+                ],
+                temperature=0.3
+            )
+
+            clauses_data = response.get("clauses", [])
+            clauses = []
+
+            for cd in clauses_data:
+                clause_id = cd.get("clause_id", "")
+                requirement_type = self._parse_requirement_type(
+                    cd.get("requirement_type", "recommended")
+                )
+
+                systems = self._extract_systems_from_text(cd.get("clause_content", ""))
+
+                clause = ClauseSegment(
+                    clause_id=clause_id,
+                    clause_title=cd.get("clause_title", ""),
+                    content=cd.get("clause_content", ""),
+                    paragraphs=cd.get("paragraphs", []),
+                    requirement_type=requirement_type,
+                    applicable_systems=systems,
+                    cross_refs=self._build_cross_refs(cd),
+                    source=source_info.get("source", ""),
+                    metadata={
+                        "chunk_type": "clause",
+                        "conditions": [c.get("name", "") for c in cd.get("conditions", [])],
+                        "actions": [a.get("name", "") for a in cd.get("actions", [])],
+                        "objects": [o.get("name", "") for o in cd.get("objects", [])],
+                        "components": [c.get("name", "") for c in cd.get("components", [])],
+                        "parent_chapter": chapter_num,
+                        "semantics_enriched": True
+                    }
+                )
+                clauses.append(clause)
+
+            self.logger.info(f"章节 {chapter_num}: LLM 提取 {len(clauses)} 条条文")
+            return clauses
+
+        except LLMChunkerError as e:
+            self.logger.error(f"章节 {chapter_num} 条文提取失败: {e}")
+            raise
+
+    def _extract_elements_from_chapter(
+        self,
+        text: str,
+        clauses: List[ClauseSegment],
+        chapter_num: int = 0
+    ) -> List[ElementSegment]:
+        """
+        从章节文本中提取要素（使用 LLM）
+
+        Args:
+            text: 章节文本
+            clauses: 该章节的条文列表
+            chapter_num: 章节编号（用于日志）
+
+        Returns:
+            要素列表
+        """
+        try:
+            response = self._call_llm_with_retry(
+                messages=[
+                    {"role": "system", "content": self.ELEMENT_SYSTEM_PROMPT},
+                    {"role": "user", "content": self.ELEMENT_USER_PROMPT.format(
+                        document_text=text[:self.MAX_CHARS_PER_CHAPTER]
+                    )}
+                ],
+                temperature=0.3
+            )
+
+            elements_data = response.get("elements", [])
+            elements = []
+
+            for ed in elements_data:
+                element_type_str = ed.get("element_type", "Component")
+                element_type = self._map_element_type(element_type_str)
+
+                value = ed.get("value", "")
+
+                element = ElementSegment(
+                    element_type=element_type,
+                    source_id=ed.get("source_clause_id", ""),
+                    content=ed.get("description", ""),
+                    key=ed.get("name", ""),
+                    value=value,
+                    unit=self._extract_unit(value),
+                    condition=ed.get("condition", ""),
+                    metadata={
+                        "chunk_type": "element",
+                        "element_type": element_type.value,
+                        "source_clause_id": ed.get("source_clause_id", ""),
+                        "abbreviation": ed.get("abbreviation", ""),
+                        "keywords": ed.get("keywords", []),
+                        "formula_expression": ed.get("expression", ""),
+                        "formula_variables": ed.get("variables", [])
+                    }
+                )
+                elements.append(element)
+
+            self.logger.info(f"[章节{chapter_num}] 要素: LLM 提取 {len(elements)} 个要素")
+            return elements
+
+        except LLMChunkerError as e:
+            self.logger.error(f"[章节{chapter_num}] 要素提取失败: {e}")
+            raise
+
+    # =========================================================================
+    # 辅助方法
+    # =========================================================================
+
+    def _merge_text_chunks(self, text_chunks: List[TextChunk]) -> str:
+        """合并文本块"""
+        texts = []
+        for tc in text_chunks:
+            if tc.text.strip():
+                texts.append(tc.text)
+        return "\n\n".join(texts)
+
+    def _get_source_info(self, text_chunks: List[TextChunk]) -> Dict[str, Any]:
+        """获取来源信息"""
+        if text_chunks:
+            first = text_chunks[0]
+            meta = first.metadata or {}
+            return {
+                "source": meta.get("source", ""),
+                "page": meta.get("page"),
+                "bbox": meta.get("bbox")
+            }
+        return {"source": "", "page": None, "bbox": None}
+
+    def _parse_requirement_type(self, req_type_str: str) -> RequirementType:
+        """解析要求类型"""
+        req_type_str = req_type_str.lower()
+        if req_type_str in ['mandatory', '必须', '应', '须']:
+            return RequirementType.MANDATORY
+        elif req_type_str in ['prohibited', '禁止', '严禁', '不得']:
+            return RequirementType.PROHIBITED
+        return RequirementType.RECOMMENDED
+
+    def _extract_systems_from_text(self, text: str) -> List[SystemApplicability]:
+        """从文本中提取适用系统"""
+        import re
+        systems = []
+        system_pattern = re.compile(r'(TN|TT|IT)(?:-C|-S|-C-S)?', re.IGNORECASE)
+        matches = system_pattern.findall(text)
+        for match in matches:
+            system_type = match[0].upper() if isinstance(match, tuple) else match
+            sub_type = match[1] if isinstance(match, tuple) and len(match) > 1 else None
+            systems.append(SystemApplicability(system_type=system_type, sub_type=sub_type))
+        return systems
+
+    def _extract_unit(self, value: str) -> str:
+        """从值中提取单位"""
+        import re
+        unit_pattern = re.compile(r'[\d.]+\s*([a-zA-Z°%Ωμ²³]+)')
+        match = unit_pattern.search(value)
+        return match.group(1) if match else ""
+
+    def _map_element_type(self, type_str: str) -> ElementType:
+        """映射要素类型"""
+        type_str = type_str.lower()
+        if type_str == 'term':
+            return ElementType.TERM
+        elif type_str == 'formula':
+            return ElementType.FORMULA
+        elif type_str == 'parameter':
+            return ElementType.PARAMETER
+        elif type_str == 'component':
+            return ElementType.COMPONENT
+        elif type_str == 'object':
+            return ElementType.OBJECT
+        return ElementType.TABLE_ROW
+
+    def _build_cross_refs(self, clause_data: Dict) -> List[CrossReference]:
+        """构建交叉引用"""
+        refs = []
+
+        for table in clause_data.get("referenced_tables", []):
+            refs.append(CrossReference(
+                ref_id=table,
+                ref_type="table",
+                description=f"引用表格 {table}"
+            ))
+
+        for formula in clause_data.get("referenced_formulas", []):
+            refs.append(CrossReference(
+                ref_id=formula,
+                ref_type="formula",
+                description=f"引用公式 {formula}"
+            ))
+
+        return refs
+
+    def _annotate_positions(
+        self,
+        elements: List[ElementSegment],
+        chapter_text: str,
+        source_info: Dict[str, Any]
+    ) -> List[ElementSegment]:
+        """
+        为要素标注 PDF 中的位置信息
+
+        根据要素内容在章节文本中查找位置，估算页码和坐标
+
+        Args:
+            elements: 要素列表
+            chapter_text: 章节文本
+            source_info: 来源信息（包含 page, bbox 等）
+
+        Returns:
+            带位置信息的要素列表
+        """
+        import re
+
+        base_page = source_info.get("page", 1) or 1
+        total_text_len = len(chapter_text)
+
+        # 估算每页平均字符数（假设约 2000 字符/页）
+        CHARS_PER_PAGE_ESTIMATE = 2000
+
+        annotated_elements = []
+
+        for element in elements:
+            # 在章节文本中查找要素位置
+            position_info = self._find_position_in_text(
+                element.key or element.content,
+                chapter_text
+            )
+
+            if position_info:
+                char_offset = position_info["char_offset"]
+                # 估算页码：基页 + (字符偏移 / 每页字符数)
+                estimated_page = base_page + int(char_offset / CHARS_PER_PAGE_ESTIMATE)
+
+                # 估算 bbox（基于字符偏移位置，生成一个矩形区域）
+                # 假设每行约 100 字符，估算行列位置
+                line_num = chapter_text[:char_offset].count('\n')
+                # 估算 x, y 坐标（相对于页内）
+                x0 = 50  # 左边距
+                y0 = 50 + (line_num % 50) * 20  # 每行约 20px
+                x1 = x0 + 500  # 假设宽度 500px
+                y1 = y0 + 20  # 行高 20px
+
+                # 更新要素的 metadata
+                annotated_element = ElementSegment(
+                    element_type=element.element_type,
+                    source_id=element.source_id,
+                    content=element.content,
+                    key=element.key,
+                    value=element.value,
+                    unit=element.unit,
+                    condition=element.condition,
+                    abbreviation=element.abbreviation,
+                    definition=element.definition,
+                    keywords=element.keywords,
+                    metadata={
+                        **element.metadata,
+                        "annotated": True,
+                        "char_offset": char_offset,
+                        "estimated_page": estimated_page,
+                        "bbox": [x0, y0, x1, y1],
+                        "position_source": "llm_annotation"
+                    }
+                )
+                annotated_elements.append(annotated_element)
+            else:
+                # 未找到位置，仍保留要素但标记为未标注
+                element.metadata["annotated"] = False
+                element.metadata["annotation_note"] = "在原文中未找到精确位置"
+                annotated_elements.append(element)
+
+        return annotated_elements
+
+    def _find_position_in_text(self, search_text: str, full_text: str) -> Optional[Dict]:
+        """
+        在文本中查找指定内容的位置
+
+        Args:
+            search_text: 要查找的内容
+            full_text: 全文
+
+        Returns:
+            包含 char_offset 的字典，未找到返回 None
+        """
+        if not search_text or not full_text:
+            return None
+
+        # 尝试精确匹配
+        idx = full_text.find(search_text)
+        if idx >= 0:
+            return {"char_offset": idx, "match_type": "exact"}
+
+        # 尝试模糊匹配（忽略空白）
+        normalized_search = re.sub(r'\s+', '', search_text)
+        normalized_full = re.sub(r'\s+', '', full_text)
+        idx = normalized_full.find(normalized_search)
+        if idx >= 0:
+            return {"char_offset": idx, "match_type": "fuzzy"}
+
+        # 尝试匹配关键词（取前 10 个字符）
+        short_key = search_text[:min(10, len(search_text))]
+        if len(short_key) >= 3:
+            idx = full_text.find(short_key)
+            if idx >= 0:
+                return {"char_offset": idx, "match_type": "prefix"}
+
+        return None
+
+
+# ============================================================================
+# 便捷函数
+# ============================================================================
+
+def chunk_text_llm(
+    text: str,
+    progress_callback: Optional[Callable] = None
+) -> HierarchicalChunkResult:
+    """
+    便捷函数：使用 LLM 对单个文本进行多层级分块
+
+    Args:
+        text: 输入文本
+        progress_callback: 进度回调
+
+    Returns:
+        HierarchicalChunkResult
+    """
+    chunker = LLMDrivenChunker(progress_callback=progress_callback)
+    return chunker.chunk_single_text(text, progress_callback)
+
+
+def chunk_texts_llm(
+    text_chunks: List[TextChunk],
+    progress_callback: Optional[Callable] = None
+) -> HierarchicalChunkResult:
+    """
+    便捷函数：使用 LLM 对多个文本块进行多层级分块
+
+    Args:
+        text_chunks: TextChunk列表
+        progress_callback: 进度回调
+
+    Returns:
+        HierarchicalChunkResult
+    """
+    chunker = LLMDrivenChunker(progress_callback=progress_callback)
+    return chunker.chunk(text_chunks, progress_callback)

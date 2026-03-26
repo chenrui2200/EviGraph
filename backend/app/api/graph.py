@@ -249,11 +249,34 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
             except Exception as e:
                 # Update project status to failed
                 build_logger.error(f"[{task_id}] Graph build failed: {str(e)}")
-                build_logger.debug(traceback.format_exc())
+                build_logger.debug(f"[{task_id}] Traceback: {traceback.format_exc()}")
 
-                project.status = ProjectStatus.FAILED
-                project.error = str(e)
-                ProjectManager.save_project(project)
+                # 详细错误诊断日志
+                build_logger.error(f"[{task_id}] === 错误诊断信息 ===")
+                build_logger.error(f"[{task_id}] - 错误类型: {type(e).__name__}")
+                build_logger.error(f"[{task_id}] - 错误消息: {str(e)}")
+                build_logger.error(f"[{task_id}] - 项目ID: {project_id}")
+                build_logger.error(f"[{task_id}] - 图谱ID: {project.graph_id if 'project' in dir() and hasattr(project, 'graph_id') else 'N/A'}")
+
+                # 尝试获取更多上下文信息
+                try:
+                    if 'hierarchical_result' in dir():
+                        build_logger.error(f"[{task_id}] - hierarchical_result 存在: True")
+                    if 'chunks' in dir():
+                        build_logger.error(f"[{task_id}] - chunks 变量存在: True, 长度: {len(chunks) if 'chunks' in dir() and chunks else 0}")
+                    if 'text_chunks' in dir():
+                        build_logger.error(f"[{task_id}] - text_chunks 存在: True")
+                except Exception as diag_e:
+                    build_logger.warning(f"[{task_id}] - 诊断信息收集失败: {diag_e}")
+
+                build_logger.error(f"[{task_id}] ==========================")
+
+                try:
+                    project.status = ProjectStatus.FAILED
+                    project.error = str(e)
+                    ProjectManager.save_project(project)
+                except Exception as save_e:
+                    build_logger.error(f"[{task_id}] - 保存项目状态失败: {save_e}")
 
                 task_manager.update_task(
                     task_id,
@@ -546,9 +569,15 @@ def get_project_document(project_id: str, filename: str):
 def generate_ontology():
     """
     Interface 1: Upload files and analyze to generate ontology definition (Asynchronous)
+
+    新流程：
+    1. 提取 PDF 文本
+    2. 调用 LLMDrivenChunker 进行章节分析（提取目录、条文、要素）
+    3. 基于分析结果，带着章节、条文、要素信息拆分 chunks
+    4. 保存结果
     """
     try:
-        logger.info("=== Starting asynchronous ontology generation ===")
+        logger.info("=== Starting 智能Chunks标注分析流程 ===")
 
         # Get parameters
         simulation_requirement = request.form.get('simulation_requirement', '')
@@ -591,7 +620,7 @@ def generate_ontology():
         # Create task
         task_manager = TaskManager()
         task_id = task_manager.create_task(
-            task_type="ontology_generation",
+            task_type="intelligent_chunk_annotation",
             metadata={"project_id": project.project_id}
         )
 
@@ -603,95 +632,179 @@ def generate_ontology():
         # Start background thread
         def ontology_task():
             try:
-                # BREAKPOINT RESUME LOGIC: Check if text is already extracted
-                existing_text = ProjectManager.get_extracted_text(project.project_id)
-                existing_chunks = ProjectManager.get_chunks(project.project_id)
+                build_logger = get_logger('mirofish.ontology')
 
-                document_texts = []
+                # ========== 阶段 1: 提取 PDF 文本 ==========
+                build_logger.info(f"[{task_id}] 阶段 1/4: 提取 PDF 文本...")
+                task_manager.update_task(task_id, status=TaskStatus.PROCESSING, progress=5, message="🚀 开始提取 PDF 文本...")
+
+                text_chunks_list = []
                 all_text = ""
-                all_chunks_data = []
+                total_files = len(saved_files)
 
-                if existing_text and existing_chunks:
-                    task_manager.update_task(task_id, progress=35, message="Found existing extracted text. Resuming from analysis...")
-                    all_text = existing_text
-                    all_chunks_data = existing_chunks
-                    # Reconstruct document_texts (simplified for ontology)
-                    document_texts = [existing_text]
-                else:
-                    task_manager.update_task(task_id, status=TaskStatus.PROCESSING, progress=5, message="Starting text extraction...")
-                    total_files = len(saved_files)
-                    for idx, file_info in enumerate(saved_files):
-                        orig_name = file_info["original_filename"]
-                        # Range 5% - 35%
-                        current_progress = 5 + int((idx / total_files) * 30)
+                for idx, file_info in enumerate(saved_files):
+                    orig_name = file_info["original_filename"]
+                    current_progress = 5 + int((idx / total_files) * 10)
 
-                        msg = f"Extracting text from {orig_name} ({idx + 1}/{total_files})..."
-                        task_manager.update_task(
-                            task_id,
-                            progress=current_progress,
-                            message=msg,
-                            log=msg
-                        )
+                    msg = f"📄 提取文本: {orig_name} ({idx + 1}/{total_files})..."
+                    build_logger.info(f"[{task_id}] {msg}")
+                    task_manager.update_task(task_id, progress=current_progress, message=msg, log=msg)
 
-                        try:
-                            chunks = FileParser.extract_chunks(file_info["path"], override_filename=orig_name)
-                            if not chunks:
-                                task_manager.update_task(task_id, log=f"Warning: No text extracted from {orig_name}")
-                            else:
-                                success_msg = f"Successfully extracted {len(chunks)} chunks from {orig_name}"
-                                task_manager.update_task(task_id, log=success_msg)
-                        except Exception as ee:
-                            task_manager.update_task(task_id, log=f"Extraction failed for {orig_name}: {str(ee)}")
-                            # Fallback
-                            from pathlib import Path
-                            text = Path(file_info["path"]).read_text(encoding='utf-8', errors='replace')
-                            chunks = [TextChunk(text=text, metadata={"source": orig_name, "type": "fallback"})]
+                    try:
+                        chunks = FileParser.extract_chunks(file_info["path"], override_filename=orig_name)
+                        if not chunks:
+                            task_manager.update_task(task_id, log=f"⚠️ 警告: 未从 {orig_name} 提取到文本")
+                        else:
+                            success_msg = f"✅ 从 {orig_name} 提取了 {len(chunks)} 个文本块"
+                            build_logger.info(f"[{task_id}] {success_msg}")
+                            task_manager.update_task(task_id, log=success_msg)
+                    except Exception as ee:
+                        task_manager.update_task(task_id, log=f"❌ {orig_name} 提取失败: {str(ee)}")
+                        from pathlib import Path
+                        text = Path(file_info["path"]).read_text(encoding='utf-8', errors='replace')
+                        chunks = [TextChunk(text=text, metadata={"source": orig_name, "type": "fallback"})]
 
-                        doc_text = "\n\n".join([c.text for c in chunks])
-                        doc_text = TextProcessor.preprocess_text(doc_text)
-                        document_texts.append(doc_text)
-                        all_text += f"\n\n=== {orig_name} ===\n{doc_text}"
-                        all_chunks_data.extend([c.to_dict() for c in chunks])
+                    text_chunks_list.extend(chunks)
+                    doc_text = "\n\n".join([c.text for c in chunks])
+                    doc_text = TextProcessor.preprocess_text(doc_text)
+                    all_text += f"\n\n=== {orig_name} ===\n{doc_text}"
 
-                    # Save extracted data
-                    project.total_text_length = len(all_text)
-                    ProjectManager.save_extracted_text(project.project_id, all_text)
-                    ProjectManager.save_chunks(project.project_id, all_chunks_data)
+                # 保存原始文本
+                project.total_text_length = len(all_text)
+                ProjectManager.save_extracted_text(project.project_id, all_text)
 
-                task_manager.update_task(task_id, progress=40, message=f"Text ready ({len(all_text)} chars). Loading fixed ontology...")
-                task_manager.update_task(task_id, log="Using fixed NormativeEngineeringOntology (replaces dynamic generation)...")
+                # 转换为 TextChunk 对象用于后续分析
+                text_chunks = [TextChunk(c.text, c.metadata) for c in text_chunks_list]
+                build_logger.info(f"[{task_id}] ✅ PDF 文本提取完成，共 {len(text_chunks)} 个文本块")
 
-                # 使用固定本体替代动态生成
+                # ========== 阶段 2: LLM 章节分析（提取目录、条文、要素） ==========
+                build_logger.info(f"[{task_id}] 阶段 2/4: LLM 章节分析...")
+                task_manager.update_task(task_id, progress=20, message="📖 开始 LLM 章节分析...", log="开始 LLM 章节分析")
+
+                from ..services.llm_driven_chunker import LLMDrivenChunker
+
+                def chunker_progress_callback(progress, message):
+                    """将分块器的进度映射到 20-70% 范围"""
+                    mapped_progress = 20 + int(progress * 50)
+                    build_logger.info(f"[{task_id}] {message}")
+                    task_manager.update_task(task_id, progress=mapped_progress, message=message, log=message)
+
+                chunker = LLMDrivenChunker(progress_callback=chunker_progress_callback)
+                chunk_result = chunker.chunk(text_chunks, chunker_progress_callback)
+
+                build_logger.info(
+                    f"[{task_id}] ✅ LLM 章节分析完成: "
+                    f"{len(chunk_result.sections)} 章节, "
+                    f"{len(chunk_result.clauses)} 条文, "
+                    f"{len(chunk_result.elements)} 要素"
+                )
+
+                # ========== 阶段 3: 基于分析结果拆分 Chunks ==========
+                build_logger.info(f"[{task_id}] 阶段 3/4: 基于章节分析结果拆分 Chunks...")
+                task_manager.update_task(task_id, progress=75, message="🔄 基于章节分析结果拆分 Chunks...", log="开始拆分 Chunks")
+
+                # 将章节、条文、要素转换为 chunks
+                structured_chunks = _convert_analysis_to_chunks(
+                    chunk_result,
+                    text_chunks,
+                    project.project_id
+                )
+
+                # 保存 chunks
+                ProjectManager.save_chunks(project.project_id, structured_chunks)
+
+                # 保存智能分析结果（章节、条文、要素）
+                intelligent_chunks_data = {
+                    "sections": [
+                        {
+                            "chapter_number": s.chapter_number,
+                            "title": s.title,
+                            "content": s.content
+                        }
+                        for s in chunk_result.sections
+                    ],
+                    "clauses": [
+                        {
+                            "clause_id": c.clause_id,
+                            "clause_title": c.clause_title,
+                            "content": c.content,
+                            "requirement_type": c.requirement_type.value,
+                            "conditions": c.conditions,
+                            "actions": c.actions,
+                            "components": c.components,
+                            "objects": c.objects,
+                            "parent_chapter": c.parent_chapter,
+                            "metadata": c.metadata
+                        }
+                        for c in chunk_result.clauses
+                    ],
+                    "elements": [
+                        {
+                            "element_type": e.element_type.value,
+                            "key": e.key,
+                            "value": str(e.value) if e.value else "",
+                            "unit": e.unit,
+                            "condition": e.condition,
+                            "abbreviation": e.abbreviation,
+                            "definition": e.definition,
+                            "keywords": e.keywords,
+                            "source_clause_id": e.source_id,
+                            "metadata": e.metadata
+                        }
+                        for e in chunk_result.elements
+                    ]
+                }
+                ProjectManager.save_intelligent_chunks(project.project_id, intelligent_chunks_data)
+
+                build_logger.info(f"[{task_id}] ✅ Chunks 拆分完成，共 {len(structured_chunks)} 个 chunks")
+
+                # ========== 阶段 4: 保存本体和完成 ==========
+                task_manager.update_task(task_id, progress=85, message="💾 保存本体定义...", log="保存本体定义")
+
+                # 使用固定本体
                 from ..services.normative_ontology import NORMATIVE_ONTOLOGY
                 ontology = NORMATIVE_ONTOLOGY
 
-                task_manager.update_task(task_id, log="Fixed ontology loaded. Saving to project...")
-
-                # Save to project
                 if ontology:
                     project.ontology = {
                         "entity_types": ontology.get("entity_types", []),
                         "edge_types": ontology.get("edge_types", [])
                     }
-                    project.analysis_summary = "使用固定工程规范本体定义（Section, Clause, Term, Component, Condition, Action, Requirement, Parameter, Formula）"
+                    project.analysis_summary = (
+                        f"智能标注分析完成：{len(chunk_result.sections)} 章节、"
+                        f"{len(chunk_result.clauses)} 条文、{len(chunk_result.elements)} 要素"
+                    )
                 else:
                     project.ontology = {"entity_types": [], "edge_types": []}
                     project.analysis_summary = ""
 
-                project.status = ProjectStatus.ONTOLOGY_GENERATED
+                project.status = ProjectStatus.GRAPH_CHUNKED
                 ProjectManager.save_project(project)
 
-                # Complete
+                # 完成
+                summary = (
+                    f"✅ 智能Chunks标注分析完成！\n"
+                    f"   - 章节: {len(chunk_result.sections)}\n"
+                    f"   - 条文: {len(chunk_result.clauses)}\n"
+                    f"   - 要素: {len(chunk_result.elements)}\n"
+                    f"   - Chunks: {len(structured_chunks)}"
+                )
+                build_logger.info(f"[{task_id}] {summary}")
+
                 task_manager.complete_task(task_id, {
                     "project_id": project.project_id,
                     "ontology": project.ontology,
                     "analysis_summary": project.analysis_summary,
-                    "total_text_length": project.total_text_length
+                    "total_text_length": project.total_text_length,
+                    "sections": len(chunk_result.sections),
+                    "clauses": len(chunk_result.clauses),
+                    "elements": len(chunk_result.elements),
+                    "chunks": len(structured_chunks)
                 })
-                logger.info(f"Ontology generation task {task_id} completed.")
+                build_logger.info(f"[{task_id}] 任务完成.")
 
             except Exception as e:
-                logger.error(f"Ontology task failed: {str(e)}\n{traceback.format_exc()}")
+                build_logger.error(f"[{task_id}] ❌ 任务失败: {str(e)}\n{traceback.format_exc()}")
                 project.status = ProjectStatus.FAILED
                 project.error = str(e)
                 ProjectManager.save_project(project)
@@ -705,7 +818,7 @@ def generate_ontology():
             "data": {
                 "project_id": project.project_id,
                 "task_id": task_id,
-                "message": "Ontology generation started"
+                "message": "智能Chunks标注分析任务已启动"
             }
         })
 
@@ -716,6 +829,359 @@ def generate_ontology():
             "error": str(e),
             "traceback": traceback.format_exc()
         }), 500
+
+
+def _convert_analysis_to_chunks(chunk_result, text_chunks, project_id):
+    """
+    将章节分析结果转换为 chunks
+
+    基于条文和要素，在原始文本中定位并创建 chunks
+
+    Args:
+        chunk_result: HierarchicalChunkResult（包含章节、条文、要素）
+        text_chunks: 原始 TextChunk 列表
+        project_id: 项目ID
+
+    Returns:
+        chunks 列表
+    """
+    from ..models.clause import ClauseSegment, ElementSegment
+
+    chunks = []
+
+    # 1. 为每个条文创建一个 chunk
+    for clause in chunk_result.clauses:
+        # 在原始文本中查找条文位置
+        clause_text = clause.content
+        source_file = clause.source or "unknown"
+
+        # 查找所属章节
+        parent_chapter = None
+        for section in chunk_result.sections:
+            if section.chapter_number == clause.parent_chapter:
+                parent_chapter = section.title
+                break
+
+        chunks.append({
+            "text": clause_text,
+            "metadata": {
+                "chunk_type": "clause",
+                "level": 2,
+                "level_name": "Level2",
+                "clause_id": clause.clause_id,
+                "clause_title": clause.clause_title,
+                "requirement_type": clause.requirement_type.value if hasattr(clause.requirement_type, 'value') else str(clause.requirement_type),
+                "source": source_file,
+                "parent_chapter": clause.parent_chapter,
+                "parent_chapter_title": parent_chapter,
+                "conditions": clause.conditions or [],
+                "actions": clause.actions or [],
+                "components": clause.components or [],
+                "objects": clause.objects or [],
+                "project_id": project_id,
+                **clause.metadata
+            }
+        })
+
+    # 2. 为每个要素创建一个 chunk
+    for element in chunk_result.elements:
+        source_clause_id = element.source_id or ""
+
+        chunks.append({
+            "text": f"{element.key}: {element.content}" if element.key else element.content,
+            "metadata": {
+                "chunk_type": "element",
+                "level": 3,
+                "level_name": "Level3",
+                "element_type": element.element_type.value if hasattr(element.element_type, 'value') else str(element.element_type),
+                "key": element.key,
+                "value": str(element.value) if element.value else "",
+                "unit": element.unit,
+                "condition": element.condition,
+                "abbreviation": element.abbreviation,
+                "definition": element.definition,
+                "source_clause_id": source_clause_id,
+                "project_id": project_id,
+                **element.metadata
+            }
+        })
+
+    # 3. 为每个章节创建一个 chunk（包含章节描述）
+    for section in chunk_result.sections:
+        if section.content:  # 只添加有内容的章节
+            chunks.append({
+                "text": f"{section.title}\n\n{section.content}",
+                "metadata": {
+                    "chunk_type": "section",
+                    "level": 1,
+                    "level_name": "Level1",
+                    "chapter_number": section.chapter_number,
+                    "title": section.title,
+                    "project_id": project_id
+                }
+            })
+
+    return chunks
+
+
+# ============== Interface 1.5: 智能Chunks标注分析 ==============
+
+@graph_bp.route('/chunk/intelligent', methods=['POST'])
+def intelligent_chunk():
+    """
+    Interface 1.5: 智能Chunks标注分析
+
+    在 PDF 解析后执行 LLM 智能分块+标注分析：
+    1. LLM 提取目录（章节结构）
+    2. LLM 提取条文 + 要素
+    3. 根据要素和条文在 PDF 中标注位置
+
+    Request (JSON):
+        {
+            "project_id": "proj_xxxx",      // Required
+            "reset": false                  // Optional, 是否重置并重新分块
+        }
+
+    Response:
+        {
+            "success": true,
+            "data": {
+                "project_id": "proj_xxxx",
+                "task_id": "task_xxxx",
+                "message": "智能Chunks标注分析任务已启动"
+            }
+        }
+    """
+    try:
+        logger.info("=== Starting 智能Chunks标注分析 ===")
+
+        data = request.get_json() or {}
+        project_id = data.get('project_id')
+        reset = data.get('reset', False)
+
+        if not project_id:
+            return jsonify({
+                "success": False,
+                "error": "请提供 project_id"
+            }), 400
+
+        # 获取项目
+        project = ProjectManager.get_project(project_id)
+        if not project:
+            return jsonify({
+                "success": False,
+                "error": f"项目不存在: {project_id}"
+            }), 404
+
+        # 获取已解析的 chunks
+        chunks_data = ProjectManager.get_chunks(project_id)
+        if not chunks_data:
+            # 尝试直接解析文本
+            text = ProjectManager.get_extracted_text(project_id)
+            if not text:
+                return jsonify({
+                    "success": False,
+                    "error": "未找到已解析的文档，请先上传并解析文档"
+                }), 400
+            # 将文本转换为 chunks
+            chunks_data = [{"text": text, "metadata": {"source": project.name or "document"}}]
+
+        # 转换为 TextChunk 对象
+        text_chunks = [TextChunk(c["text"], c["metadata"]) for c in chunks_data]
+
+        # 如果需要重置或尚未完成分块，创建新任务
+        if reset or project.status not in [ProjectStatus.GRAPH_CHUNKED]:
+            # 创建任务
+            task_manager = TaskManager()
+            task_id = task_manager.create_task(
+                task_type="intelligent_chunk_annotation",
+                metadata={"project_id": project_id}
+            )
+
+            # 更新项目状态
+            project.status = ProjectStatus.GRAPH_CHUNKING
+            project.graph_build_task_id = task_id
+            project.error = None
+            ProjectManager.save_project(project)
+
+            # 启动后台线程
+            def chunking_task():
+                try:
+                    from ..services.llm_driven_chunker import LLMDrivenChunker
+                    from ..services.llm_driven_chunker import LLMChunkerError
+
+                    chunker_logger = get_logger('mirofish.chunker')
+                    task_mgr = TaskManager()
+
+                    def progress_callback(progress, message):
+                        """进度回调"""
+                        chunker_logger.info(message)
+                        task_mgr.update_task(
+                            task_id,
+                            status=TaskStatus.PROCESSING,
+                            progress=int(progress * 100),
+                            message=message,
+                            log=message
+                        )
+
+                    chunker_logger.info(f"[{task_id}] 智能Chunks标注分析任务开始...")
+                    chunker_logger.info(f"[{task_id}] 待分析 chunks 数量: {len(text_chunks)}")
+
+                    task_mgr.update_task(
+                        task_id,
+                        status=TaskStatus.PROCESSING,
+                        progress=0,
+                        message="🚀 开始智能Chunks标注分析..."
+                    )
+
+                    # 执行 LLM 标注分析（包含章节处理、条文提取、要素提取、位置标注）
+                    chunker = LLMDrivenChunker(progress_callback=progress_callback)
+                    result = chunker.chunk(text_chunks, progress_callback)
+
+                    # 保存分块结果
+                    chunks_result = {
+                        "sections": [
+                            {
+                                "chapter_number": s.chapter_number,
+                                "title": s.title,
+                                "content": s.content
+                            }
+                            for s in result.sections
+                        ],
+                        "clauses": [
+                            {
+                                "clause_id": c.clause_id,
+                                "clause_title": c.clause_title,
+                                "content": c.content,
+                                "requirement_type": c.requirement_type.value,
+                                "conditions": c.conditions,
+                                "actions": c.actions,
+                                "components": c.components,
+                                "objects": c.objects,
+                                "parent_chapter": c.parent_chapter,
+                                "metadata": c.metadata
+                            }
+                            for c in result.clauses
+                        ],
+                        "elements": [
+                            {
+                                "element_type": e.element_type.value,
+                                "key": e.key,
+                                "value": str(e.value) if e.value else "",
+                                "unit": e.unit,
+                                "condition": e.condition,
+                                "abbreviation": e.abbreviation,
+                                "definition": e.definition,
+                                "keywords": e.keywords,
+                                "source_clause_id": e.source_id,
+                                "metadata": e.metadata
+                            }
+                            for e in result.elements
+                        ]
+                    }
+
+                    # 保存到项目
+                    ProjectManager.save_intelligent_chunks(project_id, chunks_result)
+
+                    # 更新项目状态
+                    project = ProjectManager.get_project(project_id)
+                    project.status = ProjectStatus.GRAPH_CHUNKED
+                    ProjectManager.save_project(project)
+
+                    # 完成任务
+                    summary = f"✅ 标注分析完成: {len(result.sections)} 章节, {len(result.clauses)} 条文, {len(result.elements)} 要素"
+                    chunker_logger.info(f"[{task_id}] {summary}")
+
+                    task_mgr.update_task(
+                        task_id,
+                        status=TaskStatus.COMPLETED,
+                        progress=100,
+                        message=summary,
+                        log=summary
+                    )
+
+                except LLMChunkerError as e:
+                    chunker_logger.error(f"[{task_id}] LLM 分块失败: {e}")
+                    task_mgr.update_task(
+                        task_id,
+                        status=TaskStatus.FAILED,
+                        message=f"LLM 分块失败: {e}",
+                        error=str(e)
+                    )
+                    # 更新项目状态
+                    project = ProjectManager.get_project(project_id)
+                    project.status = ProjectStatus.FAILED
+                    project.error = str(e)
+                    ProjectManager.save_project(project)
+
+                except Exception as e:
+                    chunker_logger.error(f"[{task_id}] 分块异常: {e}\n{traceback.format_exc()}")
+                    task_mgr.update_task(
+                        task_id,
+                        status=TaskStatus.FAILED,
+                        message=f"分块异常: {e}",
+                        error=str(e)
+                    )
+
+            thread = threading.Thread(target=chunking_task, daemon=True)
+            thread.start()
+
+            return jsonify({
+                "success": True,
+                "data": {
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "message": "智能Chunks标注分析任务已启动"
+                }
+            })
+        else:
+            # 已有分块结果，返回现有状态
+            existing_task_id = project.graph_build_task_id
+            task = TaskManager().get_task(existing_task_id) if existing_task_id else None
+
+            return jsonify({
+                "success": True,
+                "data": {
+                    "project_id": project_id,
+                    "task_id": existing_task_id,
+                    "status": project.status.value,
+                    "message": "LLM 分块已完成",
+                    "task": task.to_dict() if task else None
+                }
+            })
+
+    except Exception as e:
+        logger.error(f"API Error: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+@graph_bp.route('/chunk/<project_id>', methods=['GET'])
+def get_intelligent_chunks(project_id: str):
+    """
+    获取项目的 LLM 智能分块结果
+    """
+    project = ProjectManager.get_project(project_id)
+    if not project:
+        return jsonify({
+            "success": False,
+            "error": f"项目不存在: {project_id}"
+        }), 404
+
+    chunks = ProjectManager.get_intelligent_chunks(project_id)
+    if not chunks:
+        return jsonify({
+            "success": False,
+            "error": "尚未执行 LLM 分块"
+        }), 404
+
+    return jsonify({
+        "success": True,
+        "data": chunks
+    })
 
 
 # ============== Interface 2: Build Graph ==============

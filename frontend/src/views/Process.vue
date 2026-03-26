@@ -234,7 +234,7 @@
             <div class="phase-header">
               <span class="phase-num">01</span>
               <div class="phase-info">
-                <div class="phase-title">智能Chunks分析</div>
+                <div class="phase-title">智能Chunks标注分析</div>
                 <div class="phase-api">/api/graph/ontology/generate</div>
               </div>
               <span class="phase-status" :class="getPhaseStatusClass(0)">

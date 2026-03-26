@@ -19,7 +19,8 @@ class ProjectStatus(str, Enum):
     CREATED = "created"              # Just created, files uploaded
     ONTOLOGY_GENERATION = "ontology_generation" # Ontology generation in progress
     ONTOLOGY_GENERATED = "ontology_generated"  # Ontology generated
-    GRAPH_CHUNKING = "graph_chunking"        # Text chunking in progress
+    GRAPH_CHUNKING = "graph_chunking"        # LLM 智能分块中 (新增)
+    GRAPH_CHUNKED = "graph_chunked"          # LLM 智能分块完成 (新增)
     GRAPH_EMBEDDING = "graph_embedding"      # Embedding generation in progress
     GRAPH_INDEXING = "graph_indexing"        # Index creation in progress
     GRAPH_BUILDING = "graph_building"         # Graph building in progress
@@ -358,4 +359,26 @@ class ProjectManager:
             for f in os.listdir(files_dir)
             if os.path.isfile(os.path.join(files_dir, f))
         ]
+
+    @classmethod
+    def _get_intelligent_chunks_path(cls, project_id: str) -> str:
+        """Get path for LLM intelligent chunks"""
+        project_dir = cls._get_project_dir(project_id)
+        return os.path.join(project_dir, 'intelligent_chunks.json')
+
+    @classmethod
+    def save_intelligent_chunks(cls, project_id: str, chunks: Dict[str, Any]) -> None:
+        """Save LLM intelligent chunks result"""
+        path = cls._get_intelligent_chunks_path(project_id)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(chunks, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def get_intelligent_chunks(cls, project_id: str) -> Optional[Dict[str, Any]]:
+        """Get LLM intelligent chunks result"""
+        path = cls._get_intelligent_chunks_path(project_id)
+        if not os.path.exists(path):
+            return None
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
 

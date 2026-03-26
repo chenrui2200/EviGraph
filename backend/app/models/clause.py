@@ -22,11 +22,23 @@ class ChunkLevel(Enum):
 
 
 class ElementType(Enum):
-    """要素类型枚举"""
+    """
+    要素类型枚举
+
+    Level-3 要素类型，支持 SOTA 图谱构建：
+    - TABLE_ROW: 表格行参数
+    - FORMULA: 计算公式
+    - TERM: 术语定义
+    - PARAMETER: 技术参数
+    - COMPONENT: 设备/系统/材料组件
+    - OBJECT: 操作对象
+    """
     TABLE_ROW = "table_row"
     FORMULA = "formula"
     TERM = "term"
     PARAMETER = "parameter"
+    COMPONENT = "component"      # 设备、系统、材料
+    OBJECT = "object"            # 操作对象
 
 
 class RequirementType(Enum):
@@ -135,6 +147,11 @@ class ClauseSegment(HierarchicalChunk):
     Level-2: 条文级分块 (核心检索层)
 
     单条条文 + 所有款/项，是90%技术问答的主要检索单元
+
+    SOTA 图谱构建支持：
+    - 语义条件 (conditions) 和动作 (actions) 分离
+    - 设备组件 (components) 和操作对象 (objects) 识别
+    - 层级关联 (parent_chapter)
     """
     clause_id: str = ""                    # 条文编号，如 "5.2.8"
     clause_title: str = ""
@@ -147,9 +164,14 @@ class ClauseSegment(HierarchicalChunk):
     requirement_type: RequirementType = RequirementType.RECOMMENDED
 
     # LLM补充字段（语义理解）
-    conditions: List[str] = field(default_factory=list)   # 前提条件
-    actions: List[str] = field(default_factory=list)      # 规定动作
+    conditions: List[str] = field(default_factory=list)   # 前提条件名称列表
+    actions: List[str] = field(default_factory=list)      # 规定动作名称列表
     semantics_enriched: bool = False
+
+    # SOTA 扩展字段
+    components: List[str] = field(default_factory=list)   # 涉及组件列表
+    objects: List[str] = field(default_factory=list)      # 操作对象列表
+    parent_chapter: Optional[int] = None                # 所属章节编号
 
     def __post_init__(self):
         self.level = ChunkLevel.LEVEL_2
@@ -167,7 +189,12 @@ class ClauseSegment(HierarchicalChunk):
             "formula_refs": [self.formula_id] if self.formula_id else [],
             "table_refs": self.table_refs,
             "cross_refs": [r.ref_id for r in self.cross_refs],
-            "semantics_enriched": self.semantics_enriched
+            "semantics_enriched": self.semantics_enriched,
+            "conditions": self.conditions,
+            "actions": self.actions,
+            "components": self.components,
+            "objects": self.objects,
+            "parent_chapter": self.parent_chapter
         })
 
         # 调用父类__post_init__
@@ -202,15 +229,33 @@ class ElementSegment(HierarchicalChunk):
     """
     Level-3: 要素级分块
 
-    精确参数匹配、公式计算、术语解释
+    精确参数匹配、公式计算、术语解释、设备组件识别
+
+    支持的要素类型：
+    - TABLE_ROW: 表格行参数
+    - FORMULA: 计算公式（含变量定义）
+    - TERM: 术语定义
+    - PARAMETER: 技术参数
+    - COMPONENT: 设备、系统、材料组件
+    - OBJECT: 操作对象（截面积、距离等）
     """
     element_type: ElementType = ElementType.TABLE_ROW
-    source_id: str = ""              # 表格编号，如 "表3.2.9"
+    source_id: str = ""              # 表格编号，如 "表3.2.9"，或条文编号
     row_index: Optional[int] = None  # 表格行索引
-    key: str = ""                    # 参数名/术语名
+    key: str = ""                    # 参数名/术语名/组件名
     value: Any = None                # 参数值
     unit: str = ""                   # 单位
     condition: str = ""              # 适用条件
+
+    # LLM 增强字段
+    abbreviation: str = ""           # 缩写，如 "RCD"、"PVC"
+    definition: str = ""             # 定义/描述
+    keywords: List[str] = field(default_factory=list)  # 关联关键词
+    variables: List[Dict] = field(default_factory=list)  # 公式变量定义
+
+    # 关联信息
+    parent_clause_id: str = ""       # 所属条文 ID
+    parent_chapter_id: str = ""     # 所属章节 ID
 
     def __post_init__(self):
         self.level = ChunkLevel.LEVEL_3
@@ -227,7 +272,13 @@ class ElementSegment(HierarchicalChunk):
             "key": self.key,
             "value": str(self.value) if self.value is not None else "",
             "unit": self.unit,
-            "condition": self.condition
+            "condition": self.condition,
+            "abbreviation": self.abbreviation,
+            "definition": self.definition,
+            "keywords": self.keywords,
+            "variables": self.variables,
+            "parent_clause_id": self.parent_clause_id,
+            "parent_chapter_id": self.parent_chapter_id
         })
 
         # 调用父类__post_init__
@@ -264,3 +315,83 @@ class HierarchicalChunkResult:
     def to_episode_list(self) -> List[Dict[str, Any]]:
         """转换为Episode节点列表"""
         return [chunk.to_episode_dict() for chunk in self.get_all_chunks()]
+
+    # ========================================================================
+    # 层级关联查询方法 (SOTA 图谱构建支持)
+    # ========================================================================
+
+    def get_clauses_in_chapter(self, chapter_number: int) -> List[ClauseSegment]:
+        """获取指定章节中的所有条文"""
+        return [
+            c for c in self.clauses
+            if c.metadata.get("parent_chapter") == chapter_number
+        ]
+
+    def get_elements_in_clause(self, clause_id: str) -> List[ElementSegment]:
+        """获取指定条文中的所有要素"""
+        return [
+            e for e in self.elements
+            if e.metadata.get("source_clause_id") == clause_id
+        ]
+
+    def get_elements_in_chapter(self, chapter_number: int) -> List[ElementSegment]:
+        """获取指定章节中的所有要素"""
+        return [
+            e for e in self.elements
+            if e.metadata.get("parent_chapter") == chapter_number
+        ]
+
+    def get_clause_by_id(self, clause_id: str) -> Optional[ClauseSegment]:
+        """根据 ID 获取条文"""
+        return next(
+            (c for c in self.clauses if c.clause_id == clause_id),
+            None
+        )
+
+    def get_section_by_number(self, chapter_number: int) -> Optional[SectionSegment]:
+        """根据章节号获取章节"""
+        return next(
+            (s for s in self.sections if s.chapter_number == chapter_number),
+            None
+        )
+
+    def get_elements_by_type(self, element_type: ElementType) -> List[ElementSegment]:
+        """根据类型获取要素"""
+        return [e for e in self.elements if e.element_type == element_type]
+
+    def get_elements_by_keyword(self, keyword: str) -> List[ElementSegment]:
+        """根据关键词搜索要素"""
+        keyword_lower = keyword.lower()
+        return [
+            e for e in self.elements
+            if keyword_lower in e.key.lower()
+            or keyword_lower in e.keywords
+            or (e.definition and keyword_lower in e.definition.lower())
+        ]
+
+    def build_hierarchy_tree(self) -> Dict[str, Any]:
+        """
+        构建层级树结构
+
+        Returns:
+            {
+                "chapters": [
+                    {
+                        "section": SectionSegment,
+                        "clauses": [ClauseSegment, ...],
+                        "elements": [ElementSegment, ...]
+                    }
+                ]
+            }
+        """
+        tree = {"chapters": []}
+
+        for section in self.sections:
+            chapter_num = section.chapter_number
+            tree["chapters"].append({
+                "section": section,
+                "clauses": self.get_clauses_in_chapter(chapter_num),
+                "elements": self.get_elements_in_chapter(chapter_num)
+            })
+
+        return tree
