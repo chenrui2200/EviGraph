@@ -122,7 +122,7 @@ class SemanticEnricher:
 请以JSON格式输出分析结果：
 ```json
 {{
-    "clause_id": "{clause_id}",
+    "clause_id": "{{clause_id}}",
     "conditions": ["条件1", "条件2"],
     "actions": ["动作1", "动作2"],
     "prohibited_actions": ["禁止动作1"],
@@ -183,7 +183,7 @@ class SemanticEnricher:
 请以JSON格式输出分析结果：
 ```json
 {{
-    "clause_id": "{clause_id}",
+    "clause_id": "{{clause_id}}",
     "tables": [
         {{
             "table_id": "表3.2.2",

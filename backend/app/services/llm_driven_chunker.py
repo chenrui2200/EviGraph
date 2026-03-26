@@ -274,7 +274,7 @@ class LLMDrivenChunker:
 - clause_title: "直接接触防护"
 - clause_content: "无故障条件下的电击防护"
 - is_term_definition: true
-- terms: [{"term_name": "直接接触防护", "definition": "无故障条件下的电击防护"}]
+- terms: [{{"term_name": "直接接触防护", "definition": "无故障条件下的电击防护"}}]
 - actions: []，conditions: []，components: [] ← 术语章节不提取这些！
 
 原文：
