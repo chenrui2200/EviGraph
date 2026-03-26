@@ -28,6 +28,107 @@ class ProjectStatus(str, Enum):
     FAILED = "failed"                # Failed
 
 
+class ChapterStatus(str, Enum):
+    """章节处理状态"""
+    PENDING = "pending"           # 待处理
+    PROCESSING = "processing"    # 处理中
+    COMPLETED = "completed"      # 已完成
+    FAILED = "failed"            # 失败
+
+
+@dataclass
+class ChapterPlan:
+    """章节计划 - 定义每个章节的位置边界和处理状态"""
+    chapter_number: int
+    title: str
+    start_position: int
+    end_position: int
+    status: ChapterStatus = ChapterStatus.PENDING
+    clauses_count: int = 0
+    elements_count: int = 0
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            "chapter_number": self.chapter_number,
+            "title": self.title,
+            "start_position": self.start_position,
+            "end_position": self.end_position,
+            "status": self.status.value if isinstance(self.status, ChapterStatus) else self.status,
+            "clauses_count": self.clauses_count,
+            "elements_count": self.elements_count,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'ChapterPlan':
+        """从字典创建"""
+        status = data.get('status', 'pending')
+        if isinstance(status, str):
+            status = ChapterStatus(status)
+        return cls(
+            chapter_number=data['chapter_number'],
+            title=data.get('title', ''),
+            start_position=data.get('start_position', 0),
+            end_position=data.get('end_position', 0),
+            status=status,
+            clauses_count=data.get('clauses_count', 0),
+            elements_count=data.get('elements_count', 0),
+            started_at=data.get('started_at'),
+            completed_at=data.get('completed_at')
+        )
+
+
+@dataclass
+class ChunkCheckpoint:
+    """分块检查点 - 用于断点恢复（增强版）"""
+    chapter_plan: List[ChapterPlan] = field(default_factory=list)
+    current_chapter_index: int = -1
+    total_chapters: int = 0
+    completed_clauses: List[Dict] = field(default_factory=list)
+    completed_elements: List[Dict] = field(default_factory=list)
+    processing_clauses: List[Dict] = field(default_factory=list)
+    processing_elements: List[Dict] = field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            "chapter_plan": [c.to_dict() if isinstance(c, ChapterPlan) else c for c in self.chapter_plan],
+            "current_chapter_index": self.current_chapter_index,
+            "total_chapters": self.total_chapters,
+            "completed_clauses": self.completed_clauses,
+            "completed_elements": self.completed_elements,
+            "processing_clauses": self.processing_clauses,
+            "processing_elements": self.processing_elements,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'ChunkCheckpoint':
+        """从字典创建"""
+        chapter_plan = [
+            ChapterPlan.from_dict(c) if isinstance(c, dict) else c
+            for c in data.get('chapter_plan', [])
+        ]
+        return cls(
+            chapter_plan=chapter_plan,
+            current_chapter_index=data.get('current_chapter_index', -1),
+            total_chapters=data.get('total_chapters', 0),
+            completed_clauses=data.get('completed_clauses', []),
+            completed_elements=data.get('completed_elements', []),
+            processing_clauses=data.get('processing_clauses', []),
+            processing_elements=data.get('processing_elements', []),
+            created_at=data.get('created_at', ''),
+            updated_at=data.get('updated_at', '')
+        )
+
+
 @dataclass
 class Project:
     """Project data model"""
@@ -381,4 +482,203 @@ class ProjectManager:
             return None
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
+
+    # =========================================================================
+    # 检查点机制 - 用于断点恢复
+    # =========================================================================
+
+    @classmethod
+    def _get_checkpoint_path(cls, project_id: str) -> str:
+        """Get path for chunk checkpoint data"""
+        project_dir = cls._get_project_dir(project_id)
+        return os.path.join(project_dir, 'chunk_checkpoint.json')
+
+    @classmethod
+    def save_chunk_checkpoint(
+        cls,
+        project_id: str,
+        checkpoint_data: Dict[str, Any],
+        progress: float = 0,
+        message: str = ""
+    ) -> None:
+        """
+        保存分块检查点数据
+
+        Args:
+            project_id: 项目ID
+            checkpoint_data: 检查点数据，包含：
+                - current_chapter: 当前处理的章节号
+                - total_chapters: 总章节数
+                - completed_chapters: 已完成的章节列表
+                - processed_clauses: 已处理的条文列表
+                - processed_elements: 已处理的要素列表
+            progress: 当前进度 0-1
+            message: 状态消息
+        """
+        path = cls._get_checkpoint_path(project_id)
+        checkpoint = {
+            "checkpoint_data": checkpoint_data,
+            "progress": progress,
+            "message": message,
+            "updated_at": datetime.now().isoformat()
+        }
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(checkpoint, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def get_chunk_checkpoint(cls, project_id: str) -> Optional[Dict[str, Any]]:
+        """
+        获取分块检查点数据
+
+        Returns:
+            检查点数据或 None
+        """
+        path = cls._get_checkpoint_path(project_id)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get("checkpoint_data")
+        except Exception:
+            return None
+
+    @classmethod
+    def delete_chunk_checkpoint(cls, project_id: str) -> None:
+        """删除分块检查点数据"""
+        path = cls._get_checkpoint_path(project_id)
+        if os.path.exists(path):
+            os.remove(path)
+
+    # =========================================================================
+    # 增强版检查点机制 - 用于断点恢复 V2
+    # =========================================================================
+
+    @classmethod
+    def _get_checkpoint_v2_path(cls, project_id: str) -> str:
+        """获取新版检查点文件路径"""
+        project_dir = cls._get_project_dir(project_id)
+        return os.path.join(project_dir, 'chunk_checkpoint_v2.json')
+
+    @classmethod
+    def save_chunk_checkpoint_v2(cls, project_id: str, checkpoint: ChunkCheckpoint) -> None:
+        """
+        保存增强版分块检查点
+
+        Args:
+            project_id: 项目ID
+            checkpoint: 增强版检查点数据
+        """
+        path = cls._get_checkpoint_v2_path(project_id)
+        checkpoint.updated_at = datetime.now().isoformat()
+        if not checkpoint.created_at:
+            checkpoint.created_at = checkpoint.updated_at
+
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(checkpoint.to_dict(), f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def get_chunk_checkpoint_v2(cls, project_id: str) -> Optional[ChunkCheckpoint]:
+        """
+        获取增强版分块检查点
+
+        Returns:
+            增强版检查点或 None
+        """
+        path = cls._get_checkpoint_v2_path(project_id)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return ChunkCheckpoint.from_dict(data)
+        except Exception:
+            return None
+
+    @classmethod
+    def delete_chunk_checkpoint_v2(cls, project_id: str) -> None:
+        """删除增强版分块检查点"""
+        path = cls._get_checkpoint_v2_path(project_id)
+        if os.path.exists(path):
+            os.remove(path)
+
+    @classmethod
+    def get_chapter_progress(cls, project_id: str) -> Optional[Dict[str, Any]]:
+        """
+        获取章节处理进度详情
+
+        Returns:
+            包含章节进度信息的字典
+        """
+        checkpoint = cls.get_chunk_checkpoint_v2(project_id)
+        if not checkpoint:
+            return None
+
+        total = checkpoint.total_chapters
+        completed = sum(
+            1 for c in checkpoint.chapter_plan
+            if c.status == ChapterStatus.COMPLETED
+        )
+        processing = sum(
+            1 for c in checkpoint.chapter_plan
+            if c.status == ChapterStatus.PROCESSING
+        )
+        failed = sum(
+            1 for c in checkpoint.chapter_plan
+            if c.status == ChapterStatus.FAILED
+        )
+
+        return {
+            "total_chapters": total,
+            "completed_chapters": completed,
+            "processing_chapters": processing,
+            "failed_chapters": failed,
+            "pending_chapters": total - completed - processing - failed,
+            "progress_ratio": completed / total if total > 0 else 0,
+            "current_chapter_index": checkpoint.current_chapter_index,
+            "current_chapter": (
+                checkpoint.chapter_plan[checkpoint.current_chapter_index].to_dict()
+                if 0 <= checkpoint.current_chapter_index < len(checkpoint.chapter_plan)
+                else None
+            ),
+            "chapter_plan": [c.to_dict() for c in checkpoint.chapter_plan],
+            "completed_clauses_count": len(checkpoint.completed_clauses),
+            "completed_elements_count": len(checkpoint.completed_elements),
+            "created_at": checkpoint.created_at,
+            "updated_at": checkpoint.updated_at
+        }
+
+    @classmethod
+    def init_chapter_plan(cls, project_id: str, toc_data: List[Dict]) -> ChunkCheckpoint:
+        """
+        从目录数据初始化章节计划
+
+        Args:
+            project_id: 项目ID
+            toc_data: 目录数据列表 [{chapter_number, title, start_position, end_position}, ...]
+
+        Returns:
+            初始化好的检查点
+        """
+        chapter_plan = [
+            ChapterPlan(
+                chapter_number=ch.get("chapter_number", i + 1),
+                title=ch.get("title", f"章节{i + 1}"),
+                start_position=ch.get("start_position", 0),
+                end_position=ch.get("end_position", 0),
+                status=ChapterStatus.PENDING
+            )
+            for i, ch in enumerate(toc_data)
+        ]
+
+        checkpoint = ChunkCheckpoint(
+            chapter_plan=chapter_plan,
+            current_chapter_index=-1,
+            total_chapters=len(chapter_plan),
+            created_at=datetime.now().isoformat(),
+            updated_at=datetime.now().isoformat()
+        )
+
+        cls.save_chunk_checkpoint_v2(project_id, checkpoint)
+        return checkpoint
 

@@ -115,11 +115,18 @@
           <div class="step-status">
             <span v-if="currentPhase > 1" class="badge success">已完成</span>
             <div v-else-if="currentPhase === 1" class="status-with-action">
-              <button class="reset-btn-mini" @click="handleReset" title="重置并重新构建">↻ 重置</button>
               <span class="badge processing">{{ buildProgress?.progress || 0 }}%</span>
             </div>
-            <span v-else class="badge pending">等待中</span>
+            <div v-else class="badge pending">等待中</div>
           </div>
+        </div>
+
+        <!-- 重置按钮（所有状态可见） -->
+        <div v-if="currentPhase > 0" class="reset-action-bar">
+          <button class="reset-btn" @click="handleReset" title="重置并重新构建">
+            ↻ 重置
+          </button>
+        </div>
         </div>
 
         <div class="card-content">
@@ -468,6 +475,29 @@ watch(() => props.systemLogs.length, () => {
 }
 
 .reset-btn-mini:hover {
+  background: #FF5722;
+  color: #FFF;
+}
+
+.reset-action-bar {
+  padding: 8px 0;
+  border-top: 1px dashed #EEE;
+  margin-top: 12px;
+}
+
+.reset-btn {
+  background: #FFF;
+  border: 1px solid #FF5722;
+  color: #FF5722;
+  font-size: 12px;
+  padding: 6px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.reset-btn:hover {
   background: #FF5722;
   color: #FFF;
 }

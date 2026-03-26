@@ -1709,12 +1709,22 @@ class Neo4jStorage(GraphStorage):
     def _create_entity_for_clause(self, tx, graph_id: str, episode_id: str,
                                   clause_id: str, content: str,
                                   embedding: List[float], metadata: Dict):
-        """为Clause创建Entity节点"""
+        """为Clause创建Entity节点及其语义关系
+
+        根据规范图谱模型，Clause 与以下实体建立关系：
+        - Clause -MANDATES/RECOMMENDS/PROHIBITS-> Action
+        - Clause -HAS_CONDITION-> Condition
+        - Action -OPERATES_ON-> Object
+        - Clause -MENTIONS-> Component
+        """
         clause_name = f"条款{clause_id}"
 
         # 生成Entity UUID
         entity_seed = f"{graph_id}:{clause_name}".encode('utf-8')
         entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        # 获取要求类型
+        requirement_type = metadata.get('requirement_type', 'recommended').lower()
 
         # 创建Clause Entity节点
         tx.run(
@@ -1725,6 +1735,8 @@ class Neo4jStorage(GraphStorage):
                 e.name = $name,
                 e.summary = $summary,
                 e.embedding = $embedding,
+                e.clause_id = $clause_id,
+                e.requirement_type = $req_type,
                 e.created_at = datetime()
             ON MATCH SET
                 e.embedding = $embedding,
@@ -1735,7 +1747,9 @@ class Neo4jStorage(GraphStorage):
             uuid=entity_uuid,
             name=clause_name,
             summary=content[:500] if content else "",
-            embedding=embedding
+            embedding=embedding,
+            clause_id=clause_id,
+            req_type=requirement_type
         )
 
         # 链接Episode -> Entity (MENTIONS)
@@ -1749,6 +1763,65 @@ class Neo4jStorage(GraphStorage):
             e_uuid=entity_uuid,
             gid=graph_id
         )
+
+        # ========== 创建语义实体和关系 ==========
+
+        # 1. 创建 Conditions（前提条件）
+        conditions = metadata.get('conditions', [])
+        if isinstance(conditions, str):
+            conditions = [conditions]
+        for condition_name in conditions:
+            if condition_name and condition_name.strip():
+                self._create_condition_entity(
+                    tx, graph_id, entity_uuid, condition_name.strip()
+                )
+
+        # 2. 创建 Actions（规定动作）
+        actions = metadata.get('actions', [])
+        if isinstance(actions, str):
+            actions = [actions]
+        for action_name in actions:
+            if action_name and action_name.strip():
+                action_uuid = self._create_action_entity(
+                    tx, graph_id, entity_uuid, action_name.strip()
+                )
+                # 根据 requirement_type 建立关系
+                if requirement_type == 'mandatory':
+                    self._create_mandates_relation(tx, entity_uuid, action_uuid)
+                elif requirement_type == 'prohibited':
+                    self._create_prohibits_relation(tx, entity_uuid, action_uuid)
+                else:  # recommended
+                    self._create_recommends_relation(tx, entity_uuid, action_uuid)
+
+        # 3. 创建 Components（设备/系统/材料）
+        components = metadata.get('components', [])
+        if isinstance(components, str):
+            components = [components]
+        for component_name in components:
+            if component_name and component_name.strip():
+                self._create_component_entity(
+                    tx, graph_id, episode_id, component_name.strip()
+                )
+
+        # 4. 创建 Objects（操作对象）
+        objects = metadata.get('objects', [])
+        if isinstance(objects, str):
+            objects = [objects]
+        for object_name in objects:
+            if object_name and object_name.strip():
+                self._create_object_entity(
+                    tx, graph_id, episode_id, object_name.strip()
+                )
+
+        # 5. 创建 Actions 与 Objects 的 OPERATES_ON 关系
+        for action_name in actions:
+            if action_name and action_name.strip():
+                action_uuid = self._find_entity_uuid(tx, graph_id, 'Action', action_name.strip())
+                for object_name in objects:
+                    if object_name and object_name.strip():
+                        object_uuid = self._find_entity_uuid(tx, graph_id, 'Object', object_name.strip())
+                        if action_uuid and object_uuid:
+                            self._create_operates_on_relation(tx, action_uuid, object_uuid)
 
         # 如果有formula_refs，创建Formula实体
         formula_refs = metadata.get("formula_refs", [])
@@ -1969,6 +2042,218 @@ class Neo4jStorage(GraphStorage):
             )
         except Exception as e:
             logger.debug(f"Failed to create parameter entity: {e}")
+
+    def _create_condition_entity(self, tx, graph_id: str, clause_uuid: str, condition_name: str):
+        """创建 Condition（前提条件）实体"""
+        entity_seed = f"{graph_id}:Condition:{condition_name}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        try:
+            tx.run(
+                """
+                MERGE (e:Entity:Condition {graph_id: $gid, name_lower: $name_lower})
+                ON CREATE SET
+                    e.uuid = $uuid,
+                    e.name = $name,
+                    e.summary = $summary,
+                    e.created_at = datetime()
+                """,
+                gid=graph_id,
+                name_lower=condition_name.lower(),
+                uuid=entity_uuid,
+                name=condition_name,
+                summary=f"前提条件: {condition_name}"
+            )
+
+            # 链接Clause -> HAS_CONDITION -> Condition
+            tx.run(
+                """
+                MATCH (c:Entity {uuid: $clause_uuid}), (cond:Entity {uuid: $cond_uuid})
+                MERGE (c)-[r:HAS_CONDITION]->(cond)
+                ON CREATE SET r.graph_id = $gid
+                """,
+                clause_uuid=clause_uuid,
+                cond_uuid=entity_uuid,
+                gid=graph_id
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create condition entity: {e}")
+
+    def _create_action_entity(self, tx, graph_id: str, clause_uuid: str, action_name: str) -> str:
+        """创建 Action（规定动作）实体"""
+        entity_seed = f"{graph_id}:Action:{action_name}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        try:
+            tx.run(
+                """
+                MERGE (e:Entity:Action {graph_id: $gid, name_lower: $name_lower})
+                ON CREATE SET
+                    e.uuid = $uuid,
+                    e.name = $name,
+                    e.summary = $summary,
+                    e.created_at = datetime()
+                """,
+                gid=graph_id,
+                name_lower=action_name.lower(),
+                uuid=entity_uuid,
+                name=action_name,
+                summary=f"规定动作: {action_name}"
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create action entity: {e}")
+
+        return entity_uuid
+
+    def _create_component_entity(self, tx, graph_id: str, episode_id: str, component_name: str):
+        """创建 Component（设备/系统/材料）实体"""
+        entity_seed = f"{graph_id}:Component:{component_name}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        try:
+            tx.run(
+                """
+                MERGE (e:Entity:Component {graph_id: $gid, name_lower: $name_lower})
+                ON CREATE SET
+                    e.uuid = $uuid,
+                    e.name = $name,
+                    e.summary = $summary,
+                    e.created_at = datetime()
+                """,
+                gid=graph_id,
+                name_lower=component_name.lower(),
+                uuid=entity_uuid,
+                name=component_name,
+                summary=f"设备/系统/材料: {component_name}"
+            )
+
+            # 链接Episode -> MENTIONS -> Component
+            tx.run(
+                """
+                MATCH (ep:Episode {uuid: $ep_uuid}), (c:Entity {uuid: $c_uuid})
+                MERGE (ep)-[r:MENTIONS]->(c)
+                ON CREATE SET r.graph_id = $gid
+                """,
+                ep_uuid=episode_id,
+                c_uuid=entity_uuid,
+                gid=graph_id
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create component entity: {e}")
+
+    def _create_object_entity(self, tx, graph_id: str, episode_id: str, object_name: str):
+        """创建 Object（操作对象）实体"""
+        entity_seed = f"{graph_id}:Object:{object_name}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        try:
+            tx.run(
+                """
+                MERGE (e:Entity:Object {graph_id: $gid, name_lower: $name_lower})
+                ON CREATE SET
+                    e.uuid = $uuid,
+                    e.name = $name,
+                    e.summary = $summary,
+                    e.created_at = datetime()
+                """,
+                gid=graph_id,
+                name_lower=object_name.lower(),
+                uuid=entity_uuid,
+                name=object_name,
+                summary=f"操作对象: {object_name}"
+            )
+
+            # 链接Episode -> MENTIONS -> Object
+            tx.run(
+                """
+                MATCH (ep:Episode {uuid: $ep_uuid}), (o:Entity {uuid: $o_uuid})
+                MERGE (ep)-[r:MENTIONS]->(o)
+                ON CREATE SET r.graph_id = $gid
+                """,
+                ep_uuid=episode_id,
+                o_uuid=entity_uuid,
+                gid=graph_id
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create object entity: {e}")
+
+    def _create_mandates_relation(self, tx, clause_uuid: str, action_uuid: str):
+        """创建 Clause -MANDATES-> Action 关系"""
+        try:
+            tx.run(
+                """
+                MATCH (c:Entity {uuid: $clause_uuid}), (a:Entity {uuid: $action_uuid})
+                MERGE (c)-[r:MANDATES]->(a)
+                ON CREATE SET r.graph_id = 'default'
+                """,
+                clause_uuid=clause_uuid,
+                action_uuid=action_uuid
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create MANDATES relation: {e}")
+
+    def _create_recommends_relation(self, tx, clause_uuid: str, action_uuid: str):
+        """创建 Clause -RECOMMENDS-> Action 关系"""
+        try:
+            tx.run(
+                """
+                MATCH (c:Entity {uuid: $clause_uuid}), (a:Entity {uuid: $action_uuid})
+                MERGE (c)-[r:RECOMMENDS]->(a)
+                ON CREATE SET r.graph_id = 'default'
+                """,
+                clause_uuid=clause_uuid,
+                action_uuid=action_uuid
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create RECOMMENDS relation: {e}")
+
+    def _create_prohibits_relation(self, tx, clause_uuid: str, action_uuid: str):
+        """创建 Clause -PROHIBITS-> Action 关系"""
+        try:
+            tx.run(
+                """
+                MATCH (c:Entity {uuid: $clause_uuid}), (a:Entity {uuid: $action_uuid})
+                MERGE (c)-[r:PROHIBITS]->(a)
+                ON CREATE SET r.graph_id = 'default'
+                """,
+                clause_uuid=clause_uuid,
+                action_uuid=action_uuid
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create PROHIBITS relation: {e}")
+
+    def _create_operates_on_relation(self, tx, action_uuid: str, object_uuid: str):
+        """创建 Action -OPERATES_ON-> Object 关系"""
+        try:
+            tx.run(
+                """
+                MATCH (a:Entity {uuid: $action_uuid}), (o:Entity {uuid: $object_uuid})
+                MERGE (a)-[r:OPERATES_ON]->(o)
+                ON CREATE SET r.graph_id = 'default'
+                """,
+                action_uuid=action_uuid,
+                object_uuid=object_uuid
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create OPERATES_ON relation: {e}")
+
+    def _find_entity_uuid(self, tx, graph_id: str, entity_type: str, entity_name: str) -> Optional[str]:
+        """根据实体类型和名称查找实体UUID"""
+        try:
+            result = tx.run(
+                """
+                MATCH (e:Entity:`{entity_type}` {{graph_id: $gid, name_lower: $name_lower}})
+                RETURN e.uuid AS uuid
+                """.format(entity_type=entity_type),
+                gid=graph_id,
+                name_lower=entity_name.lower()
+            )
+            records = list(result)
+            if records:
+                return records[0]["uuid"]
+        except Exception as e:
+            logger.debug(f"Failed to find entity: {e}")
+        return None
 
     def build_hierarchical_relations(self, graph_id: str) -> int:
         """

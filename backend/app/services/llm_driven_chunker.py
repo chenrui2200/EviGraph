@@ -11,6 +11,11 @@ SOTA 知识图谱构建模式：
 1. 实体识别：使用 LLM 识别 Component、Term、Parameter、Formula 等
 2. 关系抽取：MANDATES/HAS_CONDITION/OPERATES_ON 等关系
 3. 层级关联：通过位置和语义双重关联
+
+增强特性（V2）：
+- 章节位置边界精确划分
+- 完整的状态跟踪
+- 断点恢复增强
 """
 
 import json
@@ -20,6 +25,7 @@ import time
 import random
 from typing import List, Dict, Any, Optional, Callable
 from dataclasses import asdict
+from datetime import datetime
 
 from ..models.clause import (
     HierarchicalChunkResult,
@@ -35,6 +41,12 @@ from ..models.clause import (
 from ..models.normative_entity import (
     EntityType,
     RelationType
+)
+from ..models.project import (
+    ChunkCheckpoint,
+    ChapterPlan,
+    ChapterStatus,
+    ProjectManager
 )
 from ..utils.file_parser import TextChunk
 from ..utils.llm_client import LLMClient
@@ -120,34 +132,49 @@ class LLMDrivenChunker:
 3. **条文内容**：条文的具体要求描述
 4. **款/项**：条文中的分级列表项
 
-## 语义要素提取
+## 语义要素提取（必须执行）
 
-每个条文可能包含以下要素：
+每个条文**必须**提取以下四类语义要素：
 
-1. **Condition（条件）**：适用前提、环境、场景
-   - 例："当环境温度超过40°C时"、"在潮湿场所"
+### 1. Component（组件）- 关键！
+设备、系统、材料名称：
+- "电器"、"保护电器"、"隔离电器"、"剩余电流保护电器(RCD)"
+- "导体"、"电缆"、"母线"、"配电箱"
+- "变压器"、"开关"、"断路器"
 
-2. **Action（动作）**：规范要求的动作/措施
-   - 例："应设置剩余电流保护"、"严禁使用TN-C系统"
+### 2. Action（动作）- 关键！
+规范要求的动作/措施：
+- "应设置"、"应符合"、"应满足"、"应采用"
+- "必须"、"不得"、"严禁"
+- "选用"、"安装"、"敷设"、"连接"
 
-3. **Object（对象）**：动作作用的目标
-   - 例："保护导体的截面积"、"电气装置的金属外壳"
+### 3. Object（对象）
+动作作用的目标（通常是参数或属性）：
+- "截面积"、"额定电流"、"额定电压"、"分断能力"
+- "标称电压"、"计算电流"、"动稳定"、"热稳定"
 
-4. **Component（组件）**：涉及的设备/系统/材料
-   - 例："剩余电流保护电器"、"配电箱"、"矿物绝缘电缆"
+### 4. Condition（条件）
+适用前提、环境、场景：
+- "当...时"、"在...场所"、"短路条件下"
+- "过负荷情况"、"维护、测试和检修时"
 
-5. **Requirement Type（要求类型）**：
-   - mandatory: 必须、应、须
-   - recommended: 建议、宜、推荐
-   - prohibited: 严禁、不得、禁止
+## 要求类型
+- mandatory: 必须、应、须
+- recommended: 建议、宜、推荐
+- prohibited: 严禁、不得、禁止
+
+**重要**：请从条文内容中**实际识别并提取**上述要素，不要返回空数组！
 
 请保持 JSON 格式输出。"""
 
-    CLAUSE_USER_PROMPT = """请分析以下文本，提取条文及其语义要素：
+    CLAUSE_USER_PROMPT = """
+请分析以下文本，提取条文及其语义要素：
 
 {document_text}
 
 来源：{source}
+
+**注意**：必须从条文中提取 components（组件）、actions（动作）、objects（对象）、conditions（条件），不能为空！
 
 请输出 JSON 格式：
 ```json
@@ -162,13 +189,13 @@ class LLMDrivenChunker:
                 {{"name": "过负荷情况", "description": "线路过负荷时"}}
             ],
             "actions": [
-                {{"name": "承受热量", "description": "导体应能承受..."}}
+                {{"name": "满足要求", "description": "导体应能承受线路保护的动作"}}
             ],
             "objects": [
                 {{"name": "导体", "description": "配电线路的导电材料"}}
             ],
             "components": [
-                {{"name": "保护电器", "type": "设备"}}
+                {{"name": "导体", "type": "材料"}}
             ],
             "referenced_tables": [],
             "referenced_formulas": []
@@ -176,6 +203,15 @@ class LLMDrivenChunker:
     ]
 }}
 ```
+
+示例条文解析：
+原文："低压配电设计所选用的电器，应符合国家现行的有关产品标准"
+提取结果：
+- clause_id: "3.1.1"
+- components: ["电器"]
+- actions: ["选用", "应符合"]
+- objects: ["产品标准"]
+- conditions: []
 
 如果没有发现条文，返回：
 ```json
@@ -341,12 +377,199 @@ class LLMDrivenChunker:
             self.llm_client = LLMClient()
         return self.llm_client
 
-    def _report_progress(self, progress: float, message: str) -> None:
+    def _refine_chapter_positions(
+        self,
+        text: str,
+        chapter_toc: List[Dict]
+    ) -> List[Dict]:
+        """
+        精化章节位置边界 - 通过文本匹配获取精确位置
+
+        策略：
+        1. 在文档中查找章节标题的实际位置
+        2. 计算相邻章节之间的精确边界
+
+        Args:
+            text: 完整文档文本
+            chapter_toc: LLM 提取的目录数据
+
+        Returns:
+            精化后的章节位置列表
+        """
+        self.logger.info(f"[章节位置精化] 开始精化 {len(chapter_toc)} 个章节的位置...")
+
+        refined_chapters = []
+
+        for i, chapter in enumerate(chapter_toc):
+            title = chapter.get("title", "")
+            chapter_num = chapter.get("chapter_number", i + 1)
+
+            # 尝试在文本中查找章节标题
+            # 多种匹配模式
+            patterns = [
+                title,  # 精确标题
+                f"第{chapter_num}章",  # 章节标记
+                f"{chapter_num}\\s*[.、]\\s*{re.escape(title)}",  # 编号+标题
+                f"{re.escape(title)}",  # 仅标题
+            ]
+
+            found_pos = None
+            for pattern in patterns:
+                try:
+                    match = re.search(pattern, text[:50000], re.IGNORECASE)  # 限制搜索范围
+                    if match:
+                        found_pos = match.start()
+                        self.logger.info(f"[章节位置精化] 章节 {chapter_num} '{title}': 位置 {found_pos}")
+                        break
+                except Exception as e:
+                    self.logger.warning(f"[章节位置精化] 模式 '{pattern}' 匹配失败: {e}")
+                    continue
+
+            if found_pos is not None:
+                chapter["start_position"] = found_pos
+            else:
+                # 使用 LLM 提供的估算位置
+                chapter["start_position"] = chapter.get("start_position", 0)
+                self.logger.warning(f"[章节位置精化] 章节 {chapter_num} '{title}': 使用估算位置 {chapter['start_position']}")
+
+            refined_chapters.append(chapter)
+
+        # 计算相邻章节之间的边界
+        total_len = len(text)
+        for i, chapter in enumerate(refined_chapters):
+            if i < len(refined_chapters) - 1:
+                next_chapter = refined_chapters[i + 1]
+                # 下一个章节的开始位置 - 1 作为当前章节的结束位置
+                next_start = next_chapter.get("start_position", total_len)
+                chapter["end_position"] = max(chapter["start_position"], next_start - 1)
+            else:
+                # 最后一个章节，延伸到文档末尾
+                chapter["end_position"] = total_len
+
+            # 确保边界有效
+            if chapter["end_position"] <= chapter["start_position"]:
+                chapter["end_position"] = min(chapter["start_position"] + 10000, total_len)
+
+        self.logger.info(f"[章节位置精化] ✅ 精化完成")
+        return refined_chapters
+
+    def _clause_to_dict(self, clause: ClauseSegment) -> Dict[str, Any]:
+        """将 ClauseSegment 转换为字典"""
+        return {
+            "clause_id": clause.clause_id,
+            "clause_title": clause.clause_title,
+            "content": clause.content,
+            "requirement_type": clause.requirement_type.value if hasattr(clause.requirement_type, 'value') else str(clause.requirement_type),
+            "conditions": clause.conditions or [],
+            "actions": clause.actions or [],
+            "components": clause.components or [],
+            "objects": clause.objects or [],
+            "parent_chapter": clause.metadata.get("parent_chapter") if clause.metadata else None,
+            "metadata": clause.metadata or {}
+        }
+
+    def _element_to_dict(self, element: ElementSegment) -> Dict[str, Any]:
+        """将 ElementSegment 转换为字典"""
+        return {
+            "element_type": element.element_type.value if hasattr(element.element_type, 'value') else str(element.element_type),
+            "source_id": element.source_id,
+            "key": element.key,
+            "value": str(element.value) if element.value else "",
+            "unit": element.unit,
+            "condition": element.condition,
+            "abbreviation": element.abbreviation,
+            "definition": element.definition,
+            "content": element.content,
+            "metadata": element.metadata or {}
+        }
+
+    def _save_checkpoint(
+        self,
+        project_id: str,
+        checkpoint: ChunkCheckpoint
+    ) -> None:
+        """保存检查点到磁盘"""
+        try:
+            ProjectManager.save_chunk_checkpoint_v2(project_id, checkpoint)
+            self.logger.debug(f"[检查点] 已保存检查点: 项目={project_id}, 章节={checkpoint.current_chapter_index + 1}/{checkpoint.total_chapters}")
+        except Exception as e:
+            self.logger.error(f"[检查点] 保存失败: {e}")
+
+    def _build_result_from_checkpoint(
+        self,
+        checkpoint: ChunkCheckpoint
+    ) -> HierarchicalChunkResult:
+        """从检查点构建 HierarchicalChunkResult"""
+        from ..models.clause import RequirementType
+
+        result = HierarchicalChunkResult()
+
+        # 恢复章节
+        for cp in checkpoint.chapter_plan:
+            section = SectionSegment(
+                chapter_number=cp.chapter_number,
+                title=cp.title,
+                content=""  # 内容会在重新处理时填充
+            )
+            result.sections.append(section)
+
+        # 恢复条文
+        for cd in checkpoint.completed_clauses:
+            req_type_str = cd.get('requirement_type', 'recommended')
+            try:
+                req_type = RequirementType(req_type_str)
+            except ValueError:
+                req_type = RequirementType.RECOMMENDED
+
+            clause = ClauseSegment(
+                clause_id=cd.get('clause_id', ''),
+                clause_title=cd.get('clause_title', ''),
+                content=cd.get('content', ''),
+                requirement_type=req_type,
+                conditions=cd.get('conditions', []),
+                actions=cd.get('actions', []),
+                components=cd.get('components', []),
+                objects=cd.get('objects', []),
+                parent_chapter=cd.get('parent_chapter'),
+                metadata=cd.get('metadata', {})
+            )
+            result.clauses.append(clause)
+
+        # 恢复要素
+        from ..models.clause import ElementType
+        for ed in checkpoint.completed_elements:
+            elem_type_str = ed.get('element_type', 'parameter')
+            try:
+                elem_type = ElementType(elem_type_str)
+            except ValueError:
+                elem_type = ElementType.PARAMETER
+
+            element = ElementSegment(
+                element_type=elem_type,
+                source_id=ed.get('source_id', ''),
+                key=ed.get('key', ''),
+                value=ed.get('value', ''),
+                unit=ed.get('unit', ''),
+                condition=ed.get('condition', ''),
+                abbreviation=ed.get('abbreviation', ''),
+                definition=ed.get('definition', ''),
+                content=ed.get('content', ''),
+                metadata=ed.get('metadata', {})
+            )
+            result.elements.append(element)
+
+        return result
+
+    def _report_progress(self, progress: float, message: str, checkpoint_info: Optional[Dict] = None) -> None:
         """报告进度"""
         self.logger.info(message)
         if self.progress_callback:
             try:
-                self.progress_callback(progress, message)
+                # 支持带检查点信息的回调
+                if checkpoint_info is not None:
+                    self.progress_callback(progress, message, checkpoint_info)
+                else:
+                    self.progress_callback(progress, message)
             except Exception as e:
                 self.logger.warning(f"进度回调失败: {e}")
 
@@ -354,7 +577,7 @@ class LLMDrivenChunker:
         self,
         messages: List[Dict],
         temperature: float = 0.3,
-        max_tokens: int = 4096
+        max_tokens: int = 4096 * 4
     ) -> Dict[str, Any]:
         """
         使用指数退避重试机制调用 LLM
@@ -401,10 +624,13 @@ class LLMDrivenChunker:
     def chunk(
         self,
         text_chunks: List[TextChunk],
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable] = None,
+        resume_from_chapter: int = 0,
+        checkpoint: Optional[ChunkCheckpoint] = None,
+        project_id: Optional[str] = None
     ) -> HierarchicalChunkResult:
         """
-        主入口：LLM 驱动的三级分块（渐进式）
+        主入口：LLM 驱动的三级分块（渐进式，支持增强版断点恢复）
 
         策略：渐进式披露
         1. 先读取目录（章节结构），记住位置
@@ -414,7 +640,10 @@ class LLMDrivenChunker:
 
         Args:
             text_chunks: 原始文本块列表
-            progress_callback: 进度回调
+            progress_callback: 进度回调，签名: (progress, message, checkpoint_info)
+            resume_from_chapter: 从第几个章节恢复（0表示从头开始）
+            checkpoint: 增强版检查点（用于断点恢复）
+            project_id: 项目ID（用于保存检查点）
 
         Returns:
             HierarchicalChunkResult: 包含所有层级分块的结果
@@ -443,28 +672,79 @@ class LLMDrivenChunker:
         self.logger.info("[LLM分块] Step 1/4: 开始提取目录结构")
 
         chapter_toc = self._extract_table_of_contents(full_text)
-        chapter_count = len(chapter_toc)
+
+        # 精化章节位置边界
+        refined_chapters = self._refine_chapter_positions(full_text, chapter_toc)
+        chapter_count = len(refined_chapters)
 
         self.logger.info(f"[LLM分块] ✅ 目录提取完成: {chapter_count} 个章节")
-        self.logger.info(f"[LLM分块] 章节列表: {[c.get('title', 'N/A') for c in chapter_toc]}")
+        self.logger.info(f"[LLM分块] 章节列表: {[c.get('title', 'N/A') for c in refined_chapters]}")
         self._report_progress(
             0.1,
             f"✅ 读取目录完成: {chapter_count} 个章节"
         )
 
         # =====================================================================
-        # Step 2: 基于章节分段 - 渐进式处理每个章节
+        # Step 2: 初始化或恢复检查点
+        # =====================================================================
+        if checkpoint and checkpoint.chapter_plan:
+            # 从检查点恢复
+            self.logger.info(f"[LLM分块] 从检查点恢复: 已处理 {len(checkpoint.completed_clauses)} 条文, {len(checkpoint.completed_elements)} 要素")
+            current_checkpoint = checkpoint
+            start_index = checkpoint.current_chapter_index + 1  # 从下一个章节继续
+
+            # 从检查点恢复已完成的数据
+            result = self._build_result_from_checkpoint(checkpoint)
+        else:
+            # 新任务，初始化检查点
+            start_index = resume_from_chapter
+            current_checkpoint = ChunkCheckpoint(
+                chapter_plan=[
+                    ChapterPlan(
+                        chapter_number=ch.get("chapter_number", i + 1),
+                        title=ch.get("title", f"章节{i + 1}"),
+                        start_position=ch.get("start_position", 0),
+                        end_position=ch.get("end_position", len(full_text)),
+                        status=ChapterStatus.PENDING
+                    )
+                    for i, ch in enumerate(refined_chapters)
+                ],
+                current_chapter_index=-1,
+                total_chapters=chapter_count,
+                created_at=datetime.now().isoformat(),
+                updated_at=datetime.now().isoformat()
+            )
+
+        if start_index > 0:
+            self.logger.info(f"[LLM分块] 从章节 {start_index} 恢复，跳过前 {start_index} 个章节")
+
+        # =====================================================================
+        # Step 3: 基于章节分段 - 渐进式处理每个章节
         # =====================================================================
         self.logger.info(f"[LLM分块] Step 2/4: 开始处理 {chapter_count} 个章节")
-        all_clauses = []
-        all_elements = []
-        sections = []
+        all_clauses = list(result.clauses)  # 已有数据
+        all_elements = list(result.elements)  # 已有数据
 
-        for i, chapter in enumerate(chapter_toc):
+        for i, chapter in enumerate(refined_chapters):
             chapter_num = chapter.get("chapter_number", i + 1)
             chapter_title = chapter.get("title", f"章节{chapter_num}")
             start_pos = chapter.get("start_position", 0)
             end_pos = chapter.get("end_position", len(full_text))
+
+            # 跳过已完成的章节
+            if i < start_index:
+                self.logger.info(f"[LLM分块] 跳过章节 {chapter_num} (已处理)")
+                continue
+
+            # 更新检查点：设置当前章节为处理中
+            current_checkpoint.current_chapter_index = i
+            if i < len(current_checkpoint.chapter_plan):
+                current_checkpoint.chapter_plan[i].status = ChapterStatus.PROCESSING
+                current_checkpoint.chapter_plan[i].started_at = datetime.now().isoformat()
+
+            # 保存检查点（处理中状态）
+            if project_id:
+                self._save_checkpoint(project_id, current_checkpoint)
 
             # 计算进度
             base_progress = 0.1
@@ -475,7 +755,15 @@ class LLMDrivenChunker:
 
             self._report_progress(
                 chapter_progress_base,
-                f"📑 处理章节 {chapter_num}/{chapter_count}: {chapter_title}..."
+                f"📑 处理章节 {chapter_num}/{chapter_count}: {chapter_title}...",
+                checkpoint_info={
+                    "current_chapter": chapter_num,
+                    "total_chapters": chapter_count,
+                    "completed_chapters": i,
+                    "completed_clauses_count": len(all_clauses),
+                    "completed_elements_count": len(all_elements),
+                    "is_resuming": i > start_index
+                }
             )
 
             # 提取该章节的文本
@@ -515,37 +803,63 @@ class LLMDrivenChunker:
                 title=chapter_title,
                 content=chapter_text[:500]
             )
-            sections.append(section)
+            result.sections.append(section)
+
+            # 更新检查点：标记章节为完成
+            current_checkpoint.current_chapter_index = i
+            if i < len(current_checkpoint.chapter_plan):
+                current_checkpoint.chapter_plan[i].status = ChapterStatus.COMPLETED
+                current_checkpoint.chapter_plan[i].completed_at = datetime.now().isoformat()
+                current_checkpoint.chapter_plan[i].clauses_count = len(chapter_clauses)
+                current_checkpoint.chapter_plan[i].elements_count = len(chapter_elements)
+
+            # 将新处理的条文和要素添加到检查点
+            for clause in chapter_clauses:
+                current_checkpoint.completed_clauses.append(self._clause_to_dict(clause))
+            for element in annotated_elements:
+                current_checkpoint.completed_elements.append(self._element_to_dict(element))
+
+            # 保存检查点
+            if project_id:
+                self._save_checkpoint(project_id, current_checkpoint)
 
             # 章节处理完成
             chapter_time = time.time() - clause_start
             self._report_progress(
                 (i + 1) / chapter_count * 0.6 + 0.1,
-                f"✅ 章节 {chapter_num} 完成: {len(chapter_clauses)} 条文, {len(chapter_elements)} 要素 (耗时 {chapter_time:.1f}s)"
+                f"✅ 章节 {chapter_num} 完成: {len(chapter_clauses)} 条文, {len(chapter_elements)} 要素 (耗时 {chapter_time:.1f}s)",
+                checkpoint_info={
+                    "current_chapter": chapter_num,
+                    "total_chapters": chapter_count,
+                    "completed_chapters": i + 1,
+                    "completed_clauses_count": len(all_clauses),
+                    "completed_elements_count": len(all_elements),
+                    "chapter_completed": True
+                }
             )
-            self.logger.info(f"[LLM分块] ✅ 章节 {chapter_num} 处理完成")
+            self.logger.info(f"[LLM分块] ✅ 章节 {chapter_num} 处理完成，检查点已保存")
 
         # =====================================================================
-        # Step 3: 保存结果
+        # Step 4: 保存结果
         # =====================================================================
         self.logger.info(f"[LLM分块] Step 3/4: 保存分析结果")
-        result.sections = sections
+        result.sections = list(result.sections) + [s for s in result.sections if s not in result.sections]
         result.clauses = all_clauses
         result.elements = all_elements
 
         # =====================================================================
-        # Step 4: 汇总报告
+        # Step 5: 汇总报告
         # =====================================================================
         total_time = time.time() - start_time
         self._report_progress(
             0.95,
-            f"📊 标注分析汇总: {len(sections)} 章节, {len(all_clauses)} 条文, {len(all_elements)} 要素"
+            f"📊 标注分析汇总: {len(result.sections)} 章节, {len(all_clauses)} 条文, {len(all_elements)} 要素"
         )
 
         self._report_progress(1.0, f"✅ 智能标注分析完成! (总耗时 {total_time:.1f}s)")
 
         self.logger.info(
-            f"[LLM分块] ✅ 分析完成 - 章节: {len(sections)}, 条文: {len(all_clauses)}, 要素: {len(all_elements)}, "
+            f"[LLM分块] ✅ 分析完成 - 章节: {len(result.sections)}, 条文: {len(all_clauses)}, 要素: {len(all_elements)}, "
             f"总耗时: {total_time:.1f}s"
         )
 
