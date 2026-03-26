@@ -31,6 +31,86 @@ from . import neo4j_schema
 
 logger = logging.getLogger('mirofish.neo4j_storage')
 
+# Action 过滤器：识别非实操性词汇（状态描述而非具体操作）
+# 这些词汇不应作为 Action 实体提取
+ACTION_FILTER_WORDS = {
+    # 状态描述词 - 这些是"符合性"要求，不是具体动作
+    "符合", "满足", "达到", "遵守", "遵循", "适应",
+    "符合要求", "满足要求", "达到要求", "符合标准", "满足标准",
+    "应符合", "应满足", "应达到", "应遵守", "应遵循",
+    # 被动/抽象动词
+    "承受", "涉及", "属于", "包括",
+    # 程度副词 + 动词组合（需要拆分）
+    "合理", "正确", "可靠", "安全",
+    # 常见的"假动作"短语
+    "具有", "具备", "保有", "保持", "维持",
+}
+
+# 允许的实操性动作词根（用于验证）
+ACTION_ALLOWED_PREFIXES = {
+    "安装", "敷设", "连接", "选用", "配置", "设置", "布置",
+    "采用", "使用", "应用", "使用", "运用",
+    "接地", "接零", "接保护", "屏蔽", "隔离",
+    "检测", "试验", "校验", "测量", "检查", "检验",
+    "防护", "保护", "报警", "断开", "接通",
+    "预留", "预埋", "固定", "支撑", "吊装",
+    "配电", "供电", "馈电", "控制",
+    "标识", "标记", "标志", "挂牌",
+    "阻燃", "耐火", "防腐", "防水",  # 这些通常是材料属性，但可作为动作理解
+}
+
+
+def is_actionable(action_name: str) -> bool:
+    """
+    判断一个动作名称是否是实操性的。
+
+    Args:
+        action_name: 动作名称
+
+    Returns:
+        True 如果是实操性动作，False 否则
+    """
+    if not action_name:
+        return False
+
+    action = action_name.strip()
+
+    # 过滤空字符串和太短的
+    if len(action) < 2:
+        return False
+
+    # 检查是否在黑名单中
+    if action in ACTION_FILTER_WORDS:
+        return False
+
+    # 检查是否包含黑名单词
+    for black_word in ACTION_FILTER_WORDS:
+        if black_word in action:
+            return False
+
+    # 检查是否以允许的前缀开头
+    for prefix in ACTION_ALLOWED_PREFIXES:
+        if action.startswith(prefix):
+            return True
+
+    # 检查长度：太长的可能是复合短语，需要人工审核
+    # 典型实操动作应该在 4 个字以内
+    if len(action) > 6:
+        # 可能是复合短语，尝试检查是否包含实操词
+        for prefix in ACTION_ALLOWED_PREFIXES:
+            if prefix in action:
+                return True
+        # 不包含任何实操词，拒绝
+        return False
+
+    # 2-4 个字的中文词，默认允许（需要依赖 LLM 提示词的质量）
+    # 但排除纯状态词
+    state_words = {"的", "应", "须", "要", "能", "会"}
+    if action in state_words or action[0] in state_words:
+        return False
+
+    return True
+
 
 class Neo4jStorage(GraphStorage):
     """Neo4j CE implementation of the GraphStorage interface."""
@@ -1109,7 +1189,45 @@ class Neo4jStorage(GraphStorage):
                 nodes.append(nd)
                 node_map[nd["uuid"]] = nd.get("name") or "Unnamed"
 
-            # 2. Get semantic relationships between entities
+            # 2. Get PDF location info for each node by querying its related Episode
+            # This enables "click node to locate document" feature
+            node_uuids = [n["uuid"] for n in nodes]
+            if node_uuids:
+                # Query Episode nodes connected to Entity nodes via HAS_EPISODE
+                episode_result = tx.run(
+                    """
+                    MATCH (e:Entity {graph_id: $gid})-[r:HAS_EPISODE]->(ep:Episode)
+                    WHERE e.uuid IN $uuids
+                    RETURN e.uuid AS entity_uuid,
+                           ep.uuid AS episode_uuid,
+                           ep.text AS episode_text,
+                           ep.metadata AS episode_metadata
+                    """,
+                    gid=graph_id,
+                    uuids=node_uuids,
+                )
+                # Build a map of entity_uuid -> first episode with PDF location
+                node_pdf_info: Dict[str, Dict[str, Any]] = {}
+                for record in episode_result:
+                    entity_uuid = record["entity_uuid"]
+                    if entity_uuid not in node_pdf_info:
+                        metadata = record["episode_metadata"] or {}
+                        # Only store if we have PDF location info
+                        if metadata.get("source") or metadata.get("page"):
+                            node_pdf_info[entity_uuid] = {
+                                "source": metadata.get("source", ""),
+                                "page": metadata.get("page"),
+                                "bbox": metadata.get("bbox"),
+                                "page_width": metadata.get("page_width"),
+                                "page_height": metadata.get("page_height"),
+                                "episode_uuid": record["episode_uuid"],
+                                "episode_text": record["episode_text"],
+                            }
+                # Attach PDF info to each node
+                for node in nodes:
+                    node["pdf_info"] = node_pdf_info.get(node["uuid"], {})
+
+            # 3. Get semantic relationships between entities
             # 匹配所有语义关系类型: RELATION, MANDATES, PROHIBITS, RECOMMENDS, HAS_CONDITION, OPERATES_ON, APPLIES_TO 等
             edge_result = tx.run(
                 """
@@ -1783,6 +1901,24 @@ class Neo4jStorage(GraphStorage):
             components = parsed.get('components', components)
             objects = parsed.get('objects', objects)
 
+        # ========== 术语章节处理 ==========
+        # 如果是术语定义章节（is_term_definition: true），提取术语并建立 DEFINES 关系
+        terms = metadata.get('terms', [])
+        is_term_def = metadata.get('is_term_definition', False)
+
+        if is_term_def and terms:
+            term_name = terms[0].get('term_name', '') if terms else ''
+            term_definition = terms[0].get('definition', '') if terms else ''
+
+            if term_name:
+                logger.info(f"[hierarchical] 创建术语定义: {term_name}")
+                # 创建 Term 实体
+                term_entity_uuid = self._create_term_entity(
+                    tx, graph_id, entity_uuid, term_name, term_definition, clause_id
+                )
+                # 建立 DEFINES 关系: Term -> Clause
+                self._create_defines_relation(tx, term_entity_uuid, entity_uuid)
+
         # 链接Episode -> Entity (MENTIONS)
         tx.run(
             """
@@ -1806,21 +1942,26 @@ class Neo4jStorage(GraphStorage):
                     tx, graph_id, entity_uuid, condition_name.strip()
                 )
 
-        # 2. 创建 Actions（规定动作）
+        # 2. 创建 Actions（规定动作）- 仅保留实操性动作
         if isinstance(actions, str):
             actions = [actions]
-        for action_name in actions:
-            if action_name and action_name.strip():
-                action_uuid = self._create_action_entity(
-                    tx, graph_id, entity_uuid, action_name.strip()
-                )
-                # 根据 requirement_type 建立关系
-                if requirement_type == 'mandatory':
-                    self._create_mandates_relation(tx, entity_uuid, action_uuid)
-                elif requirement_type == 'prohibited':
-                    self._create_prohibits_relation(tx, entity_uuid, action_uuid)
-                else:  # recommended
-                    self._create_recommends_relation(tx, entity_uuid, action_uuid)
+        # 过滤非实操性动作
+        filtered_actions = [a.strip() for a in actions if a and a.strip() and is_actionable(a)]
+        if len(filtered_actions) < len(actions):
+            skipped = len(actions) - len(filtered_actions)
+            logger.debug(f"[hierarchical] 过滤了 {skipped} 个非实操性 Action: {[a for a in actions if a and a.strip() and not is_actionable(a)]}")
+
+        for action_name in filtered_actions:
+            action_uuid = self._create_action_entity(
+                tx, graph_id, entity_uuid, action_name
+            )
+            # 根据 requirement_type 建立关系
+            if requirement_type == 'mandatory':
+                self._create_mandates_relation(tx, entity_uuid, action_uuid)
+            elif requirement_type == 'prohibited':
+                self._create_prohibits_relation(tx, entity_uuid, action_uuid)
+            else:  # recommended
+                self._create_recommends_relation(tx, entity_uuid, action_uuid)
 
         # 3. 创建 Components（设备/系统/材料）
         if isinstance(components, str):
@@ -2164,6 +2305,57 @@ class Neo4jStorage(GraphStorage):
             )
         except Exception as e:
             logger.debug(f"Failed to create parameter entity: {e}")
+
+    def _create_term_entity(self, tx, graph_id: str, clause_uuid: str,
+                           term_name: str, definition: str, source_id: str = "") -> str:
+        """创建 Term（术语）实体"""
+        entity_seed = f"{graph_id}:Term:{term_name}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        try:
+            tx.run(
+                """
+                MERGE (e:Entity:Term {graph_id: $gid, name_lower: $name_lower})
+                ON CREATE SET
+                    e.uuid = $uuid,
+                    e.name = $name,
+                    e.definition = $definition,
+                    e.source_id = $source_id,
+                    e.summary = $summary,
+                    e.created_at = datetime()
+                ON MATCH SET
+                    e.definition = COALESCE(e.definition, $definition),
+                    e.summary = COALESCE(e.summary, $summary)
+                """,
+                gid=graph_id,
+                name_lower=term_name.lower(),
+                uuid=entity_uuid,
+                name=term_name,
+                definition=definition,
+                source_id=source_id,
+                summary=f"{term_name}: {definition[:200]}" if definition else term_name
+            )
+            logger.debug(f"[hierarchical] Created Term entity: {term_name}")
+        except Exception as e:
+            logger.debug(f"Failed to create term entity: {e}")
+
+        return entity_uuid
+
+    def _create_defines_relation(self, tx, term_uuid: str, clause_uuid: str):
+        """创建 DEFINES 关系: Term --[DEFINES]--> Clause (术语定义来源)"""
+        try:
+            tx.run(
+                """
+                MATCH (t:Entity {uuid: $term_uuid}), (c:Entity {uuid: $clause_uuid})
+                MERGE (t)-[r:DEFINES]->(c)
+                ON CREATE SET r.created_at = datetime()
+                """,
+                term_uuid=term_uuid,
+                clause_uuid=clause_uuid
+            )
+            logger.debug(f"[hierarchical] Created DEFINES relation: {term_uuid} -> {clause_uuid}")
+        except Exception as e:
+            logger.debug(f"Failed to create defines relation: {e}")
 
     def _create_condition_entity(self, tx, graph_id: str, clause_uuid: str, condition_name: str):
         """创建 Condition（前提条件）实体"""

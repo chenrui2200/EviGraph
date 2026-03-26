@@ -844,38 +844,49 @@ Your response:"""
             for node in node_list:
                 if isinstance(node, dict):
                     node_uuid = node.get('uuid', '')
+
+                    # Get PDF location info for this node
+                    pdf_info = {
+                        "source": None,
+                        "page": None,
+                        "bbox": None,
+                        "page_width": None,
+                        "page_height": None,
+                        "episode_text": None
+                    }
+                    try:
+                        node_eps = self.storage.get_node_episodes(node_uuid, limit=1)
+                        if node_eps:
+                            meta = node_eps[0].get("metadata", {})
+                            pdf_info.update({
+                                "source": meta.get("source"),
+                                "page": meta.get("page"),
+                                "bbox": meta.get("bbox"),
+                                "page_width": meta.get("page_width"),
+                                "page_height": meta.get("page_height"),
+                                "episode_text": node_eps[0].get("text"),
+                            })
+                    except:
+                        pass
+
                     nodes.append({
                         "uuid": node_uuid,
                         "name": node.get('name', ''),
                         "labels": node.get('labels', []),
                         "summary": node.get('summary', ''),
+                        "pdf_info": pdf_info,
                     })
                     summary = node.get('summary', '')
                     if summary:
-                        # Traceability for Node Summary: Find original episodes
-                        source_info = {"source": "Knowledge Graph", "page": None, "bbox": None}
-                        try:
-                            node_eps = self.storage.get_node_episodes(node_uuid, limit=1)
-                            if node_eps:
-                                meta = node_eps[0].get("metadata", {})
-                                source_info.update({
-                                    "source": meta.get("source", "Knowledge Graph"),
-                                    "page": meta.get("page"),
-                                    "bbox": meta.get("bbox"),
-                                    "page_width": meta.get("page_width"),
-                                    "page_height": meta.get("page_height")
-                                })
-                        except:
-                            pass
-
+                        # Reuse pdf_info for node summary fact (avoid redundant query)
                         facts.append({
                             "uuid": node_uuid,
                             "text": f"Entity Knowledge: {node.get('name', '')} - {summary}",
-                            "source": source_info["source"],
-                            "page": source_info["page"],
-                            "bbox": source_info["bbox"],
-                            "page_width": source_info.get("page_width"),
-                            "page_height": source_info.get("page_height"),
+                            "source": pdf_info["source"] or "Knowledge Graph",
+                            "page": pdf_info["page"],
+                            "bbox": pdf_info["bbox"],
+                            "page_width": pdf_info.get("page_width"),
+                            "page_height": pdf_info.get("page_height"),
                             "graph_id": graph_id,
                             "entity_name": node.get('name', '')
                         })

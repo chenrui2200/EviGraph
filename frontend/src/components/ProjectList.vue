@@ -25,9 +25,26 @@
         <!-- Card header -->
         <div class="card-header">
           <span class="project-id">{{ formatProjectId(project.project_id) }}</span>
-          <span class="status-badge" :class="getStatusClass(project.status)">
-            {{ formatStatus(project.status) }}
-          </span>
+          <div class="card-actions">
+            <span class="status-badge" :class="getStatusClass(project.status)">
+              {{ formatStatus(project.status) }}
+            </span>
+            <span
+              v-if="project.referencing_apps?.length > 0"
+              class="constraint-hint"
+              title="该知识库被 AI 应用使用"
+            >
+              ⚠️
+            </span>
+            <button
+              class="delete-btn"
+              :class="{ 'constrained': project.referencing_apps?.length > 0 }"
+              @click.stop="confirmDelete($event, project)"
+              :title="project.referencing_apps?.length > 0 ? '该知识库被 AI 应用使用，无法删除' : '删除项目'"
+            >
+              🗑️
+            </button>
+          </div>
         </div>
 
         <!-- Project name -->
@@ -82,7 +99,7 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { getProjectList, updateProject } from '../api/graph'
+import { getProjectList, updateProject, deleteProject } from '../api/graph'
 
 const router = useRouter()
 const projects = ref([])
@@ -129,6 +146,44 @@ const cancelEdit = (event) => {
   setTimeout(() => {
     editingProjectId.value = null
   }, 100)
+}
+
+// Delete project
+const confirmDelete = async (event, project) => {
+  event.stopPropagation()
+
+  const appNames = project.referencing_apps?.map(a => a.name).join(', ')
+
+  let message = `确定要删除项目 "${project.name || project.project_id}" 吗？`
+  if (appNames) {
+    message = `无法删除！该项目正被以下 AI 应用使用：\n${appNames}\n\n请先在 AI 应用中移除该知识库的关联。`
+    alert(message)
+    return
+  }
+  message += '\n\n此操作不可恢复。'
+
+  if (!confirm(message)) {
+    return
+  }
+
+  try {
+    const response = await deleteProject(project.project_id)
+    if (response.success) {
+      // Remove from list
+      projects.value = projects.value.filter(p => p.project_id !== project.project_id)
+    } else {
+      // Check if there are referencing apps
+      if (response.referencing_apps && response.referencing_apps.length > 0) {
+        const names = response.referencing_apps.map(a => a.name).join(', ')
+        alert(`无法删除！该项目正被以下 AI 应用使用：\n${names}\n\n请先在 AI 应用中移除该知识库的关联。`)
+      } else {
+        alert(`删除失败: ${response.error || '未知错误'}`)
+      }
+    }
+  } catch (err) {
+    console.error('Failed to delete project:', err)
+    alert('删除失败，请重试')
+  }
 }
 
 // Load project list
@@ -312,12 +367,51 @@ onMounted(() => {
   border-bottom: 1px solid #F3F4F6;
 }
 
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .project-id {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.7rem;
   color: #6B7280;
   letter-spacing: 0.5px;
   font-weight: 500;
+}
+
+.delete-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 6px;
+  font-size: 0.9rem;
+  opacity: 0.5;
+  transition: opacity 0.2s, transform 0.2s;
+  border-radius: 4px;
+}
+
+.delete-btn:hover {
+  opacity: 1;
+  transform: scale(1.1);
+  background: #FEE2E2;
+}
+
+.delete-btn.constrained {
+  cursor: not-allowed;
+  opacity: 0.3;
+}
+
+.delete-btn.constrained:hover {
+  opacity: 0.3;
+  transform: none;
+  background: none;
+}
+
+.constraint-hint {
+  font-size: 0.9rem;
+  cursor: help;
 }
 
 .status-badge {

@@ -21,6 +21,7 @@ from ..utils.file_parser import FileParser, TextChunk
 from ..utils.logger import get_logger
 from ..models.task import TaskManager, TaskStatus
 from ..models.project import ProjectManager, ProjectStatus
+from ..models.ai_app import AiAppManager
 
 # Get logger
 logger = get_logger('mirofish.api')
@@ -624,14 +625,39 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
 @graph_bp.route('/project/list', methods=['GET'])
 def list_projects():
     """
-    List all projects
+    List all projects with AI app reference info
     """
     limit = request.args.get('limit', 50, type=int)
     projects = ProjectManager.list_projects(limit=limit)
-    
+
+    # Get all AI apps for reference check
+    apps = AiAppManager.list_apps(limit=100)
+    app_graph_map: Dict[str, List[Dict]] = {}  # graph_id -> list of {app_id, name, is_published}
+
+    for app in apps:
+        selected_graph_ids = app.workflow_data.get('selectedGraphIds', [])
+        for gid in selected_graph_ids:
+            if gid not in app_graph_map:
+                app_graph_map[gid] = []
+            app_graph_map[gid].append({
+                "app_id": app.app_id,
+                "name": app.name,
+                "is_published": app.is_published
+            })
+
+    # Attach referencing apps to each project
+    project_list = []
+    for p in projects:
+        p_dict = p.to_dict()
+        if p.graph_id and p.graph_id in app_graph_map:
+            p_dict["referencing_apps"] = app_graph_map[p.graph_id]
+        else:
+            p_dict["referencing_apps"] = []
+        project_list.append(p_dict)
+
     return jsonify({
         "success": True,
-        "data": [p.to_dict() for p in projects],
+        "data": project_list,
         "count": len(projects)
     })
 
@@ -639,15 +665,44 @@ def list_projects():
 @graph_bp.route('/project/<project_id>', methods=['DELETE'])
 def delete_project(project_id: str):
     """
-    Delete project
+    Delete project with AI App reference check
     """
+    # Get project to check graph_id
+    project = ProjectManager.get_project(project_id)
+    if not project:
+        return jsonify({
+            "success": False,
+            "error": f"Project not found: {project_id}"
+        }), 404
+
+    # Check if any AI App references this project's graph
+    if project.graph_id:
+        apps = AiAppManager.list_apps(limit=100)
+        referencing_apps = []
+        for app in apps:
+            selected_graph_ids = app.workflow_data.get('selectedGraphIds', [])
+            if project.graph_id in selected_graph_ids:
+                referencing_apps.append({
+                    "app_id": app.app_id,
+                    "name": app.name,
+                    "is_published": app.is_published
+                })
+
+        if referencing_apps:
+            return jsonify({
+                "success": False,
+                "error": "Cannot delete project: AI App is using this knowledge base",
+                "referencing_apps": referencing_apps
+            }), 409
+
+    # Proceed with deletion
     success = ProjectManager.delete_project(project_id)
 
     if not success:
         return jsonify({
             "success": False,
-            "error": f"Project does not exist or deletion failed: {project_id}"
-        }), 404
+            "error": f"Project deletion failed: {project_id}"
+        }), 500
 
     return jsonify({
         "success": True,

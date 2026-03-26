@@ -105,6 +105,18 @@ export function updateProject(projectId, data) {
 }
 
 /**
+ * Delete project
+ * @param {String} projectId - Project ID
+ * @returns {Promise} Returns success or error with referencing_apps if constrained
+ */
+export function deleteProject(projectId) {
+  return service({
+    url: `/api/graph/project/${projectId}`,
+    method: 'delete'
+  })
+}
+
+/**
  * Get project list
  * @param {Number} limit - Maximum number of projects to return
  * @returns {Promise}

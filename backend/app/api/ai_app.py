@@ -60,6 +60,34 @@ def get_app(app_id: str):
         "data": app.to_dict()
     })
 
+@ai_app_bp.route('/check-graph/<graph_id>', methods=['GET'])
+def check_graph_references(graph_id: str):
+    """Check which AI apps reference a specific graph_id (for project deletion constraint)"""
+    try:
+        apps = AiAppManager.list_apps(limit=100)
+        referencing_apps = []
+
+        for app in apps:
+            selected_graph_ids = app.workflow_data.get('selectedGraphIds', [])
+            if graph_id in selected_graph_ids:
+                referencing_apps.append({
+                    "app_id": app.app_id,
+                    "name": app.name,
+                    "is_published": app.is_published
+                })
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "graph_id": graph_id,
+                "referencing_apps": referencing_apps,
+                "can_delete": len(referencing_apps) == 0
+            }
+        })
+    except Exception as e:
+        logger.error(f"Failed to check graph references: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @ai_app_bp.route('/<app_id>', methods=['DELETE'])
 def delete_app(app_id: str):
     """Delete an AI application"""

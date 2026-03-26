@@ -649,6 +649,10 @@ const selectFact = (fact, idx) => {
       if (graphPanelRef.value) {
         graphPanelRef.value.focusNode(nodeId)
       }
+      // If fact has PDF location info, open document viewer
+      if (fact.source && fact.source !== 'Unknown') {
+        viewDocument(fact)
+      }
     }
   }
 }
@@ -661,15 +665,43 @@ const handleNodeClick = (nodeId) => {
   }
   selectedNodeId.value = nodeId
   highlightedNodeId.value = nodeId
-  const factIdx = results.value.facts.findIndex(f => (f.source_node_uuid || f.uuid) === nodeId)
-  if (factIdx !== -1) {
-    expandedFacts.value.add(factIdx)
-    nextTick(() => {
-      const el = document.getElementById(`fact-item-${factIdx}`)
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      }
-    })
+
+  // Helper function to find node with PDF info
+  const findNodeWithPdfInfo = (nodeId) => {
+    // Check in search results first (nodes from search have pdf_info)
+    const searchNode = results.value?.nodes?.find(n => n.uuid === nodeId)
+    if (searchNode?.pdf_info?.source) return searchNode
+    // Check in full graph data (also has pdf_info after our backend update)
+    const fullNode = fullGraphData.value?.nodes?.find(n => n.uuid === nodeId)
+    if (fullNode?.pdf_info?.source) return fullNode
+    return null
+  }
+
+  const node = findNodeWithPdfInfo(nodeId)
+  if (node?.pdf_info?.source) {
+    // Node has PDF location info - open document viewer
+    const fact = {
+      uuid: nodeId,
+      source: node.pdf_info.source,
+      page: node.pdf_info.page || 1,
+      bbox: node.pdf_info.bbox,
+      page_width: node.pdf_info.page_width,
+      page_height: node.pdf_info.page_height,
+      graph_id: graphId.value || projectId
+    }
+    viewDocument(fact)
+  } else {
+    // No PDF info - expand the fact if found
+    const factIdx = results.value.facts.findIndex(f => (f.source_node_uuid || f.uuid) === nodeId)
+    if (factIdx !== -1) {
+      expandedFacts.value.add(factIdx)
+      nextTick(() => {
+        const el = document.getElementById(`fact-item-${factIdx}`)
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        }
+      })
+    }
   }
 }
 
