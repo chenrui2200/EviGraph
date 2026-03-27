@@ -85,7 +85,6 @@ class RelationType(Enum):
 
     # 动作关系
     IN_SITUATION = "in_situation"  # 情景关联
-    REQUIRES = "requires"        # 需要满足
 
     # 操作关系（新增）
     OPERATES_ON = "operates_on"  # 操作作用于

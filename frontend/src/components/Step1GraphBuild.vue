@@ -13,16 +13,13 @@
             <span v-else-if="currentPhase === 0" class="badge processing">分析中</span>
             <span v-else class="badge pending">等待中</span>
           </div>
-          <div class="step-actions">
-            <button
-              v-if="currentPhase > 0 || (currentPhase === 0 && projectData?.ontology)"
-              class="reset-btn-mini"
-              @click="handleReset"
-              title="重置并重新分析"
-            >
-              ↻ 重置
-            </button>
-          </div>
+        </div>
+
+        <!-- 重置按钮 -->
+        <div v-if="currentPhase > 0 || (currentPhase === 0 && projectData?.ontology)" class="reset-action-bar">
+          <button class="reset-btn" @click="handleReset" title="重置并重新分析">
+            ↻ 重置
+          </button>
         </div>
 
         <div class="card-content">
@@ -130,7 +127,7 @@
           </div>
         </div>
 
-        <!-- 重置按钮（所有状态可见） -->
+        <!-- 重置按钮 -->
         <div v-if="currentPhase > 0" class="reset-action-bar">
           <button class="reset-btn" @click="handleReset" title="重置并重新构建">
             ↻ 重置
@@ -468,29 +465,6 @@ watch(() => props.systemLogs.length, () => {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.reset-btn-mini {
-  background: #FFF;
-  border: 1px solid #FF5722;
-  color: #FF5722;
-  font-size: 9px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: 600;
-  transition: all 0.2s;
-}
-
-.reset-btn-mini:hover {
-  background: #FF5722;
-  color: #FFF;
-}
-
-.step-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .reset-action-bar {

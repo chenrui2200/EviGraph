@@ -56,6 +56,31 @@ class CrossReference:
     description: str = ""
 
 
+
+@dataclass
+class SemanticTriplet:
+    """
+    语义三元组 - ClauseSegment 的核心抽取单元
+
+    每个三元组表示一条完整的语义关系：
+    (组件/施事者, 动作, 对象/受事者)
+
+    例如：
+    - 断路器 -选用→ 配电线路
+    - 导体 -敷设→ 电缆桥架
+    - TN系统 -严禁使用→
+
+    这样做的好处：
+    1. 消除平行列表的笛卡尔积歧义
+    2. 每个三元组独立建关系，语义准确
+    3. 支持细粒度的知识问答和推理
+    """
+    component: str = ""    # 施事组件（设备/系统/材料），如 "断路器"、"导体"
+    action: str = ""       # 实操动作（必须可执行），如 "选用"、"敷设"、"接地"
+    obj: str = ""          # 受事对象（操作目标），如 "截面积"、"配电线路"、"TN-C系统"
+    condition: str = ""     # 适用条件（可选），如 "短路条件下"、"爆炸危险场所"
+    requirement: str = "mandatory"  # 要求类型：mandatory / recommended / prohibited
+
 @dataclass
 class ClauseItem:
     """
@@ -70,6 +95,8 @@ class ClauseItem:
     actions: List[str] = field(default_factory=list)      # 款/项涉及的动作
     conditions: List[str] = field(default_factory=list)   # 款/项涉及的条件
     objects: List[str] = field(default_factory=list)      # 款/项涉及的对象
+    # 款/项级语义三元组（每个款/项内的精确三元组）
+    triplets: List[SemanticTriplet] = field(default_factory=list)
 
 
 @dataclass
@@ -164,9 +191,11 @@ class ClauseSegment(HierarchicalChunk):
 
     单条条文 + 所有款/项，是90%技术问答的主要检索单元
 
+    核心设计：使用语义三元组 (SemanticTriplet) 而非平行列表，
+    消除笛卡尔积歧义，确保 (Component, Action, Object) 精确匹配。
+
     SOTA 图谱构建支持：
-    - 语义条件 (conditions) 和动作 (actions) 分离
-    - 设备组件 (components) 和操作对象 (objects) 识别
+    - 语义三元组精确建关系
     - 层级关联 (parent_chapter)
     - OCR 感知处理 (# 前缀、跨行合并、款/项结构化)
     """
@@ -180,27 +209,45 @@ class ClauseSegment(HierarchicalChunk):
     applicable_systems: List[SystemApplicability] = field(default_factory=list)
     requirement_type: RequirementType = RequirementType.RECOMMENDED
 
-    # LLM补充字段（语义理解）
-    conditions: List[str] = field(default_factory=list)   # 前提条件名称列表
-    actions: List[str] = field(default_factory=list)      # 规定动作名称列表
-    semantics_enriched: bool = False
+    # 核心字段：语义三元组列表（每个三元组 = 一条精确关系）
+    triplets: List[SemanticTriplet] = field(default_factory=list)
 
-    # SOTA 扩展字段
-    components: List[str] = field(default_factory=list)   # 涉及组件列表
-    objects: List[str] = field(default_factory=list)      # 操作对象列表
-    parent_chapter: Optional[int] = None                # 所属章节编号
+    # 款/项结构化（每个款/项内也有三元组）
+    clause_items: List[ClauseItem] = field(default_factory=list)
 
     # OCR 增强字段
     is_term_definition: bool = False    # 是否为术语定义章节（如 2.0.x）
     terms: List[Dict] = field(default_factory=list)   # 术语定义列表
     formula_content: Optional[str] = None  # 公式具体表达式
-    clause_items: List[ClauseItem] = field(default_factory=list)  # 结构化款/项列表
+    semantics_enriched: bool = False
+
+    # 层级关联
+    parent_chapter: Optional[int] = None  # 所属章节编号
+
+    # 兼容字段：从 triplets 推导而来（仅用于序列化）
+    conditions: List[str] = field(default_factory=list)
+    actions: List[str] = field(default_factory=list)
+    components: List[str] = field(default_factory=list)
+    objects: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         self.level = ChunkLevel.LEVEL_2
         if not self.id:
             content_hash = hashlib.md5(self.content.encode()).hexdigest()[:8]
             self.id = f"CL{self.clause_id or content_hash}"
+
+        # 从 triplets 推导兼容字段（去重）
+        if self.triplets:
+            seen_comp, seen_act, seen_obj, seen_cond = set(), set(), set(), set()
+            for t in self.triplets:
+                if t.component: seen_comp.add(t.component)
+                if t.action: seen_act.add(t.action)
+                if t.obj: seen_obj.add(t.obj)
+                if t.condition: seen_cond.add(t.condition)
+            self.components = list(seen_comp)
+            self.actions = list(seen_act)
+            self.objects = list(seen_obj)
+            self.conditions = list(seen_cond)
 
         # 补充metadata
         self.metadata.update({
@@ -213,11 +260,18 @@ class ClauseSegment(HierarchicalChunk):
             "table_refs": self.table_refs,
             "cross_refs": [r.ref_id for r in self.cross_refs],
             "semantics_enriched": self.semantics_enriched,
-            "conditions": self.conditions,
-            "actions": self.actions,
-            "components": self.components,
-            "objects": self.objects,
             "parent_chapter": self.parent_chapter,
+            # 语义三元组（核心）
+            "triplets": [
+                {
+                    "component": t.component,
+                    "action": t.action,
+                    "obj": t.obj,
+                    "condition": t.condition,
+                    "requirement": t.requirement
+                }
+                for t in self.triplets
+            ],
             # OCR 增强字段
             "is_term_definition": self.is_term_definition,
             "terms": self.terms,
@@ -252,9 +306,22 @@ class ClauseSegment(HierarchicalChunk):
         self,
         conditions: List[str] = None,
         actions: List[str] = None,
-        requirement_type: RequirementType = None
+        requirement_type: RequirementType = None,
+        triplets: List[Dict] = None
     ):
-        """添加语义补充（LLM调用后）"""
+        """添加语义补充（LLM调用后）- 同时支持旧接口和平行列表"""
+        if triplets:
+            self.triplets = [
+                SemanticTriplet(
+                    component=t.get("component", ""),
+                    action=t.get("action", ""),
+                    obj=t.get("obj", ""),
+                    condition=t.get("condition", ""),
+                    requirement=t.get("requirement", "mandatory")
+                )
+                for t in triplets
+                if t.get("component") or t.get("action") or t.get("obj")
+            ]
         if conditions:
             self.conditions = conditions
         if actions:

@@ -117,6 +117,17 @@ ORDER BY score DESC
 LIMIT $limit
 """
 
+# Fallback: direct CONTAINS search when fulltext index fails or returns empty
+_CONTAINS_SEARCH_OBJECT_NODES = """
+MATCH (n:Entity {graph_id: $graph_id})
+WHERE 'Object' IN labels(n)
+  AND (toLower(n.name) CONTAINS toLower($keyword)
+       OR toLower(n.summary) CONTAINS toLower($keyword))
+RETURN n, 1.0 AS score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
 # Cypher for vector search on episodes (raw text chunks)
 _VECTOR_SEARCH_EPISODES = """
 CALL db.index.vector.queryNodes('episode_embedding', $limit, $query_vector)
@@ -249,6 +260,11 @@ class SearchService:
         merged = self._merge_results(
             vector_results, keyword_results, key="uuid", limit=limit
         )
+        logger.debug(
+            f"Object node search '{query}': "
+            f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
+            f"merged={len(merged)}, vector_index={'available' if _index_status.entity_embedding else 'N/A'}"
+        )
         return merged
 
     def search_nodes(
@@ -283,6 +299,11 @@ class SearchService:
 
         merged = self._merge_results(
             vector_results, keyword_results, key="uuid", limit=limit
+        )
+        logger.debug(
+            f"Object node search '{query}': "
+            f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
+            f"merged={len(merged)}, vector_index={'available' if _index_status.entity_embedding else 'N/A'}"
         )
         return merged
 
@@ -397,6 +418,11 @@ class SearchService:
         merged = self._merge_results(
             vector_results, keyword_results, key="uuid", limit=limit
         )
+        logger.debug(
+            f"Object node search '{query}': "
+            f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
+            f"merged={len(merged)}, vector_index={'available' if _index_status.entity_embedding else 'N/A'}"
+        )
         return merged
 
     def _run_object_node_vector_search(
@@ -410,18 +436,21 @@ class SearchService:
                 query_vector=query_vector,
                 limit=limit,
             )
-            return [
+            results = [
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
                 for record in result
             ]
+            logger.debug(f"Object vector search: {len(results)} results (index available)")
+            return results
         except Exception as e:
-            logger.warning(f"Vector Object node search failed: {e}")
+            logger.debug(f"Vector Object node search failed: {e}")
             return []
 
     def _run_object_node_keyword_search(
         self, session: Neo4jSession, graph_id: str, query: str, limit: int
     ) -> List[Dict[str, Any]]:
-        """Run fulltext search on Object entity name + summary."""
+        """Run fulltext search on Object entity name + summary with CONTAINS fallback."""
+        # Strategy 1: Fulltext index search (primary)
         try:
             safe_query = self._escape_lucene(query)
             result = session.run(
@@ -430,13 +459,53 @@ class SearchService:
                 query_text=safe_query,
                 limit=limit,
             )
-            return [
+            results = [
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
                 for record in result
             ]
+            if results:
+                logger.debug(f"Object keyword search (fulltext): '{query}' -> {len(results)} results")
+                return results
         except Exception as e:
-            logger.warning(f"Keyword Object node search failed: {e}")
-            return []
+            logger.debug(f"Object fulltext search failed: {e}")
+
+        # Strategy 2: Fulltext index with wildcard (partial match)
+        try:
+            wildcard_query = "*" + self._escape_lucene(query.strip()) + "*"
+            result = session.run(
+                _FULLTEXT_SEARCH_OBJECT_NODES,
+                graph_id=graph_id,
+                query_text=wildcard_query,
+                limit=limit,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                for record in result
+            ]
+            if results:
+                logger.debug(f"Object keyword search (wildcard): '{query}' -> {len(results)} results")
+                return results
+        except Exception as e:
+            logger.debug(f"Object wildcard search failed: {e}")
+
+        # Strategy 3: Direct CONTAINS fallback (no index required)
+        try:
+            result = session.run(
+                _CONTAINS_SEARCH_OBJECT_NODES,
+                graph_id=graph_id,
+                keyword=query.strip(),
+                limit=limit,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                for record in result
+            ]
+            logger.debug(f"Object keyword search (contains): '{query}' -> {len(results)} results")
+            return results
+        except Exception as e:
+            logger.debug(f"Object CONTAINS search failed: {e}")
+
+        return []
 
     def _merge_results(
         self,

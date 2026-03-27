@@ -925,7 +925,25 @@ class Neo4jStorage(GraphStorage):
         def _read(tx):
             result = tx.run(
                 """
-                MATCH (n:Entity {uuid: $uuid})-[r:RELATION]-(m:Entity)
+                MATCH (n:Entity {uuid: $uuid})-[r]-(m:Entity)
+                RETURN r, startNode(r).uuid AS src_uuid, endNode(r).uuid AS tgt_uuid
+                """,
+                uuid=node_uuid,
+            )
+            return [
+                self._edge_to_dict(record["r"], record["src_uuid"], record["tgt_uuid"])
+                for record in result
+            ]
+
+        with self._driver.session() as session:
+            return self._call_with_retry(session.execute_read, _read)
+
+    def get_node_outgoing_edges(self, node_uuid: str) -> List[Dict[str, Any]]:
+        """获取节点的所有出边（node → neighbor，按语义方向）"""
+        def _read(tx):
+            result = tx.run(
+                """
+                MATCH (n:Entity {uuid: $uuid})-[r]->(m:Entity)
                 RETURN r, startNode(r).uuid AS src_uuid, endNode(r).uuid AS tgt_uuid
                 """,
                 uuid=node_uuid,
@@ -1250,12 +1268,13 @@ class Neo4jStorage(GraphStorage):
                     node["pdf_info"] = node_pdf_info.get(node["uuid"], {})
 
             # 3. Get semantic relationships between entities
-            # 匹配所有语义关系类型: RELATION, MANDATES, PROHIBITS, RECOMMENDS, HAS_CONDITION, OPERATES_ON, APPLIES_TO 等
+            # 匹配所有语义关系类型（5条核心路径全覆盖）
             edge_result = tx.run(
                 """
                 MATCH (src:Entity {graph_id: $gid})-[r]->(tgt:Entity {graph_id: $gid})
                 WHERE type(r) IN ['RELATION', 'MANDATES', 'PROHIBITS', 'RECOMMENDS',
                                    'HAS_CONDITION', 'OPERATES_ON', 'APPLIES_TO',
+                                   'IN_SITUATION',
                                    'PART_OF', 'NEXT_EPISODE', 'MENTIONS', 'CROSS_REFERENCE',
                                    'HAS_DOCUMENT', 'HAS_PAGE', 'HAS_EPISODE']
                 RETURN r, src.uuid AS src_uuid, tgt.uuid AS tgt_uuid,
@@ -1321,6 +1340,8 @@ class Neo4jStorage(GraphStorage):
     def _edge_to_dict(rel, source_uuid: str, target_uuid: str) -> Dict[str, Any]:
         """Convert Neo4j relationship to the standard edge dict format."""
         props = dict(rel)
+        # 从 Neo4j relationship type 提取边类型名（如 MANDATES, OPERATES_ON）
+        rel_type = rel.type if hasattr(rel, 'type') else ''
 
         # Convert Neo4j DateTime to string
         for k, v in props.items():
@@ -1342,7 +1363,8 @@ class Neo4jStorage(GraphStorage):
 
         return {
             "uuid": props.get("uuid", ""),
-            "name": props.get("name", ""),
+            # 优先用 name 属性（RELATION 边），fallback 到 Neo4j relationship type
+            "name": props.get("name") or rel_type or "",
             "fact": props.get("fact", ""),
             "source_node_uuid": source_uuid,
             "target_node_uuid": target_uuid,
@@ -1856,13 +1878,15 @@ class Neo4jStorage(GraphStorage):
                                   embedding: List[float], metadata: Dict):
         """为Clause创建Entity节点及其语义关系
 
-        根据规范图谱模型，Clause 与以下实体建立关系：
-        - Clause -MANDATES/RECOMMENDS/PROHIBITS-> Action
-        - Clause -HAS_CONDITION-> Condition
-        - Action -OPERATES_ON-> Object
-        - Clause -MENTIONS-> Component
+        核心改进：使用语义三元组 (SemanticTriplet) 而非平行列表，
+        每个三元组 (component, action, obj, condition, requirement) 精确建一条关系，
+        消除笛卡尔积歧义。
 
-        如果 metadata 中缺少 semantic 字段，会尝试从 content 中解析
+        关系模型（4条核心路径）：
+        1. Term --defines--> Clause          （_create_defines_relation）
+        2. Clause --applies_to--> Component   （APPLIES_TO）
+        3. Clause --mandates/recommends/prohibits--> Action  （MANDATES/RECOMMENDS/PROHIBITS）
+        4. Condition --in_situation--> Action  （IN_SITUATION）
         """
         clause_name = f"条款{clause_id}"
 
@@ -1870,8 +1894,8 @@ class Neo4jStorage(GraphStorage):
         entity_seed = f"{graph_id}:{clause_name}".encode('utf-8')
         entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
 
-        # 获取要求类型
-        requirement_type = metadata.get('requirement_type', 'recommended').lower()
+        # 获取条款级要求类型（fallback）
+        clause_requirement = metadata.get('requirement_type', 'recommended').lower()
 
         # 创建Clause Entity节点
         tx.run(
@@ -1896,52 +1920,10 @@ class Neo4jStorage(GraphStorage):
             summary=content[:500] if content else "",
             embedding=embedding,
             clause_id=clause_id,
-            req_type=requirement_type
+            req_type=clause_requirement
         )
 
-        # ========== Fallback: 从 content 中解析语义信息 ==========
-        # 如果 metadata 中没有 semantic 信息，尝试从 content 解析
-        conditions = metadata.get('conditions', [])
-        actions = metadata.get('actions', [])
-        components = metadata.get('components', [])
-        objects = metadata.get('objects', [])
-
-        # 检查是否需要 fallback 解析
-        needs_fallback = (
-            (not conditions or conditions == []) and
-            (not actions or actions == []) and
-            (not components or components == []) and
-            (not objects or objects == []) and
-            content
-        )
-
-        if needs_fallback:
-            logger.info(f"[hierarchical] Fallback: 从 content 解析语义信息 for clause {clause_id}")
-            parsed = self._parse_semantic_from_content(content, clause_id)
-            conditions = parsed.get('conditions', conditions)
-            actions = parsed.get('actions', actions)
-            components = parsed.get('components', components)
-            objects = parsed.get('objects', objects)
-
-        # ========== 术语章节处理 ==========
-        # 如果是术语定义章节（is_term_definition: true），提取术语并建立 DEFINES 关系
-        terms = metadata.get('terms', [])
-        is_term_def = metadata.get('is_term_definition', False)
-
-        if is_term_def and terms:
-            term_name = terms[0].get('term_name', '') if terms else ''
-            term_definition = terms[0].get('definition', '') if terms else ''
-
-            if term_name:
-                logger.info(f"[hierarchical] 创建术语定义: {term_name}")
-                # 创建 Term 实体
-                term_entity_uuid = self._create_term_entity(
-                    tx, graph_id, entity_uuid, term_name, term_definition, clause_id
-                )
-                # 建立 DEFINES 关系: Term -> Clause
-                self._create_defines_relation(tx, term_entity_uuid, entity_uuid)
-
-        # 链接Episode -> Entity (MENTIONS)
+        # 链接Episode -> Clause (MENTIONS)
         tx.run(
             """
             MATCH (ep:Episode {uuid: $ep_uuid}), (e:Entity {uuid: $e_uuid})
@@ -1953,79 +1935,129 @@ class Neo4jStorage(GraphStorage):
             gid=graph_id
         )
 
-        # ========== 创建语义实体和关系 ==========
-
-        # 1. 创建 Conditions（前提条件）
-        if isinstance(conditions, str):
-            conditions = [conditions]
-        for condition_name in conditions:
-            if condition_name and condition_name.strip():
-                self._create_condition_entity(
-                    tx, graph_id, entity_uuid, condition_name.strip()
+        # ========== 术语章节处理（独立处理，不走三元组）==========
+        terms = metadata.get('terms', [])
+        is_term_def = metadata.get('is_term_definition', False)
+        if is_term_def and terms:
+            term_name = terms[0].get('term_name', '') if terms else ''
+            term_definition = terms[0].get('definition', '') if terms else ''
+            if term_name:
+                logger.info(f"[hierarchical] 创建术语定义: {term_name}")
+                term_entity_uuid = self._create_term_entity(
+                    tx, graph_id, entity_uuid, term_name, term_definition, clause_id
                 )
+                self._create_defines_relation(tx, term_entity_uuid, entity_uuid)
+            return  # 术语章节不需要三元组处理
 
-        # 2. 创建 Actions（规定动作）- 仅保留实操性动作
-        if isinstance(actions, str):
-            actions = [actions]
-        # 过滤非实操性动作
-        filtered_actions = [a.strip() for a in actions if a and a.strip() and is_actionable(a)]
-        if len(filtered_actions) < len(actions):
-            skipped = len(actions) - len(filtered_actions)
-            logger.debug(f"[hierarchical] 过滤了 {skipped} 个非实操性 Action: {[a for a in actions if a and a.strip() and not is_actionable(a)]}")
+        # ========== 核心：按语义三元组建关系 ==========
+        triplets = metadata.get('triplets', [])
 
-        for action_name in filtered_actions:
-            action_uuid = self._create_action_entity(
-                tx, graph_id, entity_uuid, action_name
-            )
-            # 根据 requirement_type 建立关系
-            if requirement_type == 'mandatory':
-                self._create_mandates_relation(tx, entity_uuid, action_uuid)
-            elif requirement_type == 'prohibited':
-                self._create_prohibits_relation(tx, entity_uuid, action_uuid)
-            else:  # recommended
-                self._create_recommends_relation(tx, entity_uuid, action_uuid)
+        # 如果没有三元组但有旧格式（fallback），转换为三元组
+        if not triplets:
+            flat_conditions = metadata.get('conditions', [])
+            flat_actions = metadata.get('actions', [])
+            flat_components = metadata.get('components', [])
+            flat_objects = metadata.get('objects', [])
+            if flat_conditions or flat_actions or flat_components or flat_objects:
+                logger.info(f"[hierarchical] [Fallback] clause {clause_id}: flat lists -> triplets")
+                # 从 content 解析（fallback）
+                if content and not flat_actions:
+                    parsed = self._parse_semantic_from_content(content, clause_id)
+                    flat_conditions = parsed.get('conditions', flat_conditions)
+                    flat_actions = parsed.get('actions', flat_actions)
+                    flat_components = parsed.get('components', flat_components)
+                    flat_objects = parsed.get('objects', flat_objects)
+                # 构建笛卡尔积三元组（fallback 模式）
+                for comp in (flat_components if isinstance(flat_components, list) else [flat_components]):
+                    for act in (flat_actions if isinstance(flat_actions, list) else [flat_actions]):
+                        for obj in (flat_objects if isinstance(flat_objects, list) else [flat_objects]):
+                            if comp and act and obj:
+                                triplets.append({
+                                    "component": comp,
+                                    "action": act,
+                                    "obj": obj,
+                                    "condition": "",
+                                    "requirement": clause_requirement
+                                })
+                # Conditions 单独处理
+                for cond in (flat_conditions if isinstance(flat_conditions, list) else [flat_conditions]):
+                    if cond:
+                        self._create_condition_entity(tx, graph_id, entity_uuid, cond)
+            else:
+                # 完全没有语义信息，尝试从 content 解析
+                if content:
+                    logger.info(f"[hierarchical] [Fallback] 从 content 解析 clause {clause_id}")
+                    parsed = self._parse_semantic_from_content(content, clause_id)
+                    for comp in parsed.get('components', []):
+                        for act in parsed.get('actions', []):
+                            if is_actionable(act):
+                                for obj in parsed.get('objects', []):
+                                    triplets.append({
+                                        "component": comp,
+                                        "action": act,
+                                        "obj": obj,
+                                        "condition": "",
+                                        "requirement": clause_requirement
+                                    })
+                    for cond in parsed.get('conditions', []):
+                        if cond:
+                            self._create_condition_entity(tx, graph_id, entity_uuid, cond)
 
-        # 3. 创建 Components（设备/系统/材料）
-        if isinstance(components, str):
-            components = [components]
-        for component_name in components:
-            if component_name and component_name.strip():
-                self._create_component_entity(
-                    tx, graph_id, episode_id, component_name.strip()
-                )
+        # ========== 遍历每个三元组，精确建关系（5条核心路径） ==========
+        for t in triplets:
+            comp = (t.get('component') or '').strip()
+            act = (t.get('action') or '').strip()
+            obj = (t.get('obj') or '').strip()
+            cond = (t.get('condition') or '').strip()
+            t_req = t.get('requirement', clause_requirement).lower()
 
-        # 4. 创建 Objects（操作对象）
-        if isinstance(objects, str):
-            objects = [objects]
-        for object_name in objects:
-            if object_name and object_name.strip():
-                self._create_object_entity(
-                    tx, graph_id, episode_id, object_name.strip()
-                )
+            # 过滤非实操性动作
+            if act and not is_actionable(act):
+                logger.debug(f"[hierarchical] 过滤非实操性 Action: '{act}' in clause {clause_id}")
+                act = ''
 
-        # 5. 创建 Actions 与 Objects 的 OPERATES_ON 关系
-        for action_name in actions:
-            if action_name and action_name.strip():
-                action_uuid = self._find_entity_uuid(tx, graph_id, 'Action', action_name.strip())
-                for object_name in objects:
-                    if object_name and object_name.strip():
-                        object_uuid = self._find_entity_uuid(tx, graph_id, 'Object', object_name.strip())
-                        if action_uuid and object_uuid:
-                            self._create_operates_on_relation(tx, action_uuid, object_uuid)
+            # 路径2: Clause --applies_to--> Component
+            comp_uuid = None
+            if comp:
+                self._create_component_entity(tx, graph_id, episode_id, comp)
+                comp_uuid = self._find_entity_uuid(tx, graph_id, 'Component', comp)
+                if comp_uuid:
+                    self._create_applies_to_relation(tx, entity_uuid, comp_uuid)
 
-        # 如果有formula_refs，创建Formula实体
-        formula_refs = metadata.get("formula_refs", [])
-        if isinstance(formula_refs, str):
-            formula_refs = [formula_refs]
-        for formula_id in formula_refs:
+            # 路径5（部分）: Action --requires--> Object（作为参数要求）
+            obj_uuid = None
+            if obj:
+                self._create_object_entity(tx, graph_id, episode_id, obj)
+                obj_uuid = self._find_entity_uuid(tx, graph_id, 'Object', obj)
+
+            # 路径3: Clause --mandates/recommends/prohibits--> Action
+            action_uuid = None
+            if act:
+                action_uuid = self._create_action_entity(tx, graph_id, entity_uuid, act)
+                if t_req == 'mandatory':
+                    self._create_mandates_relation(tx, entity_uuid, action_uuid)
+                elif t_req == 'prohibited':
+                    self._create_prohibits_relation(tx, entity_uuid, action_uuid)
+                else:
+                    self._create_recommends_relation(tx, entity_uuid, action_uuid)
+
+                # 路径5（精确配对）: Action --OPERATES_ON--> Object
+                if obj_uuid:
+                    self._create_operates_on_relation(tx, action_uuid, obj_uuid)
+
+            # 路径4: Condition --in_situation--> Action
+            cond_uuid = None
+            if cond:
+                cond_uuid = self._create_condition_entity(tx, graph_id, entity_uuid, cond)
+                # 当同时存在 condition 和 action 时，建立 in_situation 关系
+                if action_uuid and cond_uuid:
+                    self._create_in_situation_relation(tx, cond_uuid, action_uuid)
+
+        # ========== 表格/公式引用 ==========
+        for formula_id in metadata.get("formula_refs", []):
             if formula_id:
                 self._create_formula_entity(tx, graph_id, episode_id, entity_uuid, formula_id)
-
-        # 如果有table_refs，创建Parameter实体
-        table_refs = metadata.get("table_refs", [])
-        if isinstance(table_refs, str):
-            table_refs = [table_refs]
-        for table_ref in table_refs:
+        for table_ref in metadata.get("table_refs", []):
             if table_ref:
                 self._create_table_parameter_entity(tx, graph_id, episode_id, entity_uuid, table_ref, content)
 
@@ -2414,6 +2446,38 @@ class Neo4jStorage(GraphStorage):
             )
         except Exception as e:
             logger.debug(f"Failed to create condition entity: {e}")
+
+        return entity_uuid
+
+    def _create_applies_to_relation(self, tx, clause_uuid: str, component_uuid: str):
+        """创建 Clause --applies_to--> Component 关系（路径2）"""
+        try:
+            tx.run(
+                """
+                MATCH (c:Entity {uuid: $clause_uuid}), (comp:Entity {uuid: $comp_uuid})
+                MERGE (c)-[r:APPLIES_TO]->(comp)
+                ON CREATE SET r.graph_id = 'default'
+                """,
+                clause_uuid=clause_uuid,
+                comp_uuid=component_uuid
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create APPLIES_TO relation: {e}")
+
+    def _create_in_situation_relation(self, tx, condition_uuid: str, action_uuid: str):
+        """创建 Condition --in_situation--> Action 关系（路径4）"""
+        try:
+            tx.run(
+                """
+                MATCH (cond:Entity {uuid: $cond_uuid}), (a:Entity {uuid: $action_uuid})
+                MERGE (cond)-[r:IN_SITUATION]->(a)
+                ON CREATE SET r.graph_id = 'default'
+                """,
+                cond_uuid=condition_uuid,
+                action_uuid=action_uuid
+            )
+        except Exception as e:
+            logger.debug(f"Failed to create IN_SITUATION relation: {e}")
 
     def _create_action_entity(self, tx, graph_id: str, clause_uuid: str, action_name: str) -> str:
         """创建 Action（规定动作）实体"""

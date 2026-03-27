@@ -102,7 +102,7 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                     )
 
                     # 将智能分块数据转换为 HierarchicalChunkResult 格式
-                    from ..models.clause import HierarchicalChunkResult, SectionSegment, ClauseSegment, ElementSegment, ElementType, RequirementType
+                    from ..models.clause import HierarchicalChunkResult, SectionSegment, ClauseSegment, ElementSegment, ElementType, RequirementType, SemanticTriplet, ClauseItem
 
                     # 构建 sections
                     sections = []
@@ -123,16 +123,50 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                         except ValueError:
                             req_type = RequirementType.RECOMMENDED
 
+                        # 解析条文级语义三元组
+                        clause_triplets = []
+                        for t in c.get('triplets', []):
+                            clause_triplets.append(SemanticTriplet(
+                                component=t.get('component', ''),
+                                action=t.get('action', ''),
+                                obj=t.get('obj', ''),
+                                condition=t.get('condition', ''),
+                                requirement=t.get('requirement', 'mandatory')
+                            ))
+
+                        # 解析款/项及其三元组
+                        clause_items = []
+                        for ci_data in c.get('clause_items', []):
+                            ci_triplets = []
+                            for t in ci_data.get('triplets', []):
+                                ci_triplets.append(SemanticTriplet(
+                                    component=t.get('component', ''),
+                                    action=t.get('action', ''),
+                                    obj=t.get('obj', ''),
+                                    condition=t.get('condition', ''),
+                                    requirement=t.get('requirement', 'mandatory')
+                                ))
+                            clause_items.append(ClauseItem(
+                                item_number=ci_data.get('item_number', ''),
+                                item_content=ci_data.get('item_content', ''),
+                                components=ci_data.get('components', []),
+                                actions=ci_data.get('actions', []),
+                                conditions=ci_data.get('conditions', []),
+                                objects=ci_data.get('objects', []),
+                                triplets=ci_triplets
+                            ))
+
                         clauses.append(ClauseSegment(
                             clause_id=c.get('clause_id', ''),
                             clause_title=c.get('clause_title', ''),
                             content=c.get('content', ''),
                             requirement_type=req_type,
-                            conditions=c.get('conditions', []),
-                            actions=c.get('actions', []),
-                            components=c.get('components', []),
-                            objects=c.get('objects', []),
+                            triplets=clause_triplets,
                             parent_chapter=c.get('parent_chapter'),
+                            is_term_definition=c.get('is_term_definition', False),
+                            terms=c.get('terms', []),
+                            formula_content=c.get('formula_content'),
+                            clause_items=clause_items,
                             metadata=c
                         ))
 

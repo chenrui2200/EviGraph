@@ -51,13 +51,21 @@
                 <input type="checkbox" v-model="filterGraph" />
                 <span>自动过滤关联图结构</span>
               </label>
-              <label class="checkbox-label" style="margin-left: 16px;">
+              <label class="checkbox-label">
                 <input type="checkbox" v-model="objectFirstMode" />
                 <span>Object-first DFS 检索</span>
               </label>
               <span v-if="objectFirstMode" class="depth-label">
-                深度:
-                <input type="number" v-model.number="maxDepth" min="1" max="5" class="depth-input" />
+                深度
+                <div class="depth-pills">
+                  <button
+                    v-for="d in [1,2,3,4,5]"
+                    :key="d"
+                    class="depth-pill"
+                    :class="{ active: maxDepth === d }"
+                    @click="maxDepth = d"
+                  >{{ d }}</button>
+                </div>
               </span>
             </div>
           </div>
@@ -1211,6 +1219,10 @@ onMounted(async () => {
 .search-options {
   font-size: 13px;
   color: #666;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
 }
 
 .checkbox-label {
@@ -1676,8 +1688,46 @@ onMounted(async () => {
   color: #666;
   display: flex;
   align-items: center;
+  gap: 8px;
+  margin-left: 8px;
+  padding-left: 8px;
+  border-left: 1px solid #e0e0e0;
+}
+
+.depth-pills {
+  display: flex;
   gap: 4px;
-  margin-left: 4px;
+}
+
+.depth-pill {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1.5px solid #dcdfe6;
+  background: #fff;
+  color: #606266;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.depth-pill:hover {
+  border-color: #409eff;
+  color: #409eff;
+  background: #ecf5ff;
+}
+
+.depth-pill.active {
+  background: #409eff;
+  border-color: #409eff;
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 2px 6px rgba(64, 158, 255, 0.4);
 }
 
 .object-rows-list {

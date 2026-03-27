@@ -305,11 +305,8 @@ class ProjectManager:
             with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(project.to_dict(), f, ensure_ascii=False, indent=2)
 
-            # Atomic rename (replace existing file)
-            if os.path.exists(meta_path):
-                os.replace(temp_path, meta_path)
-            else:
-                os.rename(temp_path, meta_path)
+            # Atomic rename (replace existing file) — atomic on Linux
+            os.replace(temp_path, meta_path)
         except Exception as e:
             if os.path.exists(temp_path):
                 os.remove(temp_path)

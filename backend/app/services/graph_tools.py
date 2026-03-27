@@ -1362,6 +1362,7 @@ Your response:"""
             facts=facts,
             graph_id=graph_id,
             seen_fact_texts=seen_fact_texts,
+            bidirectional=True,  # Object 起始节点允许双向探索
         )
 
         # 构建 Object 节点详情（包含 PDF 定位信息）
@@ -1394,6 +1395,7 @@ Your response:"""
         facts: List[Dict[str, Any]],
         graph_id: str,
         seen_fact_texts: set,
+        bidirectional: bool = False,  # Object 起始节点允许双向，之后严格单向
     ):
         """
         DFS 递归访问单个节点及其邻居。
@@ -1418,9 +1420,14 @@ Your response:"""
                 depth=depth,
             ))
 
-        # 获取该节点的所有出边（从任意方向遍历，因为图是无向的 RELATION）
+        # 获取边：双向(bidirectional=True) 或严格单向(bidirectional=False)
         try:
-            edges = self.storage.get_node_edges(node_uuid)
+            if bidirectional:
+                # Object 起始节点：双向探索，发现所有邻居
+                edges = self.storage.get_node_edges(node_uuid)
+            else:
+                # 其他节点：严格按语义方向，只取出边
+                edges = self.storage.get_node_outgoing_edges(node_uuid)
         except Exception as e:
             logger.debug(f"Failed to get edges for node {node_uuid[:8]}: {e}")
             edges = []
@@ -1432,8 +1439,8 @@ Your response:"""
             tgt_uuid = edge.get("target_node_uuid", "")
             edge_name = edge.get("name", "")
 
-            # 确定对端节点 UUID
-            neighbor_uuid = tgt_uuid if src_uuid == node_uuid else src_uuid
+            # 确定对端节点 UUID（出边模式下 src_uuid == node_uuid）
+            neighbor_uuid = tgt_uuid
 
             # 添加边到 DFS 路径
             traversal_edges.append(ObjectPathEdge(
@@ -1445,9 +1452,25 @@ Your response:"""
                 depth=depth,
             ))
 
-            # 去重收集事实
-            if edge_fact:
-                norm = self.normalize_text(edge_fact)
+            # 去重收集事实（RELATION 边用 fact 文本，语义边合成 fact）
+            fact_to_add = edge_fact
+            if not fact_to_add and edge_name:
+                # 语义三元组边没有显式 fact，根据边类型合成
+                neighbor_name = (neighbor_data.get("name", "") if neighbor_data else "")
+                rel_facts = {
+                    "MANDATES": f"强制要求: {neighbor_name}",
+                    "RECOMMENDS": f"推荐: {neighbor_name}",
+                    "PROHIBITS": f"禁止: {neighbor_name}",
+                    "OPERATES_ON": f"操作对象: {neighbor_name}",
+                    "HAS_CONDITION": f"前提条件: {neighbor_name}",
+                    "APPLIES_TO": f"适用于: {neighbor_name}",
+                    "IN_SITUATION": f"触发条件: {neighbor_name}",
+                    "MENTIONS": f"提及: {neighbor_name}",
+                }
+                fact_to_add = rel_facts.get(edge_name, f"[{edge_name}] {neighbor_name}")
+
+            if fact_to_add:
+                norm = self.normalize_text(fact_to_add)
                 if norm and norm not in seen_fact_texts:
                     seen_fact_texts.add(norm)
 
@@ -1476,7 +1499,7 @@ Your response:"""
 
                     facts.append({
                         "uuid": edge_uuid,
-                        "text": edge_fact,
+                        "text": fact_to_add,
                         "original_text": original_text,
                         "source": source_info["source"],
                         "page": source_info["page"],
@@ -1508,6 +1531,7 @@ Your response:"""
                     facts=facts,
                     graph_id=graph_id,
                     seen_fact_texts=seen_fact_texts,
+                    bidirectional=False,  # 严格单向遍历
                 )
 
     def _get_node_pdf_info(self, node_uuid: str) -> Dict[str, Any]:

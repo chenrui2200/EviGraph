@@ -32,6 +32,7 @@ from ..models.clause import (
     SectionSegment,
     ClauseSegment,
     ClauseItem,
+    SemanticTriplet,
     ElementSegment,
     ChunkLevel,
     ElementType,
@@ -178,49 +179,52 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 - 术语章节不提取 actions/conditions，只提取 terms
 - 术语定义是"是什么"而非"要求做什么"
 
-## 语义要素提取（必须执行）
+## ⚠️ 语义三元组提取（核心！必须执行）
 
-每个条文**必须**提取以下四类语义要素：
+每个条文必须提取**语义三元组 (Semantic Triplet)**，而不是平行列表。
 
-### 1. Component（组件）- 关键！
-设备、系统、材料名称：
-- "电器"、"保护电器"、"隔离电器"、"剩余电流保护电器(RCD)"
-- "导体"、"电缆"、"母线"、"配电箱"
-- "变压器"、"开关"、"断路器"
+**格式**：
+{{
+    "triplets": [
+        {{"component": "施事组件", "action": "实操动作", "obj": "受事对象", "condition": "适用条件", "requirement": "mandatory|recommended|prohibited"}}
+    ]
+}}
 
-### 2. Action（动作）- 关键！必须提取实操性动作
-**定义**：规范要求的具体操作行为，应该是可以执行的动作。
+**三元组含义**： -→ 
 
-**✅ 应提取的实操性动作**（看得见、可执行的动作）：
-- **安装类**：安装、敷设、连接、接头、配线
-- **选用类**：选用、配置、设置、布置
-- **采用类**：采用、使用、应用
-- **防护类**：接地、接零、屏蔽、隔离
-- **检测类**：检测、试验、校验、测量、检查
+**✅ 正确示例**：
+- "电器应选用符合产品标准的断路器" → {{"component": "电器", "action": "选用", "obj": "断路器"}}
+- "导体在短路条件下应能承受热稳定" → {{"component": "导体", "action": "承受", "obj": "热稳定", "condition": "短路条件下"}}
+- "配电箱严禁使用TN-C系统" → {{"component": "配电箱", "action": "使用", "obj": "TN-C系统", "requirement": "prohibited"}}
+- "电缆应敷设在电缆桥架内" → {{"component": "电缆", "action": "敷设", "obj": "电缆桥架"}}
 
-**❌ 不应提取的"假动作"**（状态描述或复合动词的一部分）：
-- "符合"、"满足"、"达到"、"遵守" → 这些是状态要求，不是动作
-- "应符合"、"应满足"、"应达到" → 应拆分为"动作+对象"，如"符合标准"、"满足要求"
-- 如果条文说"应符合国家标准"，应提取 action: "符合" + object: "国家标准"（但更好的做法是直接提取 object 而不提取这个 action）
+**❌ 错误示例（笛卡尔积歧义，禁止！）**：
+{{
+    "components": ["电器", "断路器"],
+    "actions": ["应符合", "选用", "严禁"]
+}}
+→ 这样建图谱时，代码不知道  对应  还是 ，完全错误！
 
-**简化原则**：如果一个词不能对应一个具体的操作行为，就不要提取为 Action。
+**Action 提取原则**（必须可执行的动作）：
+- ✅ 安装类：安装、敷设、连接、接头、配线、铺设
+- ✅ 选用类：选用、配置、设置、布置、选择
+- ✅ 采用类：采用、使用、应用
+- ✅ 防护类：接地、接零、屏蔽、隔离
+- ✅ 检测类：检测、试验、校验、测量、检查
+- ✅ 动作类：动作、分断、闭合、承受
+- ❌ "符合"、"满足"、"达到"、"遵守" → 这些是状态词，不是动作。如果条文说"应符合XXX"，省略 action，只提取 component + obj，requirement=mandatory
 
-### 3. Object（对象）
-动作作用的目标（通常是参数或属性）：
-- "截面积"、"额定电流"、"额定电压"、"分断能力"
-- "标称电压"、"计算电流"、"动稳定"、"热稳定"
-
-### 4. Condition（条件）
-适用前提、环境、场景：
-- "当...时"、"在...场所"、"短路条件下"
-- "过负荷情况"、"维护、测试和检修时"
+**重要**：
+- 同一个条文可以提取多个三元组
+- 三元组数量宁缺毋滥，每条都必须是条文中明确表达的
+- condition/requirement 可选，condition 为空时不写，requirement 默认为 mandatory
 
 ## ⚠️ 款/项结构化提取（重要！）
 
 每个条文的款/项（如 "1、"、"2、"、"1）"、"2）"）应作为独立的子单元提取：
 
 - 每个款/项应有 `item_number` 和 `item_content`
-- 每个款/项应抽取对应的 **Component、Action、Condition、Object**
+- 每个款/项应抽取对应的 **语义三元组 triplets**
 - 款/项作为 `clause_items` 数组返回
 
 ## 表格与公式引用
@@ -245,13 +249,14 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 
 来源：{source}
 
-**注意**：
-1. 必须从条文中提取 components（组件）、actions（动作）、objects（对象）、conditions（条件），不能为空！
-2. **术语章节（如"2.0.5 直接接触防护"）需特殊处理**，在 terms 字段中返回术语定义。
-3. **款/项（如"1、"、"2、"）应作为 clause_items 独立提取**，每个款/项单独抽取要素。
+1. **核心**：使用 `triplets` 数组提取语义三元组，不要用平行列表！
+2. **术语章节（如"2.0.5 直接接触防护"）需特殊处理**，在 terms 字段中返回术语定义，triplets 设为 []。
+3. **款/项（如"1、"、"2、"）应作为 clause_items 独立提取**，每个款/项单独抽取三元组。
 4. **OCR 文本中的 # 前缀不是条文内容**，忽略即可。
 5. **表格引用**（如 `<table>...</table>` 或 "表3.2.2"）放入 referenced_tables。
 6. **公式引用**（如 "公式（3.2.14）" 或 "$...$"）放入 referenced_formulas 和 formula_content。
+7. **三元组不要编造**，只在条文中明确出现的 component/action/obj 才提取。
+
 
 请输出 JSON 格式：
 ```json
@@ -263,17 +268,9 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             "clause_content": "导体应满足线路保护的要求...",
             "requirement_type": "mandatory",
             "is_term_definition": false,
-            "conditions": [
-                {{"name": "过负荷情况", "description": "线路过负荷时"}}
-            ],
-            "actions": [
-                {{"name": "满足要求", "description": "导体应能承受线路保护的动作"}}
-            ],
-            "objects": [
-                {{"name": "导体", "description": "配电线路的导电材料"}}
-            ],
-            "components": [
-                {{"name": "导体", "type": "材料"}}
+            "triplets": [
+                {{"component": "导体", "action": "承受", "obj": "线路保护", "condition": "过负荷时", "requirement": "mandatory"}},
+                {{"component": "导体", "action": "选用", "obj": "截面积", "condition": "", "requirement": "mandatory"}}
             ],
             "terms": [],
             "referenced_tables": ["表3.2.2"],
@@ -283,18 +280,9 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                 {{
                     "item_number": "1",
                     "item_content": "按敷设方式及环境条件确定的导体载流量，不应小于计算电流",
-                    "components": [],
-                    "actions": [],
-                    "conditions": [],
-                    "objects": []
-                }},
-                {{
-                    "item_number": "2",
-                    "item_content": "导体应满足线路保护的要求",
-                    "components": [],
-                    "actions": [],
-                    "conditions": [],
-                    "objects": []
+                    "triplets": [
+                        {{"component": "导体", "action": "承受", "obj": "计算电流"}}
+                    ]
                 }}
             ]
         }}
@@ -303,6 +291,21 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 ```
 
 示例条文解析：
+
+**普通条文**：
+原文："低压配电设计所选用的电器，应符合国家现行的有关产品标准"
+错误提取（不要这样）：
+- triplets: [{"component": "电器", "action": "选用", "obj": ""}, {"component": "", "action": "符合", "obj": "产品标准"}]  ← 编造了空字段
+
+正确提取：
+- clause_id: "3.1.1"
+- triplets: [{"component": "电器", "action": "选用", "obj": "国家标准"}]  ← 单一准确三元组
+
+**更多正确三元组示例**：
+- "应设置剩余电流保护电器" → {"component": "配电系统", "action": "设置", "obj": "剩余电流保护电器"}
+- "采用阻燃电缆" → {"component": "线路", "action": "采用", "obj": "阻燃电缆"}
+- "严禁使用TN-C系统" → {"component": "配电系统", "action": "使用", "obj": "TN-C系统", "requirement": "prohibited"}
+- "电缆应敷设在电缆桥架内" → {"component": "电缆", "action": "敷设", "obj": "电缆桥架"}
 
 **普通条文**：
 原文："低压配电设计所选用的电器，应符合国家现行的有关产品标准"
@@ -604,6 +607,18 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             "formula_content": clause.formula_content,
             "referenced_tables": clause.metadata.get("referenced_tables", []) if clause.metadata else [],
             "referenced_formulas": clause.metadata.get("referenced_formulas", []) if clause.metadata else [],
+            # 语义三元组（核心）
+            "triplets": [
+                {
+                    "component": t.component,
+                    "action": t.action,
+                    "obj": t.obj,
+                    "condition": t.condition,
+                    "requirement": t.requirement
+                }
+                for t in clause.triplets
+            ] if clause.triplets else [],
+            # 款/项结构化
             "clause_items": [
                 {
                     "item_number": ci.item_number,
@@ -611,7 +626,17 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                     "components": ci.components,
                     "actions": ci.actions,
                     "conditions": ci.conditions,
-                    "objects": ci.objects
+                    "objects": ci.objects,
+                    "triplets": [
+                        {
+                            "component": t.component,
+                            "action": t.action,
+                            "obj": t.obj,
+                            "condition": t.condition,
+                            "requirement": t.requirement
+                        }
+                        for t in ci.triplets
+                    ] if ci.triplets else []
                 }
                 for ci in clause.clause_items
             ] if clause.clause_items else [],
@@ -650,7 +675,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         checkpoint: ChunkCheckpoint
     ) -> HierarchicalChunkResult:
         """从检查点构建 HierarchicalChunkResult"""
-        from ..models.clause import RequirementType
+        from ..models.clause import RequirementType, SemanticTriplet, ClauseItem
 
         result = HierarchicalChunkResult()
 
@@ -671,16 +696,37 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             except ValueError:
                 req_type = RequirementType.RECOMMENDED
 
-            # 恢复 clause_items
+            # 恢复 clause_items（含款/项级三元组）
             clause_items = []
             for ci_data in cd.get('clause_items', []):
+                ci_triplets = []
+                for t in ci_data.get('triplets', []):
+                    ci_triplets.append(SemanticTriplet(
+                        component=t.get('component', ''),
+                        action=t.get('action', ''),
+                        obj=t.get('obj', ''),
+                        condition=t.get('condition', ''),
+                        requirement=t.get('requirement', 'mandatory')
+                    ))
                 clause_items.append(ClauseItem(
                     item_number=ci_data.get('item_number', ''),
                     item_content=ci_data.get('item_content', ''),
                     components=ci_data.get('components', []),
                     actions=ci_data.get('actions', []),
                     conditions=ci_data.get('conditions', []),
-                    objects=ci_data.get('objects', [])
+                    objects=ci_data.get('objects', []),
+                    triplets=ci_triplets
+                ))
+
+            # 恢复条文级语义三元组
+            clause_triplets = []
+            for t in cd.get('triplets', []):
+                clause_triplets.append(SemanticTriplet(
+                    component=t.get('component', ''),
+                    action=t.get('action', ''),
+                    obj=t.get('obj', ''),
+                    condition=t.get('condition', ''),
+                    requirement=t.get('requirement', 'mandatory')
                 ))
 
             clause = ClauseSegment(
@@ -688,10 +734,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                 clause_title=cd.get('clause_title', ''),
                 content=cd.get('content', ''),
                 requirement_type=req_type,
-                conditions=cd.get('conditions', []),
-                actions=cd.get('actions', []),
-                components=cd.get('components', []),
-                objects=cd.get('objects', []),
+                triplets=clause_triplets,
                 parent_chapter=cd.get('parent_chapter'),
                 is_term_definition=cd.get('is_term_definition', False),
                 terms=cd.get('terms', []),
@@ -1126,19 +1169,42 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 
                 systems = self._extract_systems_from_text(cd.get("clause_content", ""))
 
-                # 解析款/项结构化数据
+                # 解析语义三元组（核心改动）
+                triplets = []
+                for t in cd.get("triplets", []):
+                    if t.get("component") or t.get("action") or t.get("obj"):
+                        triplets.append(SemanticTriplet(
+                            component=t.get("component", "").strip(),
+                            action=t.get("action", "").strip(),
+                            obj=t.get("obj", "").strip(),
+                            condition=t.get("condition", "").strip(),
+                            requirement=t.get("requirement", "mandatory")
+                        ))
+
+                # 解析款/项结构化数据（款/项内也有三元组）
                 clause_items = []
                 for ci_data in cd.get("clause_items", []):
+                    ci_triplets = []
+                    for t in ci_data.get("triplets", []):
+                        if t.get("component") or t.get("action") or t.get("obj"):
+                            ci_triplets.append(SemanticTriplet(
+                                component=t.get("component", "").strip(),
+                                action=t.get("action", "").strip(),
+                                obj=t.get("obj", "").strip(),
+                                condition=t.get("condition", "").strip(),
+                                requirement=t.get("requirement", "mandatory")
+                            ))
                     clause_items.append(ClauseItem(
                         item_number=ci_data.get("item_number", ""),
                         item_content=ci_data.get("item_content", ""),
+                        # 兼容旧格式：从 flat lists 提取（fallback）
                         components=[c.get("name", "") for c in ci_data.get("components", [])],
                         actions=[a.get("name", "") for a in ci_data.get("actions", [])],
                         conditions=[c.get("name", "") for c in ci_data.get("conditions", [])],
                         objects=[o.get("name", "") for o in ci_data.get("objects", [])]
                     ))
 
-                # 解析术语数据（LLM 返回的 terms 字段）
+                # 解析术语数据
                 terms_list = []
                 for term_data in cd.get("terms", []):
                     terms_list.append({
@@ -1155,18 +1221,17 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                     applicable_systems=systems,
                     cross_refs=self._build_cross_refs(cd),
                     source=source_info.get("source", ""),
+                    triplets=triplets,
+                    clause_items=clause_items,
                     is_term_definition=cd.get("is_term_definition", False),
                     terms=terms_list,
                     formula_content=cd.get("formula_content"),
-                    clause_items=clause_items,
+                    semantics_enriched=bool(triplets),
+                    parent_chapter=chapter_num,
                     metadata={
                         "chunk_type": "clause",
-                        "conditions": [c.get("name", "") for c in cd.get("conditions", [])],
-                        "actions": [a.get("name", "") for a in cd.get("actions", [])],
-                        "objects": [o.get("name", "") for o in cd.get("objects", [])],
-                        "components": [c.get("name", "") for c in cd.get("components", [])],
                         "parent_chapter": chapter_num,
-                        "semantics_enriched": True,
+                        "semantics_enriched": bool(triplets),
                         "is_term_definition": cd.get("is_term_definition", False),
                         "terms": terms_list,
                         "formula_content": cd.get("formula_content"),

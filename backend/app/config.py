@@ -52,7 +52,7 @@ class Config:
     # Text processing configuration
     DEFAULT_CHUNK_SIZE = 1500  # Increased for engineering standards to keep clauses intact
     DEFAULT_CHUNK_OVERLAP = 150  # Balanced overlap for 1500 chunk size
-    TESSERACT_CMD = os.environ.get('TESSERACT_CMD', r'C:\Program Files\Tesseract-OCR\tesseract.exe')
+    TESSERACT_CMD = os.environ.get('TESSERACT_CMD', 'tesseract')  # cross-platform: 'tesseract' (Linux) or '/usr/bin/tesseract' or full Windows path
     TESSDATA_DIR = os.path.join(os.path.dirname(__file__), 'tessdata')
 
     # OASIS simulation configuration
