@@ -8,6 +8,7 @@ import InteractionView from '../views/InteractionView.vue'
 import AiQaView from '../views/AiQaView.vue'
 import HitTestView from '../views/HitTestView.vue'
 import PublicChatView from '../views/PublicChatView.vue'
+import ChunkAnalysisView from '../views/ChunkAnalysisView.vue'
 
 const routes = [
   {
@@ -31,6 +32,12 @@ const routes = [
     path: '/hit-test/:projectId',
     name: 'HitTest',
     component: HitTestView,
+    props: true
+  },
+  {
+    path: '/chunk-analysis/:projectId',
+    name: 'ChunkAnalysis',
+    component: ChunkAnalysisView,
     props: true
   },
   {

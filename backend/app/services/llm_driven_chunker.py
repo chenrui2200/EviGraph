@@ -1182,10 +1182,9 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             response = self._call_llm_with_retry(
                 messages=[
                     {"role": "system", "content": self.CLAUSE_SYSTEM_PROMPT},
-                    {"role": "user", "content": self.CLAUSE_USER_PROMPT.format(
-                        document_text=text[:self.MAX_CHARS_PER_CHAPTER],
-                        source=source_info.get("source", "")
-                    )}
+                    {"role": "user", "content": self.CLAUSE_USER_PROMPT
+                        .replace("{document_text}", text[:self.MAX_CHARS_PER_CHAPTER])
+                        .replace("{source}", source_info.get("source", ""))}
                 ],
                 temperature=0.3
             )

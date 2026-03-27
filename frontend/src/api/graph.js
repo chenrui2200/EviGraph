@@ -195,3 +195,94 @@ export function chatWithAgent(data) {
     data
   })
 }
+
+// ============================================================================
+// 智能Chunks标注分析 API
+// ============================================================================
+
+/**
+ * 获取章节级进度详情
+ * @param {String} projectId - 项目ID
+ * @returns {Promise}
+ */
+export function getChunkProgress(projectId) {
+  return service({
+    url: `/api/graph/chunk/${projectId}/progress`,
+    method: 'get'
+  })
+}
+
+/**
+ * 获取格式化分析数据（含 PDF 定位信息）
+ * @param {String} projectId - 项目ID
+ * @returns {Promise}
+ */
+export function getChunkAnalysis(projectId) {
+  return service({
+    url: `/api/graph/chunk/${projectId}/analysis`,
+    method: 'get'
+  })
+}
+
+/**
+ * 启动/恢复智能Chunks标注分析任务
+ * @param {Object} data - Contains project_id, reset (bool)
+ * @returns {Promise}
+ */
+export function startChunking(data) {
+  return requestWithRetry(() =>
+    service({
+      url: '/api/graph/chunk/intelligent',
+      method: 'post',
+      data
+    })
+  )
+}
+
+/**
+ * 更新单个 clause 的知识实体（手动编辑）
+ * @param {String} projectId - 项目ID
+ * @param {Object} data - Contains clause_id, terms, conditions, actions, components
+ * @returns {Promise}
+ */
+export function updateClauseEntity(projectId, data) {
+  return service({
+    url: `/api/graph/chunk/${projectId}/entity`,
+    method: 'patch',
+    data
+  })
+}
+
+// ============================================================================
+// MinerU PDF 解析 API
+// ============================================================================
+
+/**
+ * 调用 MinerU API 解析 PDF
+ * @param {FormData} formData - 包含 pdf_file 和可选的 project_id, filename
+ * @returns {Promise}
+ */
+export function mineruParse(formData) {
+  return requestWithRetry(() =>
+    service({
+      url: '/api/graph/pdf/mineru-parse',
+      method: 'post',
+      data: formData,
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      }
+    })
+  )
+}
+
+/**
+ * 获取 MinerU 解析结果
+ * @param {String} projectId - 项目ID
+ * @returns {Promise}
+ */
+export function getMineruChunks(projectId) {
+  return service({
+    url: `/api/graph/pdf/mineru-parse/${projectId}`,
+    method: 'get'
+  })
+}

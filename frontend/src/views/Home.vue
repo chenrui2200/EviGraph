@@ -290,7 +290,7 @@ const startSimulation = () => {
   if (!canSubmit.value || loading.value) return
   import('../store/pendingUpload.js').then(({ setPendingUpload }) => {
     setPendingUpload(files.value, formData.value.simulationRequirement)
-    router.push({ name: 'Process', params: { projectId: 'new' } })
+    router.push({ name: 'ChunkAnalysis', params: { projectId: 'new' } })
   })
 }
 </script>

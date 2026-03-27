@@ -235,8 +235,10 @@ class ProjectManager:
 
     @classmethod
     def _get_project_dir(cls, project_id: str) -> str:
-        """Get project directory path"""
-        return os.path.join(cls.PROJECTS_DIR, project_id)
+        """Get project directory path, ensure it exists"""
+        project_dir = os.path.join(cls.PROJECTS_DIR, project_id)
+        os.makedirs(project_dir, exist_ok=True)
+        return project_dir
 
     @classmethod
     def _get_project_meta_path(cls, project_id: str) -> str:

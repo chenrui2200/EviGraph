@@ -38,6 +38,9 @@ class Config:
     NEO4J_USER = os.environ.get('NEO4J_USER', 'neo4j')
     NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD', 'mirofish')
 
+    # MinerU PDF parsing API
+    MINERU_API_URL = os.environ.get('MINERU_API_URL', 'http://192.168.110.126:8188/pdf_parse?parse_method=auto&is_json_md_dump=true')
+
     # Embedding configuration
     EMBEDDING_MODEL = os.environ.get('EMBEDDING_MODEL', 'nomic-embed-text')
     EMBEDDING_BASE_URL = os.environ.get('EMBEDDING_BASE_URL', 'http://localhost:11434')

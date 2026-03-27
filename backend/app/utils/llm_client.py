@@ -10,9 +10,10 @@ import re
 import time
 import random
 import threading
+import traceback
 from typing import Optional, Dict, Any, List
 import openai
-from openai import OpenAI, APIConnectionError, APITimeoutError, RateLimitError
+from openai import OpenAI, APIConnectionError, APITimeoutError, RateLimitError, APIStatusError
 
 from ..config import Config
 from ..utils.logger import get_logger
@@ -69,7 +70,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int = 4096 * 3,
+        max_tokens: int = 4096 * 4,
         response_format: Optional[Dict] = None
     ) -> str:
         """
@@ -123,8 +124,53 @@ class LLMClient:
                 else:
                     raise
 
+            except APIStatusError as e:
+                # HTTP 状态码错误（4xx/5xx），如 502 Bad Gateway
+                error_details = {
+                    "error_type": type(e).__name__,
+                    "status_code": e.status_code,
+                    "error_message": str(e),
+                    "model": self.model,
+                    "base_url": self.base_url,
+                    "response_body": None,
+                }
+                if hasattr(e, "body") and e.body:
+                    try:
+                        error_details["response_body"] = json.loads(str(e.body))
+                    except Exception:
+                        error_details["response_body"] = str(e.body)
+                logger.error(f"LLM API error ({e.status_code}): {json.dumps(error_details, ensure_ascii=False, indent=2)}")
+
+                # 5xx 错误自动重试（502/503/504 等通常是上游服务暂时不可用）
+                if 500 <= e.status_code < 600 and attempt < self.max_retries:
+                    last_error = e
+                    wait_time = (2 ** attempt) + random.random()
+                    logger.warning(f"LLM server error ({e.status_code}, attempt {attempt + 1}/{self.max_retries + 1}). Retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise
+
             except Exception as e:
-                logger.error(f"LLM unexpected error: {str(e)}")
+                # 打印完整错误详情，包括 status_code、response body 等
+                error_details = {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "model": self.model,
+                    "base_url": self.base_url,
+                    "temperature": kwargs.get("temperature"),
+                    "max_tokens": kwargs.get("max_tokens"),
+                    "messages_count": len(kwargs.get("messages", [])),
+                }
+                # 尝试从异常中提取更多字段
+                if hasattr(e, "status_code"):
+                    error_details["status_code"] = e.status_code
+                if hasattr(e, "body"):
+                    error_details["body"] = e.body
+                if hasattr(e, "response"):
+                    error_details["response"] = str(e.response)
+                logger.error(f"LLM unexpected error: {json.dumps(error_details, ensure_ascii=False, indent=2)}")
+                logger.error(f"LLM unexpected error (traceback):\n{traceback.format_exc()}")
                 raise
 
         raise last_error if last_error else Exception("LLM call failed")
@@ -133,7 +179,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.3,
-        max_tokens: int = 4096 * 3
+        max_tokens: int = 4096 * 4
     ) -> Dict[str, Any]:
         """
         Send chat request and return JSON with smart repair logic
