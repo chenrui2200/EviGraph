@@ -97,6 +97,26 @@ ORDER BY score DESC
 LIMIT $limit
 """
 
+# Cypher for vector search on Object nodes specifically
+_VECTOR_SEARCH_OBJECT_NODES = """
+CALL db.index.vector.queryNodes('entity_embedding', $limit, $query_vector)
+YIELD node, score
+WHERE node.graph_id = $graph_id AND 'Object' IN labels(node)
+RETURN node AS n, score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
+# Cypher for fulltext search on Object nodes specifically
+_FULLTEXT_SEARCH_OBJECT_NODES = """
+CALL db.index.fulltext.queryNodes('entity_fulltext', $query_text)
+YIELD node, score
+WHERE node.graph_id = $graph_id AND 'Object' IN labels(node)
+RETURN node AS n, score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
 # Cypher for vector search on episodes (raw text chunks)
 _VECTOR_SEARCH_EPISODES = """
 CALL db.index.vector.queryNodes('episode_embedding', $limit, $query_vector)
@@ -343,6 +363,79 @@ class SearchService:
             ]
         except Exception as e:
             logger.warning(f"Keyword node search failed: {e}")
+            return []
+
+    def search_object_nodes(
+        self,
+        session: Neo4jSession,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search Object nodes specifically using hybrid scoring.
+        Only returns nodes with label 'Object'.
+
+        Returns list of dicts with node properties + 'score'.
+        """
+        _index_status.check_indexes(session)
+
+        query_vector = self.embedding.embed(query)
+
+        vector_results = []
+        if _index_status.entity_embedding:
+            vector_results = self._run_object_node_vector_search(
+                session, graph_id, query_vector, limit * 2
+            )
+        else:
+            logger.debug("Skipping Object node vector search (index not available)")
+
+        keyword_results = self._run_object_node_keyword_search(
+            session, graph_id, query, limit * 2
+        )
+
+        merged = self._merge_results(
+            vector_results, keyword_results, key="uuid", limit=limit
+        )
+        return merged
+
+    def _run_object_node_vector_search(
+        self, session: Neo4jSession, graph_id: str, query_vector: List[float], limit: int
+    ) -> List[Dict[str, Any]]:
+        """Run vector similarity search on Object entity embedding."""
+        try:
+            result = session.run(
+                _VECTOR_SEARCH_OBJECT_NODES,
+                graph_id=graph_id,
+                query_vector=query_vector,
+                limit=limit,
+            )
+            return [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                for record in result
+            ]
+        except Exception as e:
+            logger.warning(f"Vector Object node search failed: {e}")
+            return []
+
+    def _run_object_node_keyword_search(
+        self, session: Neo4jSession, graph_id: str, query: str, limit: int
+    ) -> List[Dict[str, Any]]:
+        """Run fulltext search on Object entity name + summary."""
+        try:
+            safe_query = self._escape_lucene(query)
+            result = session.run(
+                _FULLTEXT_SEARCH_OBJECT_NODES,
+                graph_id=graph_id,
+                query_text=safe_query,
+                limit=limit,
+            )
+            return [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                for record in result
+            ]
+        except Exception as e:
+            logger.warning(f"Keyword Object node search failed: {e}")
             return []
 
     def _merge_results(

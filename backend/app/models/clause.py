@@ -57,6 +57,22 @@ class CrossReference:
 
 
 @dataclass
+class ClauseItem:
+    """
+    款/项结构化数据 - ClauseSegment 的子单元
+
+    用于提取条文中的分级列表项（如 "1、"、"2、"）
+    每个款/项独立抽取要素，作为更细粒度的检索单元
+    """
+    item_number: str = ""                       # 款/项编号，如 "1"、"2"、"1）"
+    item_content: str = ""                       # 款/项内容
+    components: List[str] = field(default_factory=list)   # 款/项涉及的组件
+    actions: List[str] = field(default_factory=list)      # 款/项涉及的动作
+    conditions: List[str] = field(default_factory=list)   # 款/项涉及的条件
+    objects: List[str] = field(default_factory=list)      # 款/项涉及的对象
+
+
+@dataclass
 class SystemApplicability:
     """适用系统"""
     system_type: str               # TN, TT, IT
@@ -152,6 +168,7 @@ class ClauseSegment(HierarchicalChunk):
     - 语义条件 (conditions) 和动作 (actions) 分离
     - 设备组件 (components) 和操作对象 (objects) 识别
     - 层级关联 (parent_chapter)
+    - OCR 感知处理 (# 前缀、跨行合并、款/项结构化)
     """
     clause_id: str = ""                    # 条文编号，如 "5.2.8"
     clause_title: str = ""
@@ -172,6 +189,12 @@ class ClauseSegment(HierarchicalChunk):
     components: List[str] = field(default_factory=list)   # 涉及组件列表
     objects: List[str] = field(default_factory=list)      # 操作对象列表
     parent_chapter: Optional[int] = None                # 所属章节编号
+
+    # OCR 增强字段
+    is_term_definition: bool = False    # 是否为术语定义章节（如 2.0.x）
+    terms: List[Dict] = field(default_factory=list)   # 术语定义列表
+    formula_content: Optional[str] = None  # 公式具体表达式
+    clause_items: List[ClauseItem] = field(default_factory=list)  # 结构化款/项列表
 
     def __post_init__(self):
         self.level = ChunkLevel.LEVEL_2
@@ -194,7 +217,22 @@ class ClauseSegment(HierarchicalChunk):
             "actions": self.actions,
             "components": self.components,
             "objects": self.objects,
-            "parent_chapter": self.parent_chapter
+            "parent_chapter": self.parent_chapter,
+            # OCR 增强字段
+            "is_term_definition": self.is_term_definition,
+            "terms": self.terms,
+            "formula_content": self.formula_content,
+            "clause_items": [
+                {
+                    "item_number": ci.item_number,
+                    "item_content": ci.item_content,
+                    "components": ci.components,
+                    "actions": ci.actions,
+                    "conditions": ci.conditions,
+                    "objects": ci.objects
+                }
+                for ci in self.clause_items
+            ]
         })
 
         # 调用父类__post_init__
@@ -205,6 +243,9 @@ class ClauseSegment(HierarchicalChunk):
         """获取完整条文内容（含款/项）"""
         parts = [self.content]
         parts.extend(self.paragraphs)
+        # 添加 clause_items 内容
+        for ci in self.clause_items:
+            parts.append(f"{ci.item_number} {ci.item_content}")
         return "\n".join(parts)
 
     def add_semantic_enrichment(

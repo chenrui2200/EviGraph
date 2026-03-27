@@ -48,6 +48,7 @@ class ChapterPlan:
     elements_count: int = 0
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    chapter_type: str = "normative"   # normative / term_definition / appendix
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -60,7 +61,8 @@ class ChapterPlan:
             "clauses_count": self.clauses_count,
             "elements_count": self.elements_count,
             "started_at": self.started_at,
-            "completed_at": self.completed_at
+            "completed_at": self.completed_at,
+            "chapter_type": self.chapter_type
         }
 
     @classmethod
@@ -78,7 +80,8 @@ class ChapterPlan:
             clauses_count=data.get('clauses_count', 0),
             elements_count=data.get('elements_count', 0),
             started_at=data.get('started_at'),
-            completed_at=data.get('completed_at')
+            completed_at=data.get('completed_at'),
+            chapter_type=data.get('chapter_type', 'normative')
         )
 
 

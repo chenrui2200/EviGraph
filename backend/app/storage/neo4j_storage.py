@@ -1125,6 +1125,28 @@ class Neo4jStorage(GraphStorage):
 
         return result
 
+    def search_object_nodes(
+        self,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search Object nodes specifically using hybrid scoring (vector + BM25).
+        Only returns nodes with label 'Object'.
+
+        Returns list of dicts with node properties + 'score'.
+        """
+        with self._driver.session() as session:
+            results = self._search.search_object_nodes(
+                session, graph_id, query, limit
+            )
+            for n in results:
+                for k, v in n.items():
+                    if hasattr(v, "isoformat"):
+                        n[k] = v.isoformat()
+            return results
+
     # ----------------------------------------------------------------
     # Graph info
     # ----------------------------------------------------------------

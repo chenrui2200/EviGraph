@@ -113,6 +113,26 @@ class GraphStorage(ABC):
             Dict with 'edges' and/or 'nodes' lists (wrapped by GraphToolsService into SearchResult)
         """
 
+    @abstractmethod
+    def search_object_nodes(
+        self,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search Object nodes specifically using hybrid scoring.
+        Only returns nodes with label 'Object'.
+
+        Args:
+            graph_id: Graph to search in
+            query: Search query text
+            limit: Max results
+
+        Returns:
+            List of Object node dicts with 'score' field.
+        """
+
     # --- Graph info ---
 
     @abstractmethod

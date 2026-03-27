@@ -143,6 +143,19 @@ export function searchGraph(data) {
 }
 
 /**
+ * Object-first DFS search - results grouped by Object node
+ * @param {Object} data - Contains graph_id, query, limit, max_depth
+ * @returns {Promise}
+ */
+export function searchObjectFirst(data) {
+  return service({
+    url: '/api/report/tools/search-object-first',
+    method: 'post',
+    data
+  })
+}
+
+/**
  * AI Q&A - retrieval from multiple graphs + LLM answering
  * @param {Object} data - Contains graph_ids, query
  * @returns {Promise}

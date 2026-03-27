@@ -150,6 +150,113 @@ class EdgeInfo:
 
 
 @dataclass
+class ObjectPathNode:
+    """DFS traversal中访问的单个节点路径"""
+    uuid: str
+    name: str
+    labels: List[str]
+    summary: str
+    depth: int  # 深度（0 = Object 起始节点）
+
+
+@dataclass
+class ObjectPathEdge:
+    """DFS遍历中访问的边"""
+    uuid: str
+    name: str
+    fact: str
+    source_node_uuid: str
+    target_node_uuid: str
+    depth: int  # 深度（边的起始节点深度）
+
+
+@dataclass
+class ObjectFirstRow:
+    """
+    单个 Object 节点的检索结果（一行记录）。
+    包含 Object 节点本身以及从该节点 DFS 遍历出的所有关联节点和边。
+    """
+    object_node: Dict[str, Any]          # Object 节点详情
+    traversal_paths: List[ObjectPathNode]  # DFS 遍历经过的节点路径
+    traversal_edges: List[ObjectPathEdge]  # DFS 遍历经过的边
+    facts: List[Dict[str, Any]]           # 关联的事实列表（含 PDF 定位）
+    relevance_score: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "object_node": self.object_node,
+            "traversal_paths": [
+                {
+                    "uuid": p.uuid,
+                    "name": p.name,
+                    "labels": p.labels,
+                    "summary": p.summary,
+                    "depth": p.depth,
+                }
+                for p in self.traversal_paths
+            ],
+            "traversal_edges": [
+                {
+                    "uuid": e.uuid,
+                    "name": e.name,
+                    "fact": e.fact,
+                    "source_node_uuid": e.source_node_uuid,
+                    "target_node_uuid": e.target_node_uuid,
+                    "depth": e.depth,
+                }
+                for e in self.traversal_edges
+            ],
+            "facts": self.facts,
+            "relevance_score": self.relevance_score,
+        }
+
+    def to_text(self) -> str:
+        """转换为文本格式，便于 LLM 理解"""
+        obj_name = self.object_node.get("name", "Unknown")
+        parts = [f"## Object: {obj_name}"]
+        parts.append(f"Summary: {self.object_node.get('summary', 'N/A')}")
+        if self.traversal_paths:
+            parts.append("\n### Traversal Path (DFS)")
+            for p in self.traversal_paths:
+                indent = "  " * (p.depth + 1)
+                parts.append(f"{indent}- [{p.labels[0] if p.labels else 'Entity'}] {p.name}")
+        if self.facts:
+            parts.append("\n### Related Facts")
+            for f in self.facts:
+                src = f.get("source", "Unknown")
+                pg = f.get("page", "")
+                parts.append(f"- {f.get('text', '')} [Source: {src}{f', Page {pg}' if pg else ''}]")
+        return "\n".join(parts)
+
+
+@dataclass
+class ObjectFirstSearchResult:
+    """
+    Object-first DFS 检索结果。
+    所有结果以 Object 节点为行组织，每行包含该 Object 的 DFS 遍历结果。
+    """
+    query: str
+    rows: List[ObjectFirstRow]
+    total_objects: int = 0
+    total_facts: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "query": self.query,
+            "rows": [r.to_dict() for r in self.rows],
+            "total_objects": self.total_objects,
+            "total_facts": self.total_facts,
+        }
+
+    def to_text(self) -> str:
+        parts = [f"## Object-First Retrieval Results\nQuery: {self.query}\n"]
+        for row in self.rows:
+            parts.append(row.to_text())
+            parts.append("\n---\n")
+        return "\n".join(parts)
+
+
+@dataclass
 class InsightForgeResult:
     """
     Deep Insight Retrieval Result (InsightForge)
@@ -1033,6 +1140,492 @@ Your response:"""
         limit: int = 10,
         scope: str = "edges"
     ) -> SearchResult:
+        """
+        Local keyword matching search (fallback approach)
+        """
+        logger.info(f"Using local search: query={query[:30]}...")
+
+        facts = []
+        edges_result = []
+        nodes_result = []
+
+        query_lower = query.lower()
+        keywords = [w.strip() for w in query_lower.replace(',', ' ').replace('，', ' ').split() if len(w.strip()) > 1]
+
+        def match_score(text: str) -> int:
+            if not text:
+                return 0
+            text_lower = text.lower()
+            if query_lower in text_lower:
+                return 100
+            score = 0
+            for keyword in keywords:
+                if keyword in text_lower:
+                    score += 10
+            return score
+
+        try:
+            if scope in ["edges", "both"]:
+                all_edges = self.storage.get_all_edges(graph_id)
+                scored_edges = []
+                for edge in all_edges:
+                    score = match_score(edge.get("fact", "")) + match_score(edge.get("name", ""))
+                    if score > 0:
+                        scored_edges.append((score, edge))
+
+                scored_edges.sort(key=lambda x: x[0], reverse=True)
+
+                for score, edge in scored_edges[:limit]:
+                    fact = edge.get("fact", "")
+                    if fact:
+                        facts.append({
+                            "text": fact,
+                            "source": "Local Search",
+                            "page": None,
+                            "graph_id": graph_id
+                        })
+                    edges_result.append({
+                        "uuid": edge.get("uuid", ""),
+                        "name": edge.get("name", ""),
+                        "fact": fact,
+                        "source_node_uuid": edge.get("source_node_uuid", ""),
+                        "target_node_uuid": edge.get("target_node_uuid", ""),
+                    })
+
+            if scope in ["nodes", "both"]:
+                all_nodes = self.storage.get_all_nodes(graph_id)
+                scored_nodes = []
+                for node in all_nodes:
+                    score = match_score(node.get("name", "")) + match_score(node.get("summary", ""))
+                    if score > 0:
+                        scored_nodes.append((score, node))
+
+                scored_nodes.sort(key=lambda x: x[0], reverse=True)
+
+                for score, node in scored_nodes[:limit]:
+                    nodes_result.append({
+                        "uuid": node.get("uuid", ""),
+                        "name": node.get("name", ""),
+                        "labels": node.get("labels", []),
+                        "summary": node.get("summary", ""),
+                    })
+                    summary = node.get("summary", "")
+                    if summary:
+                        facts.append(f"[{node.get('name', '')}]: {summary}")
+
+            logger.info(f"Local search complete: Found {len(facts)} related facts")
+
+        except Exception as e:
+            logger.error(f"Local search failed: {str(e)}")
+
+        return SearchResult(
+            facts=facts,
+            edges=edges_result,
+            nodes=nodes_result,
+            query=query,
+            total_count=len(facts)
+        )
+
+    def search_object_first(
+        self,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+        max_depth: int = 3,
+    ) -> ObjectFirstSearchResult:
+        """
+        Object-first DFS 检索。
+
+        检索策略：
+        1. 首轮命中 Object 节点（混合向量+关键词搜索，仅返回 Object 类型）
+        2. 从每个 Object 节点出发，深度优先遍历图谱
+        3. 每个 Object 节点生成一条结果行（ObjectFirstRow）
+        4. 对各行按相关性打分排序
+
+        Args:
+            graph_id: 图谱 ID
+            query: 检索查询
+            limit: 最多返回多少个 Object 行
+            max_depth: DFS 最大深度（默认 3）
+
+        Returns:
+            ObjectFirstSearchResult，按 Object 节点分组的 DFS 检索结果
+        """
+        logger.info(f"Object-first DFS search: graph_id={graph_id}, query={query[:50]}..., max_depth={max_depth}")
+
+        try:
+            # Step 1: 搜索 Object 节点（首轮必须命中 Object）
+            object_nodes = self.storage.search_object_nodes(
+                graph_id=graph_id,
+                query=query,
+                limit=limit,
+            )
+
+            if not object_nodes:
+                logger.info("No Object nodes found for the query")
+                return ObjectFirstSearchResult(
+                    query=query,
+                    rows=[],
+                    total_objects=0,
+                    total_facts=0,
+                )
+
+            # Step 2: 对每个 Object 节点进行 DFS 遍历
+            rows = []
+            all_facts_count = 0
+            seen_fact_texts = set()
+
+            for obj_node in object_nodes:
+                obj_uuid = obj_node.get("uuid", "")
+                row = self._dfs_from_object(
+                    graph_id=graph_id,
+                    object_uuid=obj_uuid,
+                    object_data=obj_node,
+                    max_depth=max_depth,
+                    seen_fact_texts=seen_fact_texts,
+                )
+                rows.append(row)
+                all_facts_count += len(row.facts)
+
+            # Step 3: 对行进行 LLM 重排（基于 Object 节点与查询的相关性 + 事实数量）
+            scored_rows = self._rerank_object_rows(query, rows)
+
+            # Step 4: 取 top limit 行
+            final_rows = scored_rows[:limit]
+
+            logger.info(
+                f"Object-first search complete: {len(final_rows)} Object rows, "
+                f"{all_facts_count} total facts"
+            )
+
+            return ObjectFirstSearchResult(
+                query=query,
+                rows=final_rows,
+                total_objects=len(final_rows),
+                total_facts=all_facts_count,
+            )
+
+        except Exception as e:
+            logger.error(f"Object-first search failed: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return ObjectFirstSearchResult(
+                query=query,
+                rows=[],
+                total_objects=0,
+                total_facts=0,
+            )
+
+    def _dfs_from_object(
+        self,
+        graph_id: str,
+        object_uuid: str,
+        object_data: Dict[str, Any],
+        max_depth: int,
+        seen_fact_texts: set,
+    ) -> ObjectFirstRow:
+        """
+        从一个 Object 节点执行 DFS 遍历，收集所有关联节点和边。
+
+        遍历规则（Normative KG Schema）：
+        - Object --OPERATES_ON--> Action
+        - Action --HAS_CONDITION--> Condition
+        - Action --MANDATES/RECOMMENDS/PROHIBITS--> 子Action/Component
+        - Condition --TRIGGERS--> Action
+        - 任意节点均可能被 Component/Section/Term 等节点引用
+
+        Args:
+            graph_id: 图谱 ID
+            object_uuid: Object 节点 UUID
+            object_data: Object 节点数据
+            max_depth: 最大深度
+            seen_fact_texts: 全局已见事实文本（去重用）
+
+        Returns:
+            ObjectFirstRow
+        """
+        traversal_nodes: List[ObjectPathNode] = []
+        traversal_edges: List[ObjectPathEdge] = []
+        facts: List[Dict[str, Any]] = []
+
+        # visited set 防止 DFS 中重复访问同一节点
+        visited: set = set()
+        # 深度优先递归遍历
+        self._dfs_visit(
+            node_uuid=object_uuid,
+            node_data=object_data,
+            depth=0,
+            max_depth=max_depth,
+            visited=visited,
+            traversal_nodes=traversal_nodes,
+            traversal_edges=traversal_edges,
+            facts=facts,
+            graph_id=graph_id,
+            seen_fact_texts=seen_fact_texts,
+        )
+
+        # 构建 Object 节点详情（包含 PDF 定位信息）
+        obj_pdf_info = self._get_node_pdf_info(object_uuid)
+        obj_detail = {
+            "uuid": object_uuid,
+            "name": object_data.get("name", ""),
+            "labels": object_data.get("labels", []),
+            "summary": object_data.get("summary", ""),
+            "pdf_info": obj_pdf_info,
+        }
+
+        return ObjectFirstRow(
+            object_node=obj_detail,
+            traversal_paths=traversal_nodes,
+            traversal_edges=traversal_edges,
+            facts=facts,
+            relevance_score=0.0,  # 初值，重排时会更新
+        )
+
+    def _dfs_visit(
+        self,
+        node_uuid: str,
+        node_data: Optional[Dict[str, Any]],
+        depth: int,
+        max_depth: int,
+        visited: set,
+        traversal_nodes: List[ObjectPathNode],
+        traversal_edges: List[ObjectPathEdge],
+        facts: List[Dict[str, Any]],
+        graph_id: str,
+        seen_fact_texts: set,
+    ):
+        """
+        DFS 递归访问单个节点及其邻居。
+
+        收集节点的：
+        - PathNode（DFS 路径节点）
+        - 关联边（RELATION）及其对端节点
+        - 边关联的事实文本（去重后加入 facts）
+        """
+        if node_uuid in visited or depth > max_depth:
+            return
+
+        visited.add(node_uuid)
+
+        # 添加到 DFS 路径节点
+        if node_data:
+            traversal_nodes.append(ObjectPathNode(
+                uuid=node_uuid,
+                name=node_data.get("name", ""),
+                labels=node_data.get("labels", []),
+                summary=node_data.get("summary", ""),
+                depth=depth,
+            ))
+
+        # 获取该节点的所有出边（从任意方向遍历，因为图是无向的 RELATION）
+        try:
+            edges = self.storage.get_node_edges(node_uuid)
+        except Exception as e:
+            logger.debug(f"Failed to get edges for node {node_uuid[:8]}: {e}")
+            edges = []
+
+        for edge in edges:
+            edge_uuid = edge.get("uuid", "")
+            edge_fact = edge.get("fact", "")
+            src_uuid = edge.get("source_node_uuid", "")
+            tgt_uuid = edge.get("target_node_uuid", "")
+            edge_name = edge.get("name", "")
+
+            # 确定对端节点 UUID
+            neighbor_uuid = tgt_uuid if src_uuid == node_uuid else src_uuid
+
+            # 添加边到 DFS 路径
+            traversal_edges.append(ObjectPathEdge(
+                uuid=edge_uuid,
+                name=edge_name,
+                fact=edge_fact,
+                source_node_uuid=src_uuid,
+                target_node_uuid=tgt_uuid,
+                depth=depth,
+            ))
+
+            # 去重收集事实
+            if edge_fact:
+                norm = self.normalize_text(edge_fact)
+                if norm and norm not in seen_fact_texts:
+                    seen_fact_texts.add(norm)
+
+                    # 获取边的 PDF 定位信息
+                    ep_ids = edge.get("episode_ids", [])
+                    source_info = {"source": "Graph", "page": None, "bbox": None,
+                                   "page_width": None, "page_height": None}
+                    original_text = ""
+                    if ep_ids:
+                        try:
+                            eps = self.storage.get_episodes(
+                                [ep_ids[0]] if isinstance(ep_ids, list) else [ep_ids]
+                            )
+                            if eps:
+                                meta = eps[0].get("metadata", {})
+                                source_info.update({
+                                    "source": meta.get("source", "Graph"),
+                                    "page": meta.get("page"),
+                                    "bbox": meta.get("bbox"),
+                                    "page_width": meta.get("page_width"),
+                                    "page_height": meta.get("page_height"),
+                                })
+                                original_text = eps[0].get("text", "")
+                        except Exception:
+                            pass
+
+                    facts.append({
+                        "uuid": edge_uuid,
+                        "text": edge_fact,
+                        "original_text": original_text,
+                        "source": source_info["source"],
+                        "page": source_info["page"],
+                        "bbox": source_info["bbox"],
+                        "page_width": source_info.get("page_width"),
+                        "page_height": source_info.get("page_height"),
+                        "graph_id": graph_id,
+                        "source_node_uuid": src_uuid,
+                        "target_node_uuid": tgt_uuid,
+                        "relation_name": edge_name,
+                        "traversal_depth": depth,
+                    })
+
+            # 递归访问对端邻居
+            if neighbor_uuid and neighbor_uuid not in visited:
+                try:
+                    neighbor_data = self.storage.get_node(neighbor_uuid)
+                except Exception:
+                    neighbor_data = None
+
+                self._dfs_visit(
+                    node_uuid=neighbor_uuid,
+                    node_data=neighbor_data,
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                    visited=visited,
+                    traversal_nodes=traversal_nodes,
+                    traversal_edges=traversal_edges,
+                    facts=facts,
+                    graph_id=graph_id,
+                    seen_fact_texts=seen_fact_texts,
+                )
+
+    def _get_node_pdf_info(self, node_uuid: str) -> Dict[str, Any]:
+        """获取节点的 PDF 定位信息"""
+        pdf_info = {
+            "source": None, "page": None, "bbox": None,
+            "page_width": None, "page_height": None, "episode_text": None,
+        }
+        try:
+            node_eps = self.storage.get_node_episodes(node_uuid, limit=1)
+            if node_eps:
+                meta = node_eps[0].get("metadata", {})
+                pdf_info.update({
+                    "source": meta.get("source"),
+                    "page": meta.get("page"),
+                    "bbox": meta.get("bbox"),
+                    "page_width": meta.get("page_width"),
+                    "page_height": meta.get("page_height"),
+                    "episode_text": node_eps[0].get("text"),
+                })
+        except Exception:
+            pass
+        return pdf_info
+
+    def _rerank_object_rows(
+        self,
+        query: str,
+        rows: List[ObjectFirstRow],
+    ) -> List[ObjectFirstRow]:
+        """
+        对 ObjectFirstRow 列表进行重排，基于：
+        1. Object 节点与查询的相关性（向量分数）
+        2. 该 Object 的 DFS 事实数量
+        3. LLM 评估 Object 与查询的整体相关性
+        """
+        if not rows:
+            return rows
+
+        # 预评分：fact 数量越多 + Object name 匹配度越高，得分越高
+        fact_count_max = max(len(r.facts) for r in rows) or 1
+        query_lower = query.lower()
+
+        for row in rows:
+            obj_name = row.object_node.get("name", "").lower()
+            name_score = 50 if query_lower in obj_name else (
+                30 if any(kw in obj_name for kw in query_lower.split() if len(kw) > 1) else 0
+            )
+            fact_score = (len(row.facts) / fact_count_max) * 30
+            row.relevance_score = name_score + fact_score + 20  # 基础分 20
+
+        # LLM 精排（top 候选）
+        top_rows = sorted(rows, key=lambda r: r.relevance_score, reverse=True)[:10]
+
+        if len(top_rows) <= 1:
+            return rows
+
+        # 构建 LLM 重排 prompt
+        row_summaries = []
+        for i, row in enumerate(top_rows):
+            obj_name = row.object_node.get("name", "Unknown")
+            fact_count = len(row.facts)
+            fact_preview = " | ".join([
+                f.get("text", "")[:50] for f in row.facts[:3]
+            ])
+            row_summaries.append(
+                f"[{i}] Object: {obj_name} | Facts: {fact_count} | Preview: {fact_preview}"
+            )
+
+        rerank_prompt = f"""你是知识检索重排专家。请根据【用户查询】，对以下 Object-first 检索结果进行相关性打分。
+
+### 用户查询:
+{query}
+
+### 候选结果列表:
+{chr(10).join(row_summaries)}
+
+### 打分规则:
+1. 评估每个 Object 节点是否与查询主题直接相关（0-100分）
+2. 考虑 Object 的含义、与查询的语义匹配度
+3. 注意：事实数量多的不一定更相关，要看内容质量
+4. 返回 JSON 格式：{{"scores": [{{"index": 0, "score": 95}}, ...]}}
+
+请输出打分 JSON："""
+
+        try:
+            response = self.llm.chat_json(
+                messages=[{"role": "user", "content": rerank_prompt}],
+                temperature=0.1,
+            )
+            scores = response.get("scores", [])
+
+            # 建立 index -> score 映射
+            score_map: Dict[int, float] = {}
+            for item in scores:
+                idx = item.get("index")
+                score = item.get("score", 0)
+                if isinstance(idx, int) and 0 <= idx < len(top_rows):
+                    score_map[idx] = score
+
+            # 更新 top_rows 的 relevance_score
+            for idx, row in enumerate(top_rows):
+                if idx in score_map:
+                    row.relevance_score = score_map[idx]
+
+            # 合并排序：top_rows 按 LLM 分数，其余按预评分
+            remaining = [r for r in rows if r not in top_rows]
+            all_sorted = sorted(
+                top_rows + remaining,
+                key=lambda r: r.relevance_score,
+                reverse=True,
+            )
+            return all_sorted
+
+        except Exception as e:
+            logger.warning(f"LLM rerank failed for Object rows: {e}")
+            return sorted(rows, key=lambda r: r.relevance_score, reverse=True)
+
+
         """
         Local keyword matching search (fallback approach)
         """

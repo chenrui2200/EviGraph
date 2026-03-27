@@ -13,6 +13,16 @@
             <span v-else-if="currentPhase === 0" class="badge processing">分析中</span>
             <span v-else class="badge pending">等待中</span>
           </div>
+          <div class="step-actions">
+            <button
+              v-if="currentPhase > 0 || (currentPhase === 0 && projectData?.ontology)"
+              class="reset-btn-mini"
+              @click="handleReset"
+              title="重置并重新分析"
+            >
+              ↻ 重置
+            </button>
+          </div>
         </div>
 
         <div class="card-content">
@@ -223,7 +233,8 @@ const props = defineProps({
 const emit = defineEmits(['next-step', 'reset-build'])
 
 const handleReset = () => {
-  if (confirm('确定要重置并重新构建吗？')) {
+  const phase = props.currentPhase === 0 ? 'Chunks 标注分析' : '知识图谱构建'
+  if (confirm(`确定要重置"${phase}"并重新开始吗？`)) {
     emit('reset-build')
   }
 }
@@ -474,6 +485,12 @@ watch(() => props.systemLogs.length, () => {
 .reset-btn-mini:hover {
   background: #FF5722;
   color: #FFF;
+}
+
+.step-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .reset-action-bar {

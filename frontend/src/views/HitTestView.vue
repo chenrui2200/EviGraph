@@ -51,11 +51,19 @@
                 <input type="checkbox" v-model="filterGraph" />
                 <span>自动过滤关联图结构</span>
               </label>
+              <label class="checkbox-label" style="margin-left: 16px;">
+                <input type="checkbox" v-model="objectFirstMode" />
+                <span>Object-first DFS 检索</span>
+              </label>
+              <span v-if="objectFirstMode" class="depth-label">
+                深度:
+                <input type="number" v-model.number="maxDepth" min="1" max="5" class="depth-input" />
+              </span>
             </div>
           </div>
 
           <div class="results-container">
-            <div v-if="!results.facts.length && !searching" class="empty-results">
+            <div v-if="!results.facts.length && !objectFirstRows.length && !searching" class="empty-results">
               <div class="empty-icon">🔎</div>
               <p>在上方输入内容并点击查询，测试知识召回效果</p>
             </div>
@@ -65,7 +73,122 @@
               <p>正在从图谱中检索相关事实...</p>
             </div>
 
-            <div v-if="results.facts.length > 0" class="results-list">
+            <!-- ===== Object-first DFS 检索结果 ===== -->
+            <div v-if="objectFirstRows.length > 0" class="results-list">
+              <div class="results-header">
+                <span>Object-first DFS 命中 (Found {{ objectFirstRows.length }} Objects)</span>
+                <button class="reset-filter-btn" @click="resetFilter">重置视图</button>
+              </div>
+
+              <div class="results-summary-card">
+                <div class="summary-title">💡 检索分析</div>
+                <p class="summary-content">
+                  本次 Object-first 检索命中了 {{ objectFirstRows.length }} 个 Object 节点，
+                  共 {{ objectFirstRows.reduce((s, r) => s + (r.facts?.length || 0), 0) }} 条关联事实。
+                  每个 Object 节点为一行结果，DFS 深度优先遍历其关联知识。
+                </p>
+              </div>
+
+              <!-- Object-first 行列表 -->
+              <div class="object-rows-list">
+                <div
+                  v-for="(row, rowIdx) in objectFirstRows"
+                  :key="rowIdx"
+                  :id="`object-row-${rowIdx}`"
+                  class="object-row-card"
+                  :class="{ 'active': highlightedObjectId === row.object_node?.uuid }"
+                  @mouseenter="highlightObjectRow(row)"
+                  @mouseleave="clearHighlight"
+                  @click="selectObjectRow(row)"
+                >
+                  <!-- Object 节点标题 -->
+                  <div class="object-row-header">
+                    <div class="object-name">
+                      <span class="object-badge">Object</span>
+                      <strong>{{ row.object_node?.name || 'Unknown' }}</strong>
+                    </div>
+                    <div class="object-score">
+                      <span class="score-tag" :title="`相关性: ${row.relevance_score?.toFixed(1)}`">
+                        {{ row.relevance_score?.toFixed(1) || '?' }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <!-- Object 摘要 -->
+                  <div v-if="row.object_node?.summary" class="object-summary">
+                    {{ row.object_node.summary }}
+                  </div>
+
+                  <!-- DFS 遍历路径 -->
+                  <div v-if="row.traversal_paths?.length > 1" class="traversal-path">
+                    <div class="path-header">🔱 DFS 遍历路径 (深度 {{ row.traversal_paths.length - 1 }})</div>
+                    <div class="path-nodes">
+                      <template v-for="(node, nIdx) in row.traversal_paths" :key="nIdx">
+                        <span
+                          class="path-node"
+                          :class="`depth-${node.depth}`"
+                          @click.stop="handleNodeClick(node.uuid)"
+                          :title="`${node.labels?.join(', ')}: ${node.summary || ''}`"
+                        >
+                          {{ node.name || node.uuid?.slice(0, 8) }}
+                        </span>
+                        <span v-if="nIdx < row.traversal_paths.length - 1" class="path-arrow">→</span>
+                      </template>
+                    </div>
+                  </div>
+
+                  <!-- 关联事实列表 -->
+                  <div class="object-facts">
+                    <div class="facts-header">
+                      📋 关联事实 ({{ row.facts?.length || 0 }})
+                    </div>
+                    <div
+                      v-for="(fact, fIdx) in row.facts"
+                      :key="fIdx"
+                      class="fact-item"
+                      :class="{ 'expanded': expandedFacts.has(`${rowIdx}-${fIdx}`) }"
+                      @mouseenter="highlightFactInGraph(fact)"
+                      @mouseleave="clearHighlight"
+                      @click.stop="selectFactFromRow(row, fact, rowIdx, fIdx)"
+                    >
+                      <div class="fact-main-row">
+                        <div class="fact-text">{{ fact.text }}</div>
+                        <button class="expand-toggle" @click.stop="toggleFactExpand(`${rowIdx}-${fIdx}`)">
+                          {{ expandedFacts.has(`${rowIdx}-${fIdx}`) ? '▲' : '▼' }}
+                        </button>
+                      </div>
+                      <div v-if="expandedFacts.has(`${rowIdx}-${fIdx}`) && getAssociatedInfo(fact).length > 0" class="associated-info-box">
+                        <div class="associated-header">🔗 关联知识扩展</div>
+                        <div class="associated-list">
+                          <div v-for="(assoc, aIdx) in getAssociatedInfo(fact)" :key="aIdx" class="assoc-item">
+                            <p class="assoc-description">{{ assoc.description }}</p>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="fact-meta">
+                        <span class="source-tag">
+                          📄 {{ fact.source || 'Unknown' }}
+                          <span v-if="fact.page">(P{{ fact.page }})</span>
+                        </span>
+                        <span class="depth-tag" v-if="fact.traversal_depth !== undefined">
+                          深度{{ fact.traversal_depth }}
+                        </span>
+                        <button
+                          v-if="fact.page && fact.source !== 'Local Search'"
+                          class="locate-btn"
+                          @click.stop="viewDocument(fact)"
+                        >
+                          定位文档
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ===== 传统检索结果 ===== -->
+            <div v-if="results.facts.length > 0 && !objectFirstMode" class="results-list">
               <div class="results-header">
                 <span>检索命中汇总 (Found {{ results.facts.length }} items)</span>
                 <button class="reset-filter-btn" @click="resetFilter">重置视图</button>
@@ -216,7 +339,7 @@
 import { ref, onMounted, computed, nextTick, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
-import { getProject, searchGraph, getGraphData } from '../api/graph'
+import { getProject, searchGraph, searchObjectFirst, getGraphData } from '../api/graph'
 
 const route = useRoute()
 const router = useRouter()
@@ -230,8 +353,13 @@ const graphLoading = ref(false)
 const searching = ref(false)
 const searchQuery = ref('')
 const filterGraph = ref(true)
+const objectFirstMode = ref(true)  // Object-first DFS 检索模式
+const maxDepth = ref(3)             // DFS 最大深度
 const fullGraphData = ref({ nodes: [], edges: [] })
+// 传统检索结果（facts/nodes/edges）
 const results = ref({ facts: [], nodes: [], edges: [] })
+// Object-first 检索结果（rows 分组）
+const objectFirstRows = ref([])
 const showDocViewer = ref(false)
 const pdfLoading = ref(false)
 const expandedFacts = ref(new Set())
@@ -243,6 +371,7 @@ const graphPanelRef = ref(null)
 const isSupplementMode = ref(false)
 const supplementing = ref(false)
 const selectedRegions = ref([]) // [{page, bbox: [x0,y0,x1,y1], screenRect: {left, top, width, height}}]
+const highlightedObjectId = ref(null) // Object-first 模式下高亮的 Object UUID
 const totalDocPages = ref(0)
 const fullPdfBuffer = ref(null)
 const jumpPage = ref(1)
@@ -474,6 +603,47 @@ const submitSupplement = async () => {
 
 // Graph Filtering
 const filteredGraphData = computed(() => {
+  // Object-first 模式：基于 DFS 遍历路径过滤
+  if (objectFirstRows.value.length > 0) {
+    if (!filterGraph.value) return fullGraphData.value
+    const resultNodeIds = new Set()
+    const resultEdgeIds = new Set()
+    objectFirstRows.value.forEach(row => {
+      // Object 节点
+      if (row.object_node?.uuid) resultNodeIds.add(row.object_node.uuid)
+      // DFS 遍历路径节点
+      ;(row.traversal_paths || []).forEach(p => {
+        if (p.uuid) resultNodeIds.add(p.uuid)
+      })
+      // 遍历路径中的边
+      ;(row.traversal_edges || []).forEach(e => {
+        if (e.uuid) resultEdgeIds.add(e.uuid)
+        if (e.source_node_uuid) resultNodeIds.add(e.source_node_uuid)
+        if (e.target_node_uuid) resultNodeIds.add(e.target_node_uuid)
+      })
+      // 事实中的节点引用
+      ;(row.facts || []).forEach(f => {
+        if (f.source_node_uuid) resultNodeIds.add(f.source_node_uuid)
+        if (f.target_node_uuid) resultNodeIds.add(f.target_node_uuid)
+      })
+    })
+    // 补充关联的边
+    if (fullGraphData.value.edges) {
+      fullGraphData.value.edges.forEach(e => {
+        if (resultNodeIds.has(e.source_node_uuid) || resultNodeIds.has(e.target_node_uuid)) {
+          resultEdgeIds.add(e.uuid)
+          resultNodeIds.add(e.source_node_uuid)
+          resultNodeIds.add(e.target_node_uuid)
+        }
+      })
+    }
+    return {
+      nodes: fullGraphData.value.nodes.filter(n => resultNodeIds.has(n.uuid)),
+      edges: (fullGraphData.value.edges || []).filter(e => resultEdgeIds.has(e.uuid))
+    }
+  }
+
+  // 传统模式
   if (!filterGraph.value || !results.value.facts.length) {
     return fullGraphData.value
   }
@@ -516,6 +686,70 @@ const toggleExpand = (idx) => {
     expandedFacts.value.delete(idx)
   } else {
     expandedFacts.value.add(idx)
+  }
+}
+
+const toggleFactExpand = (key) => {
+  if (expandedFacts.value.has(key)) {
+    expandedFacts.value.delete(key)
+  } else {
+    expandedFacts.value.add(key)
+  }
+}
+
+const highlightObjectRow = (row) => {
+  if (row.object_node?.uuid) {
+    highlightedObjectId.value = row.object_node.uuid
+    highlightedNodeId.value = row.object_node.uuid
+  }
+}
+
+const selectObjectRow = (row) => {
+  const nodeId = row.object_node?.uuid
+  if (!nodeId) return
+  highlightedObjectId.value = nodeId
+  highlightedNodeId.value = nodeId
+  selectedNodeId.value = nodeId
+  if (graphPanelRef.value) {
+    graphPanelRef.value.focusNode(nodeId)
+  }
+  // 如果 Object 有 PDF 定位，打开文档查看器
+  const pdfInfo = row.object_node?.pdf_info
+  if (pdfInfo?.source) {
+    viewDocument({
+      uuid: nodeId,
+      source: pdfInfo.source,
+      page: pdfInfo.page || 1,
+      bbox: pdfInfo.bbox,
+      page_width: pdfInfo.page_width,
+      page_height: pdfInfo.page_height,
+      graph_id: graphId.value || projectId
+    })
+  }
+}
+
+const highlightFactInGraph = (fact) => {
+  const nodeId = fact.source_node_uuid || fact.uuid
+  if (nodeId) {
+    highlightedNodeId.value = nodeId
+  }
+}
+
+const selectFactFromRow = (row, fact, rowIdx, fIdx) => {
+  const key = `${rowIdx}-${fIdx}`
+  toggleFactExpand(key)
+  // 选中 fact 时同时选中所在的 Object 行
+  highlightedObjectId.value = row.object_node?.uuid
+  const nodeId = fact.source_node_uuid || fact.uuid
+  if (nodeId) {
+    highlightedNodeId.value = nodeId
+    selectedNodeId.value = nodeId
+    if (graphPanelRef.value) {
+      graphPanelRef.value.focusNode(nodeId)
+    }
+  }
+  if (fact.source && fact.source !== 'Unknown') {
+    viewDocument(fact)
   }
 }
 
@@ -601,17 +835,33 @@ const handleSearch = async () => {
   if (!searchQuery.value.trim() || !graphId.value) return
   searching.value = true
   try {
-    const res = await searchGraph({
-      graph_id: graphId.value,
-      query: searchQuery.value,
-      limit: 15,
-      scope: 'both'
-    })
-    if (res.success) {
-      results.value = {
-        facts: res.data.facts || [],
-        nodes: res.data.nodes || [],
-        edges: res.data.edges || []
+    if (objectFirstMode.value) {
+      // Object-first DFS 检索
+      const res = await searchObjectFirst({
+        graph_id: graphId.value,
+        query: searchQuery.value,
+        limit: 15,
+        max_depth: maxDepth.value
+      })
+      if (res.success) {
+        objectFirstRows.value = res.data.rows || []
+        results.value = { facts: [], nodes: [], edges: [] }
+      }
+    } else {
+      // 传统混合检索
+      const res = await searchGraph({
+        graph_id: graphId.value,
+        query: searchQuery.value,
+        limit: 15,
+        scope: 'both'
+      })
+      if (res.success) {
+        results.value = {
+          facts: res.data.facts || [],
+          nodes: res.data.nodes || [],
+          edges: res.data.edges || []
+        }
+        objectFirstRows.value = []
       }
     }
   } catch (err) {
@@ -624,6 +874,7 @@ const handleSearch = async () => {
 
 const resetFilter = () => {
   results.value = { facts: [], nodes: [], edges: [] }
+  objectFirstRows.value = []
 }
 
 const highlightInGraph = (fact) => {
@@ -1417,6 +1668,186 @@ onMounted(async () => {
   border-top: 2px solid #fff;
   border-radius: 50%;
   animation: spin 1s linear infinite;
+}
+
+/* ===== Object-first DFS 检索结果样式 ===== */
+.depth-label {
+  font-size: 12px;
+  color: #666;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+
+.object-rows-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.object-row-card {
+  border: 1px solid #e0e0e0;
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+  transition: all 0.2s;
+}
+
+.object-row-card:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+
+.object-row-card.active {
+  border-color: #409eff;
+  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.2);
+}
+
+.object-row-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.object-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+}
+
+.object-badge {
+  background: #409eff;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.object-score {
+  display: flex;
+  align-items: center;
+}
+
+.score-tag {
+  background: #f0f9eb;
+  color: #67c23a;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 8px;
+  border: 1px solid #e1f3d8;
+}
+
+.object-summary {
+  font-size: 13px;
+  color: #606266;
+  padding: 8px 16px;
+  line-height: 1.5;
+  background: #fff;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.traversal-path {
+  padding: 10px 16px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.path-header {
+  font-size: 11px;
+  font-weight: 700;
+  color: #909399;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.path-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.path-node {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.path-node:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+}
+
+.path-node.depth-0 {
+  background: #409eff;
+  color: #fff;
+  font-weight: 700;
+  border: 2px solid #409eff;
+}
+
+.path-node.depth-1 {
+  background: #67c23a;
+  color: #fff;
+  border: 1px solid #67c23a;
+}
+
+.path-node.depth-2 {
+  background: #e6a23c;
+  color: #fff;
+  border: 1px solid #e6a23c;
+}
+
+.path-node.depth-3 {
+  background: #909399;
+  color: #fff;
+  border: 1px solid #909399;
+}
+
+.path-node.depth-4,
+.path-node.depth-5 {
+  background: #c0c4cc;
+  color: #fff;
+  border: 1px solid #c0c4cc;
+}
+
+.path-arrow {
+  color: #c0c4cc;
+  font-size: 14px;
+}
+
+.object-facts {
+  padding: 8px 16px;
+}
+
+.facts-header {
+  font-size: 12px;
+  font-weight: 700;
+  color: #409eff;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed #e0e0e0;
+}
+
+.depth-tag {
+  font-size: 11px;
+  color: #909399;
+  background: #f5f7fa;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid #e0e0e0;
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }

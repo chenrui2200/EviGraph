@@ -429,6 +429,52 @@ def search_graph_tool():
         return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
 
 
+@report_bp.route('/tools/search-object-first', methods=['POST'])
+def search_object_first_tool():
+    """
+    Object-first DFS search tool.
+    Results are grouped by Object node, each Object = one row.
+
+    Request body:
+        - graph_id: str (required)
+        - query: str (required)
+        - limit: int (optional, default 10) - max Object rows
+        - max_depth: int (optional, default 3) - DFS max depth
+
+    Response:
+        ObjectFirstSearchResult with 'rows' grouped by Object node.
+        Each row contains: object_node, traversal_paths, traversal_edges, facts.
+    """
+    try:
+        data = request.get_json() or {}
+        graph_id = data.get('graph_id')
+        query = data.get('query')
+        limit = data.get('limit', 10)
+        max_depth = data.get('max_depth', 3)
+
+        if not graph_id:
+            return jsonify({"success": False, "error": "Please provide graph_id"}), 400
+        if not query:
+            return jsonify({"success": False, "error": "Please provide query"}), 400
+
+        storage = current_app.extensions.get('neo4j_storage')
+        if not storage:
+            raise ValueError("GraphStorage not initialized — check Neo4j connection")
+
+        tools = GraphToolsService(storage=storage)
+        result = tools.search_object_first(
+            graph_id=graph_id,
+            query=query,
+            limit=limit,
+            max_depth=max_depth,
+        )
+
+        return jsonify({"success": True, "data": result.to_dict()})
+    except Exception as e:
+        logger.error(f"Object-first search failed: {str(e)}")
+        return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+
+
 @report_bp.route('/tools/statistics', methods=['POST'])
 def get_graph_statistics_tool():
     try:

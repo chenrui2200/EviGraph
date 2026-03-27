@@ -31,6 +31,7 @@ from ..models.clause import (
     HierarchicalChunkResult,
     SectionSegment,
     ClauseSegment,
+    ClauseItem,
     ElementSegment,
     ChunkLevel,
     ElementType,
@@ -89,22 +90,29 @@ class LLMDrivenChunker:
 1. **只分析目录部分**：通常在文档开头，包含"目录"、"Contents"、"第X章"等
 2. **记录位置**：估算每个章节在文档中的大概位置（字符偏移量）
 3. **章节编号**：提取章节编号和标题
+4. **章节类型识别**（重要）：
+   - 如果章节标题包含"术语"、"名词解释"，则 `chapter_type` 为 `"term_definition"`
+   - 如果章节标题包含"附录"、"附表"，则 `chapter_type` 为 `"appendix"`
+   - 其他章节为 `"normative"`（规范正文）
+5. **OCR文本注意**：如果文档中章节标题前有 `#` 符号（如 "# 3 电器和导体的选择"），这不代表实际内容，忽略即可
 
 ## 输出要求
 
-请输出 JSON 格式，包含章节编号、标题和估算位置：
+请输出 JSON 格式，包含章节编号、标题、估算位置和章节类型：
 ```json
 {{
     "chapters": [
         {{
             "chapter_number": 1,
             "title": "总则",
+            "chapter_type": "normative",
             "start_position": 0,
             "end_position": 5000
         }},
         {{
             "chapter_number": 2,
             "title": "术语",
+            "chapter_type": "term_definition",
             "start_position": 5000,
             "end_position": 12000
         }}
@@ -130,7 +138,19 @@ class LLMDrivenChunker:
 1. **条文编号**：如 "3.2.1"、"5.1.3"、"第4.2.5条" 等
 2. **条文标题**：条文编号后紧跟的描述性标题
 3. **条文内容**：条文的具体要求描述
-4. **款/项**：条文中的分级列表项
+4. **款/项**：条文中的分级列表项，如 "1、"、"2、" 或 "1）"、"2）"
+
+## ⚠️ OCR 文本处理（重要！）
+
+OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**：
+
+1. **# 前缀**：章节标题前可能有 `#` 符号（如 "# 3 电器和导体的选择"）
+   - 这不是条文内容，**必须忽略**
+   - 条文本身不以 `#` 开头，正常提取即可
+2. **款/项编号**：OCR 可能将 "1、" 拆成多行，应合并
+3. **跨行条文**：OCR 可能将一条条文拆成多行，应合并
+4. **LaTeX 公式**：如 `$公式内容$`，提取为 `formula_content`
+5. **表格**：如 `<table>...</table>`，提取表格标题编号（如 `表3.2.2`）到 `referenced_tables`
 
 ## ⚠️ 术语章节识别（重要！）
 
@@ -195,6 +215,20 @@ class LLMDrivenChunker:
 - "当...时"、"在...场所"、"短路条件下"
 - "过负荷情况"、"维护、测试和检修时"
 
+## ⚠️ 款/项结构化提取（重要！）
+
+每个条文的款/项（如 "1、"、"2、"、"1）"、"2）"）应作为独立的子单元提取：
+
+- 每个款/项应有 `item_number` 和 `item_content`
+- 每个款/项应抽取对应的 **Component、Action、Condition、Object**
+- 款/项作为 `clause_items` 数组返回
+
+## 表格与公式引用
+
+- **表格引用**：在 `referenced_tables` 中提取所有表格编号（如 `表3.2.2`、`表4.2.5`）
+- **公式引用**：在 `referenced_formulas` 中提取所有公式编号（如 `公式（3.2.14）`）
+- **公式内容**：如果有公式的具体表达式（如 `$S \\geq I \\cdot t / k$`），提取到 `formula_content` 字段
+
 ## 要求类型
 - mandatory: 必须、应、须
 - recommended: 建议、宜、推荐
@@ -214,6 +248,10 @@ class LLMDrivenChunker:
 **注意**：
 1. 必须从条文中提取 components（组件）、actions（动作）、objects（对象）、conditions（条件），不能为空！
 2. **术语章节（如"2.0.5 直接接触防护"）需特殊处理**，在 terms 字段中返回术语定义。
+3. **款/项（如"1、"、"2、"）应作为 clause_items 独立提取**，每个款/项单独抽取要素。
+4. **OCR 文本中的 # 前缀不是条文内容**，忽略即可。
+5. **表格引用**（如 `<table>...</table>` 或 "表3.2.2"）放入 referenced_tables。
+6. **公式引用**（如 "公式（3.2.14）" 或 "$...$"）放入 referenced_formulas 和 formula_content。
 
 请输出 JSON 格式：
 ```json
@@ -224,6 +262,7 @@ class LLMDrivenChunker:
             "clause_title": "导体应满足线路保护的要求",
             "clause_content": "导体应满足线路保护的要求...",
             "requirement_type": "mandatory",
+            "is_term_definition": false,
             "conditions": [
                 {{"name": "过负荷情况", "description": "线路过负荷时"}}
             ],
@@ -237,8 +276,27 @@ class LLMDrivenChunker:
                 {{"name": "导体", "type": "材料"}}
             ],
             "terms": [],
-            "referenced_tables": [],
-            "referenced_formulas": []
+            "referenced_tables": ["表3.2.2"],
+            "referenced_formulas": ["公式（3.2.14）"],
+            "formula_content": "S >= I*t/k",
+            "clause_items": [
+                {{
+                    "item_number": "1",
+                    "item_content": "按敷设方式及环境条件确定的导体载流量，不应小于计算电流",
+                    "components": [],
+                    "actions": [],
+                    "conditions": [],
+                    "objects": []
+                }},
+                {{
+                    "item_number": "2",
+                    "item_content": "导体应满足线路保护的要求",
+                    "components": [],
+                    "actions": [],
+                    "conditions": [],
+                    "objects": []
+                }}
+            ]
         }}
     ]
 }}
@@ -541,6 +599,22 @@ class LLMDrivenChunker:
             "components": clause.components or [],
             "objects": clause.objects or [],
             "parent_chapter": clause.metadata.get("parent_chapter") if clause.metadata else None,
+            "is_term_definition": clause.is_term_definition,
+            "terms": clause.terms or [],
+            "formula_content": clause.formula_content,
+            "referenced_tables": clause.metadata.get("referenced_tables", []) if clause.metadata else [],
+            "referenced_formulas": clause.metadata.get("referenced_formulas", []) if clause.metadata else [],
+            "clause_items": [
+                {
+                    "item_number": ci.item_number,
+                    "item_content": ci.item_content,
+                    "components": ci.components,
+                    "actions": ci.actions,
+                    "conditions": ci.conditions,
+                    "objects": ci.objects
+                }
+                for ci in clause.clause_items
+            ] if clause.clause_items else [],
             "metadata": clause.metadata or {}
         }
 
@@ -597,6 +671,18 @@ class LLMDrivenChunker:
             except ValueError:
                 req_type = RequirementType.RECOMMENDED
 
+            # 恢复 clause_items
+            clause_items = []
+            for ci_data in cd.get('clause_items', []):
+                clause_items.append(ClauseItem(
+                    item_number=ci_data.get('item_number', ''),
+                    item_content=ci_data.get('item_content', ''),
+                    components=ci_data.get('components', []),
+                    actions=ci_data.get('actions', []),
+                    conditions=ci_data.get('conditions', []),
+                    objects=ci_data.get('objects', [])
+                ))
+
             clause = ClauseSegment(
                 clause_id=cd.get('clause_id', ''),
                 clause_title=cd.get('clause_title', ''),
@@ -607,6 +693,10 @@ class LLMDrivenChunker:
                 components=cd.get('components', []),
                 objects=cd.get('objects', []),
                 parent_chapter=cd.get('parent_chapter'),
+                is_term_definition=cd.get('is_term_definition', False),
+                terms=cd.get('terms', []),
+                formula_content=cd.get('formula_content'),
+                clause_items=clause_items,
                 metadata=cd.get('metadata', {})
             )
             result.clauses.append(clause)
@@ -781,7 +871,8 @@ class LLMDrivenChunker:
                         title=ch.get("title", f"章节{i + 1}"),
                         start_position=ch.get("start_position", 0),
                         end_position=ch.get("end_position", len(full_text)),
-                        status=ChapterStatus.PENDING
+                        status=ChapterStatus.PENDING,
+                        chapter_type=ch.get("chapter_type", "normative")
                     )
                     for i, ch in enumerate(refined_chapters)
                 ],
@@ -1035,6 +1126,26 @@ class LLMDrivenChunker:
 
                 systems = self._extract_systems_from_text(cd.get("clause_content", ""))
 
+                # 解析款/项结构化数据
+                clause_items = []
+                for ci_data in cd.get("clause_items", []):
+                    clause_items.append(ClauseItem(
+                        item_number=ci_data.get("item_number", ""),
+                        item_content=ci_data.get("item_content", ""),
+                        components=[c.get("name", "") for c in ci_data.get("components", [])],
+                        actions=[a.get("name", "") for a in ci_data.get("actions", [])],
+                        conditions=[c.get("name", "") for c in ci_data.get("conditions", [])],
+                        objects=[o.get("name", "") for o in ci_data.get("objects", [])]
+                    ))
+
+                # 解析术语数据（LLM 返回的 terms 字段）
+                terms_list = []
+                for term_data in cd.get("terms", []):
+                    terms_list.append({
+                        "term_name": term_data.get("term_name", ""),
+                        "definition": term_data.get("definition", "")
+                    })
+
                 clause = ClauseSegment(
                     clause_id=clause_id,
                     clause_title=cd.get("clause_title", ""),
@@ -1044,6 +1155,10 @@ class LLMDrivenChunker:
                     applicable_systems=systems,
                     cross_refs=self._build_cross_refs(cd),
                     source=source_info.get("source", ""),
+                    is_term_definition=cd.get("is_term_definition", False),
+                    terms=terms_list,
+                    formula_content=cd.get("formula_content"),
+                    clause_items=clause_items,
                     metadata={
                         "chunk_type": "clause",
                         "conditions": [c.get("name", "") for c in cd.get("conditions", [])],
@@ -1051,7 +1166,12 @@ class LLMDrivenChunker:
                         "objects": [o.get("name", "") for o in cd.get("objects", [])],
                         "components": [c.get("name", "") for c in cd.get("components", [])],
                         "parent_chapter": chapter_num,
-                        "semantics_enriched": True
+                        "semantics_enriched": True,
+                        "is_term_definition": cd.get("is_term_definition", False),
+                        "terms": terms_list,
+                        "formula_content": cd.get("formula_content"),
+                        "referenced_tables": cd.get("referenced_tables", []),
+                        "referenced_formulas": cd.get("referenced_formulas", [])
                     }
                 )
                 clauses.append(clause)
