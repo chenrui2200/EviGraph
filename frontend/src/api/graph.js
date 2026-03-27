@@ -45,6 +45,21 @@ export function buildGraph(data) {
 }
 
 /**
+ * Reset and re-run intelligent chunk annotation
+ * @param {Object} data - Contains project_id, reset (bool)
+ * @returns {Promise}
+ */
+export function resetIntelligentChunks(data) {
+  return requestWithRetry(() =>
+    service({
+      url: '/api/graph/chunk/intelligent',
+      method: 'post',
+      data
+    })
+  )
+}
+
+/**
  * Query task status
  * @param {String} taskId - Task ID
  * @returns {Promise}

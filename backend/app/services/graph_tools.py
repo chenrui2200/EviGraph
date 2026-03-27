@@ -1456,7 +1456,8 @@ Your response:"""
             fact_to_add = edge_fact
             if not fact_to_add and edge_name:
                 # 语义三元组边没有显式 fact，根据边类型合成
-                neighbor_name = (neighbor_data.get("name", "") if neighbor_data else "")
+                _neighbor = self.storage.get_node(neighbor_uuid)
+                neighbor_name = (_neighbor.get("name", "") if _neighbor else "")
                 rel_facts = {
                     "MANDATES": f"强制要求: {neighbor_name}",
                     "RECOMMENDS": f"推荐: {neighbor_name}",

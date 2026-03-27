@@ -17,6 +17,7 @@ from ..services.ontology_generator import OntologyGenerator
 from ..services.graph_builder import GraphBuilderService
 from ..services.graph_tools import GraphToolsService
 from ..services.text_processor import TextProcessor
+from ..services.llm_driven_chunker import clause_to_dict, element_to_dict
 from ..utils.file_parser import FileParser, TextChunk
 from ..utils.logger import get_logger
 from ..models.task import TaskManager, TaskStatus
@@ -1337,8 +1338,16 @@ def intelligent_chunk():
         checkpoint_v2 = ProjectManager.get_chunk_checkpoint_v2(project_id)
         existing_task_id = project.graph_build_task_id
 
-        # 如果需要重置，删除所有检查点
+        # 如果需要重置，删除所有检查点和旧的智能分块结果
         if reset:
+            # 删除旧的 intelligent_chunks.json（确保下次重新分析时生成新数据）
+            existing_chunks = ProjectManager.get_intelligent_chunks(project_id)
+            if existing_chunks:
+                chunks_path = ProjectManager._get_intelligent_chunks_path(project_id)
+                if os.path.exists(chunks_path):
+                    os.remove(chunks_path)
+                    logger.info(f"[{project_id}] 旧的 intelligent_chunks.json 已删除（重置）")
+
             if checkpoint_v2:
                 ProjectManager.delete_chunk_checkpoint_v2(project_id)
                 logger.info(f"[{project_id}] 增强版检查点数据已删除（重置）")
@@ -1446,36 +1455,21 @@ def intelligent_chunk():
                         }
                         for s in result.sections
                     ],
-                    "clauses": [
-                        {
-                            "clause_id": c.clause_id,
-                            "clause_title": c.clause_title,
-                            "content": c.content,
-                            "requirement_type": c.requirement_type.value,
-                            "conditions": c.conditions,
-                            "actions": c.actions,
-                            "components": c.components,
-                            "objects": c.objects,
-                            "parent_chapter": c.parent_chapter,
-                            "metadata": c.metadata
-                        }
-                        for c in result.clauses
-                    ],
-                    "elements": [
-                        {
-                            "element_type": e.element_type.value,
-                            "key": e.key,
-                            "value": str(e.value) if e.value else "",
-                            "unit": e.unit,
-                            "condition": e.condition,
-                            "abbreviation": e.abbreviation,
-                            "definition": e.definition,
-                            "keywords": e.keywords,
-                            "source_clause_id": e.source_id,
-                            "metadata": e.metadata
-                        }
-                        for e in result.elements
-                    ]
+                    # 使用 clause_to_dict 完整序列化（含 triplets、terms、clause_items 等核心语义字段）
+                    # 同时按 clause_id 去重，保留第一条（内容最完整）
+                    "clauses": (lambda seen_ids: [
+                        c for c in (
+                            clause_to_dict(c) for c in result.clauses
+                        ) if c["clause_id"] not in seen_ids and not seen_ids.add(c["clause_id"])
+                    ])(set()),
+                    # 使用 element_to_dict 完整序列化
+                    # 同时按 key + source_id 去重
+                    "elements": (lambda seen_keys: [
+                        e for e in (
+                            element_to_dict(e) for e in result.elements
+                        ) if (e.get("key") or "") + "|" + (e.get("source_id") or "") not in seen_keys
+                        and not seen_keys.add((e.get("key") or "") + "|" + (e.get("source_id") or ""))
+                    ])(set())
                 }
 
                 # 保存到项目
@@ -1490,7 +1484,9 @@ def intelligent_chunk():
                 ProjectManager.save_project(project)
 
                 # 完成任务
-                summary = f"✅ 标注分析完成: {len(result.sections)} 章节, {len(result.clauses)} 条文, {len(result.elements)} 要素"
+                summary = (f"✅ 标注分析完成: {len(result.sections)} 章节, "
+                           f"{len(chunks_result['clauses'])} 条文（去重后）, "
+                           f"{len(chunks_result['elements'])} 要素（去重后）")
                 chunker_logger.info(f"[{task_id}] {summary}")
 
                 task_mgr.update_task(

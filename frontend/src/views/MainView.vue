@@ -59,6 +59,7 @@
           :systemLogs="systemLogs"
           @next-step="handleNextStep"
           @reset-build="handleResetBuild"
+          @reset-chunk="handleResetChunk"
         />
         <!-- Step 5: Interaction (Analysis) -->
         <Step5Interaction
@@ -78,7 +79,7 @@ import GraphPanel from '../components/GraphPanel.vue'
 import Step1GraphBuild from '../components/Step1GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import Step5Interaction from '../components/Step5Interaction.vue'
-import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, getTaskEventsURL, updateProject } from '../api/graph'
+import { generateOntology, getProject, buildGraph, resetIntelligentChunks, getTaskStatus, getGraphData, getTaskEventsURL, updateProject } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 
 const route = useRoute()
@@ -320,6 +321,32 @@ const handleResetBuild = async () => {
   await startBuildGraph(true)
 }
 
+const handleResetChunk = async () => {
+  stopPolling()
+  stopGraphPolling()
+  graphData.value = null
+  systemLogs.value = []
+  ontologyProgress.value = { message: 'Resetting and re-analyzing chunks...' }
+  addLog('Resetting intelligent chunk annotation...')
+
+  try {
+    const res = await resetIntelligentChunks({
+      project_id: currentProjectId.value,
+      reset: true
+    })
+    if (res.success) {
+      addLog(`Chunk reset task started. Task ID: ${res.data.task_id}`)
+      startPollingTask(res.data.task_id, 'chunking')
+    } else {
+      error.value = res.error
+      addLog(`Error resetting chunks: ${res.error}`)
+    }
+  } catch (err) {
+    error.value = err.message
+    addLog(`Exception in handleResetChunk: ${err.message}`)
+  }
+}
+
 const startBuildGraph = async (force = false) => {
   try {
     currentPhase.value = 1
@@ -432,7 +459,7 @@ const startPollingTask = (taskId, type = 'build') => {
 }
 
 const updateTaskUI = (taskData, type) => {
-  if (type === 'ontology') {
+  if (type === 'ontology' || type === 'chunking') {
     ontologyProgress.value = {
       progress: taskData.progress ?? (ontologyProgress.value?.progress || 0),
       message: taskData.message ?? (ontologyProgress.value?.message || 'Analyzing...')
@@ -447,9 +474,9 @@ const updateTaskUI = (taskData, type) => {
 
 const handleTaskFinished = async (taskData, type) => {
   if (taskData.status === 'completed') {
-    addLog(`${type === 'ontology' ? 'Chunks analysis' : 'Graph build'} task completed.`)
+    addLog(`${type === 'ontology' || type === 'chunking' ? 'Chunks analysis' : 'Graph build'} task completed.`)
 
-    if (type === 'ontology') {
+    if (type === 'ontology' || type === 'chunking') {
       ontologyProgress.value = null
       const projRes = await getProject(currentProjectId.value)
       if (projRes.success) {
@@ -467,7 +494,7 @@ const handleTaskFinished = async (taskData, type) => {
     }
   } else if (taskData.status === 'failed') {
     error.value = taskData.error || 'Task failed'
-    addLog(`${type === 'ontology' ? 'Chunks analysis' : 'Graph build'} task failed: ${taskData.error}`)
+    addLog(`${type === 'ontology' || type === 'chunking' ? 'Chunks analysis' : 'Graph build'} task failed: ${taskData.error}`)
   }
 }
 

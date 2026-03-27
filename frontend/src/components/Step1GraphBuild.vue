@@ -227,12 +227,16 @@ const props = defineProps({
   systemLogs: { type: Array, default: () => [] }
 })
 
-const emit = defineEmits(['next-step', 'reset-build'])
+const emit = defineEmits(['next-step', 'reset-build', 'reset-chunk'])
 
 const handleReset = () => {
   const phase = props.currentPhase === 0 ? 'Chunks 标注分析' : '知识图谱构建'
   if (confirm(`确定要重置"${phase}"并重新开始吗？`)) {
-    emit('reset-build')
+    if (props.currentPhase === 0) {
+      emit('reset-chunk')
+    } else {
+      emit('reset-build')
+    }
   }
 }
 

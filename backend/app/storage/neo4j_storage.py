@@ -1952,56 +1952,11 @@ class Neo4jStorage(GraphStorage):
         # ========== 核心：按语义三元组建关系 ==========
         triplets = metadata.get('triplets', [])
 
-        # 如果没有三元组但有旧格式（fallback），转换为三元组
+        # 如果没有三元组（fallback），从 content 调用 LLM 解析
         if not triplets:
-            flat_conditions = metadata.get('conditions', [])
-            flat_actions = metadata.get('actions', [])
-            flat_components = metadata.get('components', [])
-            flat_objects = metadata.get('objects', [])
-            if flat_conditions or flat_actions or flat_components or flat_objects:
-                logger.info(f"[hierarchical] [Fallback] clause {clause_id}: flat lists -> triplets")
-                # 从 content 解析（fallback）
-                if content and not flat_actions:
-                    parsed = self._parse_semantic_from_content(content, clause_id)
-                    flat_conditions = parsed.get('conditions', flat_conditions)
-                    flat_actions = parsed.get('actions', flat_actions)
-                    flat_components = parsed.get('components', flat_components)
-                    flat_objects = parsed.get('objects', flat_objects)
-                # 构建笛卡尔积三元组（fallback 模式）
-                for comp in (flat_components if isinstance(flat_components, list) else [flat_components]):
-                    for act in (flat_actions if isinstance(flat_actions, list) else [flat_actions]):
-                        for obj in (flat_objects if isinstance(flat_objects, list) else [flat_objects]):
-                            if comp and act and obj:
-                                triplets.append({
-                                    "component": comp,
-                                    "action": act,
-                                    "obj": obj,
-                                    "condition": "",
-                                    "requirement": clause_requirement
-                                })
-                # Conditions 单独处理
-                for cond in (flat_conditions if isinstance(flat_conditions, list) else [flat_conditions]):
-                    if cond:
-                        self._create_condition_entity(tx, graph_id, entity_uuid, cond)
-            else:
-                # 完全没有语义信息，尝试从 content 解析
-                if content:
-                    logger.info(f"[hierarchical] [Fallback] 从 content 解析 clause {clause_id}")
-                    parsed = self._parse_semantic_from_content(content, clause_id)
-                    for comp in parsed.get('components', []):
-                        for act in parsed.get('actions', []):
-                            if is_actionable(act):
-                                for obj in parsed.get('objects', []):
-                                    triplets.append({
-                                        "component": comp,
-                                        "action": act,
-                                        "obj": obj,
-                                        "condition": "",
-                                        "requirement": clause_requirement
-                                    })
-                    for cond in parsed.get('conditions', []):
-                        if cond:
-                            self._create_condition_entity(tx, graph_id, entity_uuid, cond)
+            logger.info(f"[hierarchical] [Fallback] clause {clause_id}: 调用 LLM 解析三元组")
+            parsed_triplets = self._parse_semantic_from_content(content, clause_id, clause_requirement)
+            triplets.extend(parsed_triplets)
 
         # ========== 遍历每个三元组，精确建关系（5条核心路径） ==========
         for t in triplets:
@@ -2171,60 +2126,75 @@ class Neo4jStorage(GraphStorage):
             gid=graph_id
         )
 
-    def _parse_semantic_from_content(self, content: str, clause_id: str) -> Dict[str, List[str]]:
+    def _parse_semantic_from_content(self, content: str, clause_id: str, requirement: str = 'mandatory') -> List[Dict]:
         """
-        使用 LLM 从条文内容中解析语义信息（Component/Action/Object/Condition）
+        使用 LLM 从条文内容中解析语义三元组
 
         Args:
             content: 条文内容
             clause_id: 条文编号（用于日志）
+            requirement: 要求类型（mandatory/recommended/prohibited）
 
         Returns:
-            包含 conditions, actions, components, objects 的字典
+            语义三元组列表，每个元素包含 {component, action, obj, condition, requirement}
         """
         from ..utils.llm_client import LLMClient
 
-        result = {
-            'conditions': [],
-            'actions': [],
-            'components': [],
-            'objects': []
-        }
-
         if not content:
-            return result
+            return []
 
-        # 构建 LLM prompt
         system_prompt = """你是一个工程规范条文语义分析专家。
 
-你的任务是从条文内容中提取以下四类语义要素：
+你的任务是从条文内容中提取**语义三元组**，而不是平铺列表。
 
-1. **components（组件）**：涉及的设备、系统、材料等实体
-   - 例如：电器、断路器、电缆、配电箱、保护电器
+## 语义三元组格式
+每条条文提取一个或多个三元组：
+{
+    "triplets": [
+        {"component": "施事组件", "action": "实操动作", "obj": "受事对象", "condition": "适用条件", "requirement": "mandatory|recommended|prohibited"}
+    ]
+}
 
-2. **actions（动作）**：规范要求的动作/措施
-   - 例如：选用、应符合、应满足、安装、严禁
+**三元组含义**：施事组件 →(实操动作)→ 受事对象，在 适用条件下
 
-3. **objects（对象）**：动作作用的目标（通常是参数或属性）
-   - 例如：额定电压、截面积、产品标准
+**✅ 正确示例**：
+- "电器应选用符合产品标准的断路器" → {"component": "电器", "action": "选用", "obj": "断路器"}
+- "导体在短路条件下应能承受热稳定" → {"component": "导体", "action": "承受", "obj": "热稳定", "condition": "短路条件下"}
+- "配电箱严禁使用TN-C系统" → {"component": "配电箱", "action": "使用", "obj": "TN-C系统", "requirement": "prohibited"}
 
-4. **conditions（条件）**：适用前提、环境、场景
-   - 例如：短路条件下、维护测试时
+**❌ 错误示例（笛卡尔积，禁止！）**：
+{
+    "components": ["电器", "断路器"],
+    "actions": ["选用", "应符合"],
+    "objects": ["产品标准", "额定电压"]
+}
+→ 不知道 component/action/obj 之间的对应关系，完全错误！
+
+**Action 提取原则**：
+- ✅ 实操动作：选用、敷设、连接、设置、接地、承受、安装
+- ❌ "符合"、"满足"、"达到" → 省略 action，只填 component + obj
+
+**要求类型**：
+- mandatory: 必须、应、须
+- recommended: 建议、宜
+- prohibited: 严禁、不得、禁止
 
 请直接输出 JSON 格式，不要解释。"""
 
-        user_prompt = f"""分析以下条文，提取语义要素：
+        user_prompt = f"""分析以下条文，提取语义三元组：
 
 条文编号：{clause_id}
 条文内容：{content}
 
 输出 JSON 格式：
 {{
-    "components": ["电器", "断路器"],
-    "actions": ["应符合", "选用"],
-    "objects": ["产品标准", "额定电压"],
-    "conditions": ["短路条件下"]
-}}"""
+    "triplets": [
+        {{"component": "施事组件", "action": "实操动作", "obj": "受事对象", "condition": "适用条件", "requirement": "mandatory"}}
+    ]
+}}
+
+如果没有发现有效三元组，返回：
+{{"triplets": []}}"""
 
         try:
             llm_client = LLMClient()
@@ -2239,32 +2209,29 @@ class Neo4jStorage(GraphStorage):
             )
             logger.info(f"[semantic_parse] LLM 返回: {response}")
 
-            # 解析 LLM 返回结果
-            result['components'] = response.get('components', [])
-            result['actions'] = response.get('actions', [])
-            result['objects'] = response.get('objects', [])
-            result['conditions'] = response.get('conditions', [])
+            triplets_raw = response.get('triplets', [])
+            triplets = []
+            for t in triplets_raw:
+                comp = (t.get('component') or '').strip()
+                act = (t.get('action') or '').strip()
+                obj = (t.get('obj') or '').strip()
+                cond = (t.get('condition') or '').strip()
+                req = t.get('requirement', requirement)
+                if comp or act or obj:
+                    triplets.append({
+                        "component": comp,
+                        "action": act,
+                        "obj": obj,
+                        "condition": cond,
+                        "requirement": req
+                    })
 
-            # 确保是列表
-            if isinstance(result['components'], str):
-                result['components'] = [result['components']]
-            if isinstance(result['actions'], str):
-                result['actions'] = [result['actions']]
-            if isinstance(result['objects'], str):
-                result['objects'] = [result['objects']]
-            if isinstance(result['conditions'], str):
-                result['conditions'] = [result['conditions']]
-
-            logger.info(f"[semantic_parse] LLM 分析 Clause {clause_id}: "
-                        f"components={result['components']}, "
-                        f"actions={result['actions']}, "
-                        f"objects={result['objects']}, "
-                        f"conditions={result['conditions']}")
+            logger.info(f"[semantic_parse] LLM 分析 Clause {clause_id}: {len(triplets)} triplets")
+            return triplets
 
         except Exception as e:
             logger.warning(f"[semantic_parse] LLM 调用失败 for clause {clause_id}: {e}")
-
-        return result
+            return []
 
     def _create_formula_entity(self, tx, graph_id: str, episode_id: str,
                                clause_entity_uuid: str, formula_id: str):

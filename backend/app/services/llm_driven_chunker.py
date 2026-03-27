@@ -61,6 +61,81 @@ class LLMChunkerError(Exception):
     pass
 
 
+# ============================================================================
+# 公共序列化函数（供外部模块复用）
+# ============================================================================
+
+def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
+    """将 ClauseSegment 转换为完整字典（含 triplets、terms、clause_items 等核心语义字段）"""
+    return {
+        "clause_id": clause.clause_id,
+        "clause_title": clause.clause_title,
+        "content": clause.content,
+        "requirement_type": clause.requirement_type.value if hasattr(clause.requirement_type, 'value') else str(clause.requirement_type),
+        "conditions": clause.conditions or [],
+        "actions": clause.actions or [],
+        "components": clause.components or [],
+        "objects": clause.objects or [],
+        "parent_chapter": clause.metadata.get("parent_chapter") if clause.metadata else None,
+        "is_term_definition": clause.is_term_definition,
+        "terms": clause.terms or [],
+        "formula_content": clause.formula_content,
+        "referenced_tables": clause.metadata.get("referenced_tables", []) if clause.metadata else [],
+        "referenced_formulas": clause.metadata.get("referenced_formulas", []) if clause.metadata else [],
+        # 语义三元组（核心！）
+        "triplets": [
+            {
+                "component": t.component,
+                "action": t.action,
+                "obj": t.obj,
+                "condition": t.condition,
+                "requirement": t.requirement
+            }
+            for t in clause.triplets
+        ] if clause.triplets else [],
+        # 款/项结构化（含款/项级三元组）
+        "clause_items": [
+            {
+                "item_number": ci.item_number,
+                "item_content": ci.item_content,
+                "components": ci.components,
+                "actions": ci.actions,
+                "conditions": ci.conditions,
+                "objects": ci.objects,
+                "triplets": [
+                    {
+                        "component": t.component,
+                        "action": t.action,
+                        "obj": t.obj,
+                        "condition": t.condition,
+                        "requirement": t.requirement
+                    }
+                    for t in ci.triplets
+                ] if ci.triplets else []
+            }
+            for ci in clause.clause_items
+        ] if clause.clause_items else [],
+        "metadata": clause.metadata or {}
+    }
+
+
+def element_to_dict(element: "ElementSegment") -> Dict[str, Any]:
+    """将 ElementSegment 转换为完整字典"""
+    return {
+        "element_type": element.element_type.value if hasattr(element.element_type, 'value') else str(element.element_type),
+        "source_id": element.source_id,
+        "key": element.key,
+        "value": str(element.value) if element.value else "",
+        "unit": element.unit,
+        "condition": element.condition,
+        "abbreviation": element.abbreviation,
+        "definition": element.definition,
+        "keywords": element.keywords,
+        "content": element.content,
+        "metadata": element.metadata or {}
+    }
+
+
 class LLMDrivenChunker:
     """
     基于 LLM 的智能三级分块引擎
@@ -159,6 +234,23 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 - 章节编号通常为 "第2章"、"第2章 术语" 或 "2 术语"
 - 条文编号格式为 "2.0.1"、"2.0.2" 等（如 GB 50054 标准）
 - 内容格式为 "术语名称：定义" 或 "术语名称 定义内容"
+
+**术语章节OCR格式处理（关键！必须执行）**：
+- 如果条文编号匹配 `X.0.N` 格式（第三段为 0，如 "2.0.5"、"3.0.12"），**自动识别为术语章节**
+- 即使标题和定义内容之间**无空行分隔**（OCR 将标题和定义连排），也必须提取
+- 例如 OCR 输出：
+  ```
+  2.0.5 直接接触防护
+  无故障条件下的电击防护。
+  ```
+  或（无空行）:
+  ```
+  2.0.5 直接接触防护无故障条件下的电击防护。
+  ```
+  两种格式都应提取为：
+  - `is_term_definition: true`
+  - `terms: [{"term_name": "直接接触防护", "definition": "无故障条件下的电击防护"}]`
+  - `clause_content` 应包含**完整定义内容**，不能仅截取条文标题后第一句
 
 **术语章节处理方式**：
 - clause_id: "2.0.5"
@@ -591,72 +683,12 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         return refined_chapters
 
     def _clause_to_dict(self, clause: ClauseSegment) -> Dict[str, Any]:
-        """将 ClauseSegment 转换为字典"""
-        return {
-            "clause_id": clause.clause_id,
-            "clause_title": clause.clause_title,
-            "content": clause.content,
-            "requirement_type": clause.requirement_type.value if hasattr(clause.requirement_type, 'value') else str(clause.requirement_type),
-            "conditions": clause.conditions or [],
-            "actions": clause.actions or [],
-            "components": clause.components or [],
-            "objects": clause.objects or [],
-            "parent_chapter": clause.metadata.get("parent_chapter") if clause.metadata else None,
-            "is_term_definition": clause.is_term_definition,
-            "terms": clause.terms or [],
-            "formula_content": clause.formula_content,
-            "referenced_tables": clause.metadata.get("referenced_tables", []) if clause.metadata else [],
-            "referenced_formulas": clause.metadata.get("referenced_formulas", []) if clause.metadata else [],
-            # 语义三元组（核心）
-            "triplets": [
-                {
-                    "component": t.component,
-                    "action": t.action,
-                    "obj": t.obj,
-                    "condition": t.condition,
-                    "requirement": t.requirement
-                }
-                for t in clause.triplets
-            ] if clause.triplets else [],
-            # 款/项结构化
-            "clause_items": [
-                {
-                    "item_number": ci.item_number,
-                    "item_content": ci.item_content,
-                    "components": ci.components,
-                    "actions": ci.actions,
-                    "conditions": ci.conditions,
-                    "objects": ci.objects,
-                    "triplets": [
-                        {
-                            "component": t.component,
-                            "action": t.action,
-                            "obj": t.obj,
-                            "condition": t.condition,
-                            "requirement": t.requirement
-                        }
-                        for t in ci.triplets
-                    ] if ci.triplets else []
-                }
-                for ci in clause.clause_items
-            ] if clause.clause_items else [],
-            "metadata": clause.metadata or {}
-        }
+        """将 ClauseSegment 转换为字典（委托给模块级函数）"""
+        return clause_to_dict(clause)
 
     def _element_to_dict(self, element: ElementSegment) -> Dict[str, Any]:
-        """将 ElementSegment 转换为字典"""
-        return {
-            "element_type": element.element_type.value if hasattr(element.element_type, 'value') else str(element.element_type),
-            "source_id": element.source_id,
-            "key": element.key,
-            "value": str(element.value) if element.value else "",
-            "unit": element.unit,
-            "condition": element.condition,
-            "abbreviation": element.abbreviation,
-            "definition": element.definition,
-            "content": element.content,
-            "metadata": element.metadata or {}
-        }
+        """将 ElementSegment 转换为字典（委托给模块级函数）"""
+        return element_to_dict(element)
 
     def _save_checkpoint(
         self,
