@@ -21,10 +21,12 @@
       </div>
 
       <div class="header-right">
-        <div class="workflow-step">
-          <span class="step-num">Step {{ currentStep }}/5</span>
-          <span class="step-name">{{ stepNames[currentStep - 1] }}</span>
-        </div>
+        <!-- Step Navigator -->
+        <StepNavigator
+          :projectId="currentProjectId"
+          :projectStatus="statusForNavigator"
+          :currentStep="2"
+        />
         <div class="step-divider"></div>
         <span class="status-indicator" :class="statusClass">
           <span class="dot"></span>
@@ -79,6 +81,7 @@ import GraphPanel from '../components/GraphPanel.vue'
 import Step1GraphBuild from '../components/Step1GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import Step5Interaction from '../components/Step5Interaction.vue'
+import StepNavigator from '../components/StepNavigator.vue'
 import { generateOntology, getProject, buildGraph, resetIntelligentChunks, getTaskStatus, getGraphData, getTaskEventsURL, updateProject } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 
@@ -123,6 +126,17 @@ const rightPanelStyle = computed(() => {
 })
 
 // --- Status Computed ---
+// Map currentPhase to status string for StepNavigator
+const statusForNavigator = computed(() => {
+  switch (currentPhase.value) {
+    case -1: return 'created'
+    case 0: return 'graph_chunking'
+    case 1: return 'graph_building'
+    case 2: return 'graph_completed'
+    default: return 'created'
+  }
+})
+
 const statusClass = computed(() => {
   if (error.value) return 'error'
   if (currentPhase.value >= 2) return 'completed'
@@ -623,7 +637,9 @@ onUnmounted(() => {
 .header-right {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  flex: 1;
+  justify-content: flex-end;
 }
 
 .workflow-step {

@@ -20,8 +20,13 @@
         :key="project.project_id"
         class="project-card"
         :class="getStatusClass(project.status)"
-        @click="navigateToProject(project)"
       >
+        <!-- Step Navigator -->
+        <StepNavigator
+          :projectId="project.project_id"
+          :projectStatus="project.status"
+          :currentStep="0"
+        />
         <!-- Card header -->
         <div class="card-header">
           <span class="project-id">{{ formatProjectId(project.project_id) }}</span>
@@ -98,10 +103,9 @@
 
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
 import { getProjectList, updateProject, deleteProject } from '../api/graph'
+import StepNavigator from './StepNavigator.vue'
 
-const router = useRouter()
 const projects = ref([])
 const loading = ref(true)
 
@@ -200,14 +204,6 @@ const loadProjects = async () => {
   } finally {
     loading.value = false
   }
-}
-
-// Navigate to project page
-const navigateToProject = (project) => {
-  router.push({
-    name: 'Process',
-    params: { projectId: project.project_id }
-  })
 }
 
 // Format project ID
@@ -330,14 +326,12 @@ onMounted(() => {
   border: 1px solid #E5E7EB;
   border-radius: 8px;
   padding: 16px;
-  cursor: pointer;
   transition: all 0.2s ease;
 }
 
 .project-card:hover {
-  border-color: #000000;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  transform: translateY(-2px);
+  border-color: #D1D5DB;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
 }
 
 /* Status-based border colors */

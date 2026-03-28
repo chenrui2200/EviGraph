@@ -8,6 +8,7 @@ import json
 import queue
 import traceback
 import threading
+import requests
 from typing import Dict, Optional
 from flask import request, jsonify, current_app, send_from_directory
 
@@ -291,13 +292,6 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                     episode_uuids = builder.add_hierarchical_chunks(
                         graph_id,
                         hierarchical_result,
-                        progress_callback=add_progress_callback
-                    )
-                else:
-                    episode_uuids = builder.add_text_batches(
-                        graph_id,
-                        chunks,
-                        batch_size=5,
                         progress_callback=add_progress_callback
                     )
 
@@ -935,16 +929,19 @@ def get_project_document(project_id: str, filename: str):
 @graph_bp.route('/ontology/generate', methods=['POST'])
 def generate_ontology():
     """
-    Interface 1: Upload files and analyze to generate ontology definition (Asynchronous)
+    Interface 1: Upload files and extract text (Asynchronous)
 
-    新流程：
-    1. 提取 PDF 文本
-    2. 调用 LLMDrivenChunker 进行章节分析（提取目录、条文、要素）
-    3. 基于分析结果，带着章节、条文、要素信息拆分 chunks
-    4. 保存结果
+    流程（与手册一致）：
+    1. 提取 PDF 文本块（chunks.json）
+    2. 保存原始文本
+    3. 设置状态为 ontology_generated
+
+    注意：MinerU 解析（Phase 2.1）和智能分析（Phase 2.2）是独立的用户操作步骤。
+    - 🧠 MinerU 解析 → POST /api/graph/pdf/mineru-parse（可选，用户手动触发）
+    - 🚀 开始智能分析 → POST /api/graph/chunk/intelligent（可选，用户手动触发）
     """
     try:
-        logger.info("=== Starting 智能Chunks标注分析流程 ===")
+        logger.info("=== Starting 文件上传与文本提取流程 ===")
 
         # Get parameters
         simulation_requirement = request.form.get('simulation_requirement', '')
@@ -987,7 +984,7 @@ def generate_ontology():
         # Create task
         task_manager = TaskManager()
         task_id = task_manager.create_task(
-            task_type="intelligent_chunk_annotation",
+            task_type="text_extraction",
             metadata={"project_id": project.project_id}
         )
 
@@ -1001,360 +998,212 @@ def generate_ontology():
             try:
                 build_logger = get_logger('mirofish.ontology')
 
-                # ========== 阶段 1: 提取 PDF 文本 ==========
-                build_logger.info(f"[{task_id}] 阶段 1/4: 提取 PDF 文本...")
-                task_manager.update_task(task_id, status=TaskStatus.PROCESSING, progress=5, message="🚀 开始提取 PDF 文本...")
+                # ========== 阶段 1: MinerU PDF 解析 → chunks.json ==========
+                build_logger.info(f"[{task_id}] 阶段 1: MinerU PDF 解析...")
+                task_manager.update_task(task_id, status=TaskStatus.PROCESSING, progress=5, message="🚀 开始 MinerU PDF 解析...")
 
-                text_chunks_list = []
-                all_text = ""
-                total_files = len(saved_files)
+                all_chunks = []       # 所有文件的 chunks（合并到 chunks.json）
+                all_text_parts = []   # 所有文件的纯文本（拼接到 all_text）
 
                 for idx, file_info in enumerate(saved_files):
                     orig_name = file_info["original_filename"]
-                    current_progress = 5 + int((idx / total_files) * 10)
+                    current_progress = 5 + int((idx / len(saved_files)) * 40)
+                    build_logger.info(f"[{task_id}] 处理文件: {orig_name} ({idx + 1}/{len(saved_files)})")
 
-                    msg = f"📄 提取文本: {orig_name} ({idx + 1}/{total_files})..."
+                    # 只对 PDF 调用 MinerU
+                    if not orig_name.lower().endswith('.pdf'):
+                        build_logger.info(f"[{task_id}] 非 PDF 文件，跳过 MinerU: {orig_name}")
+                        # 降级：使用 FileParser 提取文本
+                        try:
+                            chunks = FileParser.extract_chunks(file_info["path"], override_filename=orig_name)
+                            for c in chunks:
+                                all_chunks.append({
+                                    "chunk_id": f"chunk_{idx}_{len(all_chunks)}",
+                                    "page_idx": c.metadata.get("page", 0),
+                                    "type": c.metadata.get("type", "text"),
+                                    "content": c.text,
+                                    "bbox_pdf": c.metadata.get("bbox"),
+                                    "bbox_viewport": c.metadata.get("bbox"),
+                                    "page_width": c.metadata.get("page_width"),
+                                    "page_height": c.metadata.get("page_height"),
+                                    "category_id": 1,
+                                    "source": orig_name
+                                })
+                                all_text_parts.append(c.text)
+                            build_logger.info(f"[{task_id}] FileParser 提取 {len(chunks)} 个文本块: {orig_name}")
+                        except Exception as fe:
+                            build_logger.warning(f"[{task_id}] FileParser 失败: {fe}")
+                        continue
+
+                    # 调用 MinerU API
+                    pdf_path = file_info["path"]
+                    if not os.path.exists(pdf_path):
+                        build_logger.warning(f"[{task_id}] PDF 文件不存在: {pdf_path}")
+                        continue
+
+                    mineru_url = Config.MINERU_API_URL
+                    build_logger.info(f"[{task_id}] 调用 MinerU API: {mineru_url} for {orig_name}")
+
+                    try:
+                        with open(pdf_path, 'rb') as pdf_file:
+                            mineru_response = requests.post(
+                                mineru_url,
+                                files={'pdf_file': (orig_name, pdf_file.read(), 'application/pdf')},
+                                timeout=600
+                            )
+                    except Exception as req_err:
+                        build_logger.error(f"[{task_id}] MinerU 请求失败: {req_err}")
+                        task_manager.update_task(task_id, log=f"❌ {orig_name} MinerU 请求失败: {str(req_err)}")
+                        continue
+
+                    if mineru_response.status_code != 200:
+                        build_logger.error(f"[{task_id}] MinerU API 返回错误: {mineru_response.status_code}")
+                        task_manager.update_task(task_id, log=f"❌ MinerU API 错误: {mineru_response.status_code}")
+                        continue
+
+                    mineru_data = mineru_response.json()
+                    build_logger.info(f"[{task_id}] ✅ MinerU API 成功: {orig_name}")
+
+                    # 解析 MinerU 返回
+                    content_list = mineru_data.get('content', [])
+                    layout_pages = mineru_data.get('layout', [])
+                    pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
+
+                    # 构建 page_size 映射
+                    page_sizes = {}
+                    for info in pdf_info_list:
+                        page_idx = info.get('page_idx', 0)
+                        page_size = info.get('page_size', [])
+                        if len(page_size) == 2:
+                            page_sizes[page_idx] = page_size
+
+                    # 从 content 构建 chunks（带 bbox_viewport）
+                    chunk_idx = 0
+                    for content_item in content_list:
+                        page_idx = content_item.get('page_idx', 0)
+                        text = content_item.get('text', '').strip()
+                        if not text:
+                            continue
+                        all_text_parts.append(text)
+
+                        # 查找 bbox
+                        block_bbox = None
+                        for info in pdf_info_list:
+                            if info.get('page_idx') == page_idx:
+                                for pb in info.get('para_blocks', []):
+                                    pb_text = ''
+                                    for line in pb.get('lines', []):
+                                        for span in line.get('spans', []):
+                                            pb_text += span.get('content', '')
+                                    if text[:30] in (pb_text or ''):
+                                        block_bbox = pb.get('bbox')
+                                        break
+                                break
+
+                        page_w, page_h = page_sizes.get(page_idx, [595.3, 841.9])
+                        if block_bbox and len(block_bbox) >= 4:
+                            x0, y0, x1, y1 = block_bbox[:4]
+                            bbox_viewport = [x0, page_h - y1, x1, page_h - y0]
+                        else:
+                            bbox_viewport = [0, 0, page_w, 30]
+
+                        content_type = content_item.get('type', 'text')
+                        text_level = content_item.get('text_level', 0)
+                        if content_type == 'title' or text_level == 1:
+                            category_id = 0
+                        elif content_type == 'table':
+                            category_id = 2
+                        elif content_type == 'figure':
+                            category_id = 3
+                        else:
+                            category_id = 1
+
+                        all_chunks.append({
+                            "chunk_id": f"chunk_{idx}_{chunk_idx}",
+                            "page_idx": page_idx,
+                            "type": content_type,
+                            "content": text,
+                            "bbox_pdf": block_bbox,
+                            "bbox_viewport": bbox_viewport,
+                            "page_width": page_w,
+                            "page_height": page_h,
+                            "category_id": category_id,
+                            "source": orig_name
+                        })
+                        chunk_idx += 1
+
+                    # 从 layout 提取额外的 bbox（无文本）
+                    for layout_page in layout_pages:
+                        page_no = layout_page.get('page_info', {}).get('page_no', 0)
+                        page_w, page_h = page_sizes.get(page_no, [595.3, 841.9])
+                        for det in layout_page.get('layout_dets', []):
+                            bbox = det.get('bbox', [])
+                            if not bbox or len(bbox) < 4:
+                                continue
+                            x0, y0, x1, y1 = bbox[:4]
+                            all_chunks.append({
+                                "chunk_id": f"layout_{idx}_{page_no}_{det.get('category_id', 1)}_{int(x0)}_{int(y0/50)}",
+                                "page_idx": page_no,
+                                "type": _mineru_cat_to_type(det.get('category_id', 1)),
+                                "content": "",
+                                "bbox_pdf": bbox,
+                                "bbox_viewport": [x0, page_h - y1, x1, page_h - y0],
+                                "page_width": page_w,
+                                "page_height": page_h,
+                                "category_id": det.get('category_id', 1),
+                                "is_layout_bbox": True,
+                                "score": det.get('score', 0),
+                                "source": orig_name
+                            })
+
+                    msg = f"✅ {orig_name}: {chunk_idx} content chunks, {len(layout_pages)} pages"
                     build_logger.info(f"[{task_id}] {msg}")
                     task_manager.update_task(task_id, progress=current_progress, message=msg, log=msg)
 
-                    try:
-                        chunks = FileParser.extract_chunks(file_info["path"], override_filename=orig_name)
-                        if not chunks:
-                            task_manager.update_task(task_id, log=f"⚠️ 警告: 未从 {orig_name} 提取到文本")
-                        else:
-                            success_msg = f"✅ 从 {orig_name} 提取了 {len(chunks)} 个文本块"
-                            build_logger.info(f"[{task_id}] {success_msg}")
-                            task_manager.update_task(task_id, log=success_msg)
-                    except Exception as ee:
-                        task_manager.update_task(task_id, log=f"❌ {orig_name} 提取失败: {str(ee)}")
-                        from pathlib import Path
-                        text = Path(file_info["path"]).read_text(encoding='utf-8', errors='replace')
-                        chunks = [TextChunk(text=text, metadata={"source": orig_name, "type": "fallback"})]
+                if not all_chunks:
+                    build_logger.error(f"[{task_id}] 未提取到任何 chunks")
+                    task_manager.fail_task(task_id, "未提取到任何文本 chunks")
+                    return
 
-                    text_chunks_list.extend(chunks)
-                    doc_text = "\n\n".join([c.text for c in chunks])
-                    doc_text = TextProcessor.preprocess_text(doc_text)
-                    all_text += f"\n\n=== {orig_name} ===\n{doc_text}"
+                # ========== 阶段 1.2: 保存 chunks.json ==========
+                build_logger.info(f"[{task_id}] 阶段 1.2: 保存 chunks.json...")
+                task_manager.update_task(task_id, progress=60, message="💾 保存 chunks.json...", log="保存 chunks.json")
+
+                ProjectManager.save_chunks(project.project_id, all_chunks)
+                build_logger.info(f"[{task_id}] ✅ chunks.json 已保存，共 {len(all_chunks)} 个块")
 
                 # 保存原始文本
+                all_text = "\n\n".join(all_text_parts)
                 project.total_text_length = len(all_text)
                 ProjectManager.save_extracted_text(project.project_id, all_text)
+                build_logger.info(f"[{task_id}] ✅ 原始文本已保存，{project.total_text_length} 字符")
 
-                # 转换为 TextChunk 对象用于后续分析
-                text_chunks = [TextChunk(c.text, c.metadata) for c in text_chunks_list]
-                build_logger.info(f"[{task_id}] ✅ PDF 文本提取完成，共 {len(text_chunks)} 个文本块")
+                # ========== 阶段 1.3: 提取名词实体（可选，轻量） ==========
+                task_manager.update_task(task_id, progress=75, message="🧠 提取名词实体...", log="提取名词实体")
+                content_chunks = [c for c in all_chunks if c.get('content') and not c.get('is_layout_bbox')]
+                total_nouns = _extract_nouns_from_chunks(content_chunks, project.project_id, task_id, build_logger)
+                build_logger.info(f"[{task_id}] ✅ 名词提取完成: {total_nouns} 个名词")
 
-                # ========== 阶段 1: MinerU PDF 解析 ==========
-                build_logger.info(f"[{task_id}] 阶段 1/3: MinerU PDF 解析...")
-                task_manager.update_task(task_id, progress=20, message="🚀 开始 MinerU PDF 解析...", log="开始 MinerU PDF 解析")
-
-                # 查找 PDF 文件路径
-                pdf_path = None
-                pdf_filename = None
-                for file_info in saved_files:
-                    orig_name = file_info["original_filename"]
-                    if orig_name.lower().endswith('.pdf'):
-                        pdf_path = file_info["path"]
-                        pdf_filename = orig_name
-                        break
-
-                if not pdf_path or not os.path.exists(pdf_path):
-                    build_logger.error(f"[{task_id}] 未找到 PDF 文件，跳过 minerU 解析")
-                    task_manager.fail_task(task_id, "未找到 PDF 文件")
-                    return
-
-                # 调用 minerU API
-                import requests
-                mineru_url = Config.MINERU_API_URL
-                build_logger.info(f"[{task_id}] 调用 minerU API: {mineru_url}")
-
-                with open(pdf_path, 'rb') as pdf_file:
-                    mineru_response = requests.post(
-                        mineru_url,
-                        files={'pdf_file': (pdf_filename or 'document.pdf', pdf_file.read(), 'application/pdf')},
-                        timeout=600
-                    )
-
-                if mineru_response.status_code != 200:
-                    build_logger.error(f"[{task_id}] MinerU API 返回错误: {mineru_response.status_code}")
-                    task_manager.fail_task(task_id, f"MinerU API 返回错误: {mineru_response.status_code}")
-                    return
-
-                mineru_data = mineru_response.json()
-                build_logger.info(f"[{task_id}] ✅ MinerU API 调用成功")
-
-                # 阶段 1.1: 解析 content 数组 → chunks.json
-                task_manager.update_task(task_id, progress=40, message="📦 解析 MinerU content 数组...", log="解析 MinerU content 数组")
-
-                # 从 minerU 响应中提取 content 数组（总 chunks 来这里）
-                content_list = mineru_data.get('content', [])
-                layout_pages = mineru_data.get('layout', [])
-                pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
-                build_logger.info(f"[{task_id}] MinerU 返回 {len(content_list)} 个 content 块")
-
-                # 构建 page_size 映射
-                page_sizes = {}
-                for info in pdf_info_list:
-                    page_idx = info.get('page_idx', 0)
-                    page_size = info.get('page_size', [])
-                    if len(page_size) == 2:
-                        page_sizes[page_idx] = page_size
-
-                # 从 content 构建 chunks（保存到 chunks.json）
-                chunks_for_save = []
-                chunk_idx = 0
-
-                for content_item in content_list:
-                    page_idx = content_item.get('page_idx', 0)
-                    text = content_item.get('text', '').strip()
-                    if not text:
-                        continue
-
-                    # 查找该 page 的 bbox
-                    block_bbox = None
-                    category_id = 1
-                    for info in pdf_info_list:
-                        if info.get('page_idx') == page_idx:
-                            para_blocks = info.get('para_blocks', [])
-                            for pb in para_blocks:
-                                pb_text = ''
-                                for line in pb.get('lines', []):
-                                    for span in line.get('spans', []):
-                                        pb_text += span.get('content', '')
-                                if text.startswith(pb_text[:50]) if pb_text else False:
-                                    block_bbox = pb.get('bbox')
-                                if not block_bbox and text[:30] in (pb_text or ''):
-                                    block_bbox = pb.get('bbox')
-                                    break
-                            break
-
-                    page_w, page_h = page_sizes.get(page_idx, [595.3, 841.9])
-                    if block_bbox and len(block_bbox) >= 4:
-                        x0, y0, x1, y1 = block_bbox[:4]
-                        bbox_viewport = [x0, page_h - y1, x1, page_h - y0]
-                    else:
-                        bbox_viewport = [0, 0, page_w, 30]
-
-                    content_type = content_item.get('type', 'text')
-                    text_level = content_item.get('text_level', 0)
-                    if content_type == 'title' or text_level == 1:
-                        category_id = 0
-                    elif content_type == 'table':
-                        category_id = 2
-                    elif content_type == 'figure':
-                        category_id = 3
-                    else:
-                        category_id = 1
-
-                    chunks_for_save.append({
-                        "chunk_id": f"chunk_{page_idx}_{chunk_idx}",
-                        "page_idx": page_idx,
-                        "type": content_type,
-                        "content": text,
-                        "bbox_pdf": block_bbox,
-                        "bbox_viewport": bbox_viewport,
-                        "page_width": page_w,
-                        "page_height": page_h,
-                        "category_id": category_id,
-                        "source": pdf_filename
-                    })
-                    chunk_idx += 1
-
-                # 从 layout 提取额外的 bbox 信息
-                for layout_page in layout_pages:
-                    page_no = layout_page.get('page_info', {}).get('page_no', 0)
-                    layout_dets = layout_page.get('layout_dets', [])
-                    page_w, page_h = page_sizes.get(page_no, [595.3, 841.9])
-
-                    for det in layout_dets:
-                        bbox = det.get('bbox', [])
-                        if not bbox or len(bbox) < 4:
-                            continue
-
-                        x0, y0, x1, y1 = bbox[:4]
-                        vx0 = x0
-                        vy0 = page_h - y1
-                        vx1 = x1
-                        vy1 = page_h - y0
-
-                        chunk_id = f"layout_{page_no}_{det.get('category_id', 1)}_{int(x0)}_{int(y0/50)}"
-                        chunks_for_save.append({
-                            "chunk_id": chunk_id,
-                            "page_idx": page_no,
-                            "type": _category_id_to_type(det.get('category_id', 1)),
-                            "content": "",
-                            "bbox_pdf": bbox,
-                            "bbox_viewport": [vx0, vy0, vx1, vy1],
-                            "page_width": page_w,
-                            "page_height": page_h,
-                            "category_id": det.get('category_id', 1),
-                            "is_layout_bbox": True,
-                            "score": det.get('score', 0),
-                            "source": pdf_filename
-                        })
-
-                build_logger.info(f"[{task_id}] 共提取 {len(chunks_for_save)} 个块（content + layout）")
-
-                # 总 chunks 数 = minerU content 数组长度
-                total_chunks = len(content_list)
-                build_logger.info(f"[{task_id}] MinerU 总 chunks 数: {total_chunks}")
-
-                # 直接将 minerU content 数组保存到 chunks.json
-                content_chunks = [c for c in chunks_for_save if c.get('content')]
-                ProjectManager.save_chunks(project.project_id, content_chunks)
-                build_logger.info(f"[{task_id}] ✅ 阶段 1.1: chunks.json 已保存，共 {len(content_chunks)} 个 content chunks")
-
-                # ========== 阶段 1.2: 提取 chunks 中的名词实体 ==========
-                build_logger.info(f"[{task_id}] 阶段 1.2: 提取 chunks 中的名词实体...")
-                task_manager.update_task(task_id, progress=50, message="🧠 提取 chunks 中的名词实体...", log="提取名词实体")
-
-                # 使用 LLM 从 content_chunks 中提取名词实体
-                from ..utils.llm_client import LLMClient
-                llm = LLMClient()
-                noun_batch_size = 5
-                all_nouns_map = {}  # chunk_id -> [noun_str, ...]
-
-                for i in range(0, len(content_chunks), noun_batch_size):
-                    batch = content_chunks[i:i + noun_batch_size]
-                    batch_texts = []
-                    batch_ids = []
-
-                    for c in batch:
-                        text_preview = c['content'][:500]
-                        batch_texts.append(f"[{c['chunk_id']}] {text_preview}")
-                        batch_ids.append(c['chunk_id'])
-
-                    prompt = f"""你是一个专业的工程标准文档分析助手。请从以下文档片段中提取所有名词实体（专业术语、定义的概念、设备名称、系统名称、材料名称、符号等）。
-
-请以 JSON 格式返回：
-{{
-  "nouns": [
-    {{"term": "术语名称", "definition": "简要定义（可选）"}},
-    ...
-  ]
-}}
-
-要求：
-1. 只提取名词性实体，不要动词、形容词
-2. 重点提取：导体、设备、系统、材料、符号、概念名称等
-3. 每个片段最多返回 15 个名词
-4. 如果没有明显名词，返回空列表
-5. 只返回 JSON，不要其他文字
-
-文档片段：
-{{'='*60}}
-{chr(10).join(batch_texts)}
-{{'='*60}}"""
-
-                    messages = [
-                        {"role": "system", "content": "你是一个专业的工程标准文档分析助手。"},
-                        {"role": "user", "content": prompt}
-                    ]
-
-                    try:
-                        response = llm.chat(messages, temperature=0.3, max_tokens=2048)
-                        import re as regex_module
-                        json_match = regex_module.search(r'\{[\s\S]*\}', response)
-                        noun_terms = []
-                        if json_match:
-                            noun_data = json.loads(json_match.group())
-                            nouns_list = noun_data.get('nouns', [])
-                            noun_terms = [n.get('term', '') for n in nouns_list if n.get('term')]
-
-                        for c in batch:
-                            for nid in batch_ids:
-                                if c['chunk_id'] == nid:
-                                    c['nouns'] = noun_terms
-                                    all_nouns_map[c['chunk_id']] = noun_terms
-                                    break
-                        logger.info(f"[{task_id}] 名词提取批次 {i//noun_batch_size + 1}: {len(noun_terms)} 个名词")
-                    except Exception as llm_err:
-                        logger.warning(f"[{task_id}] LLM 名词提取批次 {i//noun_batch_size + 1} 失败: {llm_err}")
-
-                total_nouns = sum(len(v) for v in all_nouns_map.values())
-                build_logger.info(f"[{task_id}] ✅ 名词提取完成: {total_nouns} 个名词，{len(all_nouns_map)} 个 chunks 有关联")
-
-                # 阶段 1 完成
-                task_manager.update_task(task_id, progress=60, message=f"✅ MinerU 解析 + 名词提取完成: {total_chunks} chunks, {total_nouns} 名词", log=f"✅ MinerU 解析 + 名词提取完成: {total_chunks} chunks, {total_nouns} 名词")
-
-                # 构建 sections 和 clauses（基于 minerU content）
-                mineru_sections = _build_sections_from_chunks(chunks_for_save)
-                mineru_clauses = _build_clauses_from_chunks(chunks_for_save)
-
-                # ========== 阶段 2: 保存 intelligent_chunks.json（实体与 chunks 位置关联） ==========
-                build_logger.info(f"[{task_id}] 阶段 2/3: 保存 intelligent_chunks.json（名词与位置关联）...")
-                task_manager.update_task(task_id, progress=75, message="💾 保存 intelligent_chunks.json（名词与位置关联）...", log="保存 intelligent_chunks.json")
-
-                # 构建实体列表：每个 chunk_id 对应的名词 + 该 chunk 的 bbox 位置信息
-                mineru_elements = []
-                for chunk in content_chunks:
-                    chunk_id = chunk.get('chunk_id', '')
-                    nouns = chunk.get('nouns', [])
-                    if not nouns:
-                        continue
-                    mineru_elements.append({
-                        "chunk_id": chunk_id,
-                        "page_idx": chunk.get('page_idx', 0),
-                        "content_preview": chunk.get('content', '')[:100],
-                        "nouns": nouns,
-                        "bbox_viewport": chunk.get('bbox_viewport', []),
-                        "category_id": chunk.get('category_id', 1),
-                        "type": chunk.get('type', 'text')
-                    })
-
-                intelligent_chunks_data = {
-                    "source": "mineru",
-                    "parser_version": mineru_data.get('info', {}).get('_version_name', 'unknown'),
-                    "sections": mineru_sections,
-                    "clauses": mineru_clauses,
-                    "elements": mineru_elements,
-                    "layout_chunks": chunks_for_save,
-                    "mineru_raw": {
-                        "layout": layout_pages,
-                        "content": content_list
-                    }
-                }
-                ProjectManager.save_intelligent_chunks(project.project_id, intelligent_chunks_data)
-                build_logger.info(f"[{task_id}] ✅ intelligent_chunks.json 已保存（minerU 源，含 {len(mineru_elements)} 个实体的位置关联）")
-
-                # 删除检查点（任务完成）
-                ProjectManager.delete_chunk_checkpoint_v2(project.project_id)
-                ProjectManager.delete_chunk_checkpoint(project.project_id)
-
-                build_logger.info(f"[{task_id}] ✅ 阶段 1+2 完成: {total_chunks} chunks, {total_nouns} 名词")
-
-                # ========== 阶段 3: 保存本体和完成 ==========
+                # ========== 阶段 1 完成: 保存本体 + 设置状态 ==========
                 task_manager.update_task(task_id, progress=85, message="💾 保存本体定义...", log="保存本体定义")
 
-                # 使用固定本体
                 from ..services.normative_ontology import NORMATIVE_ONTOLOGY
                 ontology = NORMATIVE_ONTOLOGY
-
                 if ontology:
                     project.ontology = {
                         "entity_types": ontology.get("entity_types", []),
                         "edge_types": ontology.get("edge_types", [])
                     }
-                    project.analysis_summary = (
-                        f"MinerU 智能标注分析完成：{len(mineru_sections)} 章节、"
-                        f"{len(mineru_clauses)} 条文、{total_nouns} 名词"
-                    )
+                    project.analysis_summary = f"MinerU 解析完成：{len(all_chunks)} 块，{total_nouns} 名词"
                 else:
                     project.ontology = {"entity_types": [], "edge_types": []}
                     project.analysis_summary = ""
 
-                project.status = ProjectStatus.GRAPH_CHUNKED
+                # 状态设为 ontology_generated（MinerU解析完成，可进入 Phase 2.2 智能分析）
+                project.status = ProjectStatus.ONTOLOGY_GENERATED
                 ProjectManager.save_project(project)
 
-                # 完成
-                summary = (
-                    f"✅ MinerU 智能Chunks标注分析完成！\n"
-                    f"   - 章节: {len(mineru_sections)}\n"
-                    f"   - 条文: {len(mineru_clauses)}\n"
-                    f"   - 名词实体: {total_nouns}\n"
-                    f"   - Chunks(content): {len(content_chunks)}\n"
-                    f"   - 总content数组: {total_chunks}"
-                )
+                summary = f"✅ MinerU 解析完成！共 {len(all_chunks)} 块（含 layout），{total_nouns} 名词"
                 build_logger.info(f"[{task_id}] {summary}")
 
                 task_manager.complete_task(task_id, {
@@ -1362,11 +1211,9 @@ def generate_ontology():
                     "ontology": project.ontology,
                     "analysis_summary": project.analysis_summary,
                     "total_text_length": project.total_text_length,
-                    "sections": len(mineru_sections),
-                    "clauses": len(mineru_clauses),
-                    "elements": total_nouns,
-                    "chunks": len(content_chunks),
-                    "mineru_total_content": total_chunks
+                    "chunks_count": len(all_chunks),
+                    "content_chunks_count": len(content_chunks),
+                    "total_nouns": total_nouns
                 })
                 build_logger.info(f"[{task_id}] 任务完成.")
 
@@ -1385,7 +1232,7 @@ def generate_ontology():
             "data": {
                 "project_id": project.project_id,
                 "task_id": task_id,
-                "message": "智能Chunks标注分析任务已启动"
+                "message": "文件上传与 MinerU PDF 解析任务已启动，请稍候"
             }
         })
 
@@ -1491,19 +1338,20 @@ def _convert_analysis_to_chunks(chunk_result, text_chunks, project_id):
     return chunks
 
 
-# ============== MinerU PDF 解析接口 ==============
+# ============== MinerU PDF 解析接口（简化版） ==============
 
 @graph_bp.route('/pdf/mineru-parse', methods=['POST'])
 def mineru_parse():
     """
     MinerU PDF 解析接口
 
-    调用 minerU API 解析 PDF，返回 layout/content 数据，
-    使用 LLM 提取 content 中的名词实体，保存 chunks 到 intelligent_chunks.json。
-
-    支持两种调用方式：
-    1. multipart/form-data: 直接上传 PDF 文件
-    2. JSON: { "project_id": "xxx", "filename": "xxx.pdf" }
+    请求: JSON { "project_id": "xxx", "filename": "xxx.pdf" }
+    流程:
+      1. 从项目目录读取 PDF
+      2. 调用 MinerU API
+      3. 解析返回的 layout 数据，提取 bbox
+      4. 保存到 chunks.json
+      5. 返回结构化结果
 
     Response:
         {
@@ -1511,154 +1359,73 @@ def mineru_parse():
             "data": {
                 "project_id": "xxx",
                 "filename": "xxx.pdf",
-                "mineru_result": { ... full minerU response ... },
+                "total_pages": 3,
+                "total_layout_blocks": 50,
                 "chunks": [
                     {
-                        "chunk_id": "chunk_0_0",
+                        "chunk_id": "layout_0_1_50_0",
                         "page_idx": 0,
                         "type": "text|title|table|figure",
                         "content": "...",
-                        "nouns": ["导体", "截面积", ...],
-                        "bbox_pdf": [x0, y0, x1, y1],      # PDF 原始坐标
-                        "bbox_viewport": [x0, y0, x1, y1], # PDF.js viewport 坐标
+                        "bbox_pdf": [x0, y0, x1, y1],
+                        "bbox_viewport": [x0, page_h-y1, x1, page_h-y0],
                         "page_width": 595,
                         "page_height": 842,
-                        "category_id": 0|1|2|3|4|5|6
+                        "category_id": 0|1|2|3|4|5|6,
+                        "is_layout_bbox": true,
+                        "score": 0.99
                     },
                     ...
                 ],
-                "summary": {
-                    "total_pages": 3,
-                    "total_chunks": 50,
-                    "total_nouns": 120
-                }
+                "mineru_version": "xxx"
             }
         }
     """
-    import requests
-    from ..utils.llm_client import LLMClient
-
     try:
-        logger.info("=== MinerU PDF 解析流程开始 ===")
+        data = request.get_json() or {}
+        project_id = data.get('project_id')
+        filename = data.get('filename')
 
-        pdf_bytes = None
-        filename = None
-        project_id = None
+        if not project_id or not filename:
+            return jsonify({"success": False, "error": "请提供 project_id 和 filename"}), 400
 
-        # 判断调用方式
-        if request.content_type and 'multipart/form-data' in request.content_type:
-            # 先检查 FormData 中是否有 project_id + filename（项目已有 PDF 的场景）
-            form_project_id = request.form.get('project_id')
-            form_filename = request.form.get('filename')
-            files = request.files.getlist('pdf_file')
-            pdf_file_from_form = files[0] if files else None
-
-            if form_project_id and form_filename and not pdf_file_from_form:
-                # 方式2: 从已有项目读取 PDF
-                project_id = form_project_id
-                filename = form_filename
-                project_dir = ProjectManager._get_project_dir(project_id)
-                pdf_path = None
-                for root, dirs, f_list in os.walk(project_dir):
-                    for f in f_list:
-                        if filename.lower() in f.lower() or f.lower() in filename.lower():
-                            pdf_path = os.path.join(root, f)
-                            break
-                    if pdf_path:
-                        break
-                if not pdf_path or not os.path.exists(pdf_path):
-                    return jsonify({"success": False, "error": f"PDF 文件未找到: {filename}"}), 404
-                with open(pdf_path, 'rb') as f:
-                    pdf_bytes = f.read()
-            elif pdf_file_from_form and pdf_file_from_form.filename:
-                # 方式1: 直接上传 PDF
-                pdf_file = pdf_file_from_form
-                filename = pdf_file.filename
-                pdf_bytes = pdf_file.read()
-
-                # 创建临时项目
-                project = ProjectManager.create_project(name=filename.replace('.pdf', '') if filename else 'mineru_parse')
-                project_id = project.project_id
-
-                # 保存 PDF 到项目目录
-                file_info = ProjectManager.save_file_to_project(project_id, pdf_file, filename)
-                project.files.append({
-                    "filename": file_info["original_filename"],
-                    "saved_filename": file_info["saved_filename"],
-                    "size": file_info["size"]
-                })
-                ProjectManager.save_project(project)
-            else:
-                return jsonify({"success": False, "error": "未提供 PDF 文件"}), 400
-            pdf_file = files[0]
-            filename = pdf_file.filename
-            pdf_bytes = pdf_file.read()
-
-            # 创建临时项目
-            project = ProjectManager.create_project(name=filename.replace('.pdf', '') if filename else 'mineru_parse')
-            project_id = project.project_id
-
-            # 保存 PDF 到项目目录
-            file_info = ProjectManager.save_file_to_project(project_id, pdf_file, filename)
-            project.files.append({
-                "filename": file_info["original_filename"],
-                "saved_filename": file_info["saved_filename"],
-                "size": file_info["size"]
-            })
-            ProjectManager.save_project(project)
-
-        else:
-            # 方式3: JSON 参数 (project_id + filename)
-            data = request.get_json() or {}
-            project_id = data.get('project_id')
-            filename = data.get('filename')
-
-            if not project_id or not filename:
-                return jsonify({"success": False, "error": "请提供 project_id 和 filename"}), 400
-
-            # 查找 PDF 文件路径
-            project_dir = ProjectManager._get_project_dir(project_id)
-            pdf_path = None
-            for root, dirs, f_list in os.walk(project_dir):
-                for f in f_list:
-                    if filename.lower() in f.lower() or f.lower() in filename.lower():
-                        pdf_path = os.path.join(root, f)
-                        break
-                if pdf_path:
+        # === 1. 查找 PDF 文件 ===
+        project_dir = ProjectManager._get_project_dir(project_id)
+        pdf_path = None
+        for root, dirs, f_list in os.walk(project_dir):
+            for f in f_list:
+                if filename.lower() in f.lower() or f.lower() in filename.lower():
+                    pdf_path = os.path.join(root, f)
                     break
+            if pdf_path:
+                break
 
-            if not pdf_path or not os.path.exists(pdf_path):
-                return jsonify({"success": False, "error": f"PDF 文件未找到: {filename}"}), 404
+        if not pdf_path or not os.path.exists(pdf_path):
+            return jsonify({"success": False, "error": f"PDF 文件未找到: {filename}"}), 404
 
-            with open(pdf_path, 'rb') as f:
-                pdf_bytes = f.read()
+        with open(pdf_path, 'rb') as f:
+            pdf_bytes = f.read()
 
-        # ===== 调用 minerU API =====
-        mineru_url = Config.MINERU_API_URL
-        logger.info(f"调用 minerU API: {mineru_url}")
+        logger.info(f"MinerU 解析: project={project_id}, filename={filename}, size={len(pdf_bytes)} bytes")
 
+        # === 2. 调用 MinerU API ===
         mineru_response = requests.post(
-            mineru_url,
-            files={'pdf_file': (filename or 'document.pdf', pdf_bytes, 'application/pdf')},
+            Config.MINERU_API_URL,
+            files={'pdf_file': (filename, pdf_bytes, 'application/pdf')},
             timeout=300
         )
 
         if mineru_response.status_code != 200:
             logger.error(f"MinerU API 返回错误: {mineru_response.status_code} - {mineru_response.text[:500]}")
-            return jsonify({
-                "success": False,
-                "error": f"MinerU API 返回错误: {mineru_response.status_code}"
-            }), 502
+            return jsonify({"success": False, "error": f"MinerU API 返回错误: {mineru_response.status_code}"}), 502
 
         mineru_data = mineru_response.json()
-        logger.info("MinerU API 调用成功，开始解析结果...")
 
-        # ===== 解析 minerU 返回结果 =====
+        # === 3. 解析 MinerU 返回结果 ===
         layout_pages = mineru_data.get('layout', [])
         pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
-        content_list = mineru_data.get('content', [])
 
-        # 构建 page_size 映射 (page_idx -> [width, height])
+        # 构建 page_size 映射 (page_no -> [width, height])
         page_sizes = {}
         for info in pdf_info_list:
             page_idx = info.get('page_idx', 0)
@@ -1666,134 +1433,110 @@ def mineru_parse():
             if len(page_size) == 2:
                 page_sizes[page_idx] = page_size
 
-        # ===== 从 content 中提取文本块 + bbox =====
         chunks = []
-        chunk_idx = 0
 
-        for content_item in content_list:
-            page_idx = content_item.get('page_idx', 0)
-            text = content_item.get('text', '').strip()
-            if not text:
-                continue
-
-            # 查找该 page 的 pdf_info 以获取 bbox
-            block_bbox = None
-            category_id = 1  # 默认 text 类型
-            for info in pdf_info_list:
-                if info.get('page_idx') == page_idx:
-                    para_blocks = info.get('para_blocks', [])
-                    for pb in para_blocks:
-                        pb_text = ''
-                        for line in pb.get('lines', []):
-                            for span in line.get('spans', []):
-                                pb_text += span.get('content', '')
-                        if text.startswith(pb_text[:50]) if pb_text else False:
-                            block_bbox = pb.get('bbox')
-                        # 匹配第一个包含该文本的 block
-                        if not block_bbox and text[:30] in (pb_text or ''):
-                            block_bbox = pb.get('bbox')
-                            break
-                    break
-
-            page_w, page_h = page_sizes.get(page_idx, [595.3, 841.9])
-
-            # bbox 格式: [x0, y0, x1, y1] (PDF 点坐标)
-            # viewport 坐标: 转换到 PDF.js viewport 空间 (原点左下)
-            if block_bbox and len(block_bbox) >= 4:
-                x0, y0, x1, y1 = block_bbox[:4]
-                # PDF.js viewport 坐标 (x0, page_height - y1, x1, page_height - y0)
-                bbox_viewport = [x0, page_h - y1, x1, page_h - y0]
-            else:
-                bbox_viewport = [0, 0, page_w, 30]
-
-            # 文本类型判断
-            content_type = content_item.get('type', 'text')
-            text_level = content_item.get('text_level', 0)
-            if content_type == 'title' or text_level == 1:
-                category_id = 0  # 标题
-            elif content_type == 'table':
-                category_id = 2
-            elif content_type == 'figure':
-                category_id = 3
-            else:
-                category_id = 1  # 正文
-
-            chunks.append({
-                "chunk_id": f"chunk_{page_idx}_{chunk_idx}",
-                "page_idx": page_idx,
-                "type": content_type,
-                "content": text,
-                "bbox_pdf": block_bbox,
-                "bbox_viewport": bbox_viewport,
-                "page_width": page_w,
-                "page_height": page_h,
-                "category_id": category_id,
-                "nouns": []  # 待 LLM 提取
-            })
-            chunk_idx += 1
-
-        # ===== 从 layout 中提取额外的 bbox 信息 =====
+        # 从 layout 中提取 bbox（主数据源）
         for layout_page in layout_pages:
-            page_no = layout_page.get('page_info', {}).get('page_no', 0)
-            layout_dets = layout_page.get('layout_dets', [])
+            page_info = layout_page.get('page_info', {})
+            page_no = page_info.get('page_no', 0)
             page_w, page_h = page_sizes.get(page_no, [595.3, 841.9])
+            layout_dets = layout_page.get('layout_dets', [])
 
             for det in layout_dets:
                 bbox = det.get('bbox', [])
-
                 if not bbox or len(bbox) < 4:
                     continue
 
-                # bbox 格式: [x0, y0, x1, y1] (PDF 点坐标，与 page_size 单位一致)
                 x0, y0, x1, y1 = bbox[:4]
+                # PDF.js viewport 坐标: y轴翻转 (PDF: 左上原点向下, viewport: 左下原点向上)
+                bbox_viewport = [x0, page_h - y1, x1, page_h - y0]
 
-                # 转换为 viewport 坐标 (PDF.js: 原点在左下，y向上)
-                # minerU: 原点在左上，y向下
-                # PDF.js viewport: (x, page_height - y1) -> (x+w, page_height - y0)
-                vx0 = x0
-                vy0 = page_h - y1  # y 翻转
-                vx1 = x1
-                vy1 = page_h - y0
-
-                chunk_id = f"layout_{page_no}_{det.get('category_id', 1)}_{int(x0)}_{int(y0/50)}"
+                cat_id = det.get('category_id', 1)
                 chunks.append({
-                    "chunk_id": chunk_id,
+                    "chunk_id": f"layout_{page_no}_{cat_id}_{int(x0)}_{int(y0 / 10)}",
                     "page_idx": page_no,
-                    "type": _category_id_to_type(det.get('category_id', 1)),
+                    "type": _mineru_cat_to_type(cat_id),
                     "content": "",
                     "bbox_pdf": bbox,
-                    "bbox_viewport": [vx0, vy0, vx1, vy1],
+                    "bbox_viewport": bbox_viewport,
                     "page_width": page_w,
                     "page_height": page_h,
-                    "category_id": det.get('category_id', 1),
-                    "nouns": [],
+                    "category_id": cat_id,
                     "is_layout_bbox": True,
-                    "score": det.get('score', 0)
+                    "score": det.get('score', 0),
+                    "nouns": []
                 })
 
-        logger.info(f"共提取 {len(chunks)} 个布局块")
+        logger.info(f"MinerU 解析完成: {len(chunks)} 个布局块, {len(page_sizes)} 页")
 
-        # ===== 使用 LLM 提取名词实体 =====
-        # 将 content 分批发送给 LLM，每批最多 5 个 chunk
-        BATCH_SIZE = 5
-        total_nouns = 0
+        # === 4. 保存到 chunks.json ===
+        ProjectManager.save_chunks(project_id, chunks)
 
-        try:
-            llm = LLMClient()
-            content_chunks = [c for c in chunks if c.get('content') and not c.get('is_layout_bbox')]
+        # === 5. 返回结果 ===
+        return jsonify({
+            "success": True,
+            "data": {
+                "project_id": project_id,
+                "filename": filename,
+                "total_pages": len(page_sizes),
+                "total_layout_blocks": sum(len(lp.get('layout_dets', [])) for lp in layout_pages),
+                "chunks": chunks,
+                "mineru_version": mineru_data.get('info', {}).get('_version_name', 'unknown')
+            }
+        })
 
-            for i in range(0, len(content_chunks), BATCH_SIZE):
-                batch = content_chunks[i:i + BATCH_SIZE]
-                batch_texts = []
-                batch_ids = []
+    except requests.exceptions.ConnectionError:
+        return jsonify({"success": False, "error": "无法连接到 MinerU 服务"}), 503
+    except Exception as e:
+        logger.error(f"MinerU 解析失败: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
-                for c in batch:
-                    # 截取前500字符以节省 token
-                    text_preview = c['content'][:500]
-                    batch_texts.append(f"[{c['chunk_id']}] {text_preview}")
-                    batch_ids.append(c['chunk_id'])
 
-                prompt = f"""你是一个专业的工程标准文档分析助手。请从以下文档片段中提取所有名词实体（专业术语、定义的概念、设备名称、系统名称等）。
+def _mineru_cat_to_type(cat_id: int) -> str:
+    """MinerU category_id -> 类型字符串"""
+    return {0: 'title', 1: 'text', 2: 'table', 3: 'figure', 4: 'table', 5: 'figure', 6: 'math'}.get(cat_id, 'text')
+
+
+def _extract_nouns_from_chunks(
+    content_chunks: list,
+    project_id: str,
+    task_id: str,
+    logger
+) -> int:
+    """
+    使用 LLM 从 MinerU content chunks 中提取名词实体。
+
+    直接修改 chunks 列表中的 nouns 字段。
+
+    Args:
+        content_chunks: content chunks 列表（会被原地修改）
+        project_id: 项目ID（用于日志）
+        task_id: 任务ID（用于日志）
+        logger: 日志记录器
+
+    Returns:
+        总名词数
+    """
+    from ..utils.llm_client import LLMClient
+
+    if not content_chunks:
+        return 0
+
+    llm = LLMClient()
+    BATCH_SIZE = 5
+    total_nouns = 0
+
+    for i in range(0, len(content_chunks), BATCH_SIZE):
+        batch = content_chunks[i:i + BATCH_SIZE]
+        batch_texts = []
+        batch_ids = []
+
+        for c in batch:
+            text_preview = c.get('content', '')[:500]
+            batch_texts.append(f"[{c.get('chunk_id', '?')}] {text_preview}")
+            batch_ids.append(c.get('chunk_id'))
+
+        prompt = f"""你是一个专业的工程标准文档分析助手。请从以下文档片段中提取所有名词实体（专业术语、定义的概念、设备名称、系统名称、材料名称、符号等）。
 
 请以 JSON 格式返回：
 {{
@@ -1815,104 +1558,33 @@ def mineru_parse():
 {chr(10).join(batch_texts)}
 {{'='*60}}"""
 
-                messages = [
-                    {"role": "system", "content": "你是一个专业的工程标准文档分析助手。"},
-                    {"role": "user", "content": prompt}
-                ]
+        messages = [
+            {"role": "system", "content": "你是一个专业的工程标准文档分析助手。"},
+            {"role": "user", "content": prompt}
+        ]
 
-                try:
-                    response = llm.chat(messages, temperature=0.3, max_tokens=2048)
-                    # 尝试解析 JSON
-                    import re as regex_module
-                    json_match = regex_module.search(r'\{[\s\S]*\}', response)
-                    if json_match:
-                        noun_data = json.loads(json_match.group())
-                        nouns_list = noun_data.get('nouns', [])
-                        noun_terms = [n.get('term', '') for n in nouns_list if n.get('term')]
+        try:
+            response = llm.chat(messages, temperature=0.3, max_tokens=2048)
+            import re as regex_module
+            json_match = regex_module.search(r'\{[\s\S]*\}', response)
+            noun_terms = []
+            if json_match:
+                noun_data = json.loads(json_match.group())
+                nouns_list = noun_data.get('nouns', [])
+                noun_terms = [n.get('term', '') for n in nouns_list if n.get('term')]
 
-                        # 更新对应 chunks 的 nouns 字段
-                        for c in batch:
-                            for nid in batch_ids:
-                                if c['chunk_id'] == nid:
-                                    c['nouns'] = noun_terms
-                                    total_nouns += len(noun_terms)
-                                    break
-                    logger.info(f"批次 {i//BATCH_SIZE + 1}: 提取了 {len(noun_terms) if 'noun_terms' in dir() else 0} 个名词")
-                except Exception as llm_err:
-                    logger.warning(f"LLM 名词提取批次 {i//BATCH_SIZE + 1} 失败: {llm_err}")
+            # 更新对应 chunks 的 nouns 字段
+            for chunk in content_chunks:
+                for nid in batch_ids:
+                    if chunk.get('chunk_id') == nid:
+                        chunk['nouns'] = noun_terms
+                        break
+            total_nouns += len(noun_terms)
+            logger.info(f"[{task_id}] 名词提取批次 {i // BATCH_SIZE + 1}: {len(noun_terms)} 个名词")
+        except Exception as llm_err:
+            logger.warning(f"[{task_id}] LLM 名词提取批次 {i // BATCH_SIZE + 1} 失败: {llm_err}")
 
-        except Exception as llm_init_err:
-            logger.warning(f"LLM 客户端初始化失败，跳过名词提取: {llm_init_err}")
-
-        # ===== 保存到 intelligent_chunks.json =====
-        intelligent_chunks_data = {
-            "source": "mineru",
-            "parser_version": mineru_data.get('info', {}).get('_version_name', 'unknown'),
-            "sections": _build_sections_from_chunks(chunks),
-            "clauses": _build_clauses_from_chunks(chunks),
-            "elements": [],
-            "layout_chunks": chunks,
-            "mineru_raw": {
-                "layout": layout_pages,
-                "content": content_list
-            }
-        }
-
-        ProjectManager.save_intelligent_chunks(project_id, intelligent_chunks_data)
-        logger.info(f"MinerU 解析结果已保存到 intelligent_chunks.json (project: {project_id})")
-
-        # ===== 构建响应 =====
-        total_pages = len(page_sizes)
-
-        return jsonify({
-            "success": True,
-            "data": {
-                "project_id": project_id,
-                "filename": filename,
-                "mineru_result": {
-                    "version": mineru_data.get('info', {}).get('_version_name', 'unknown'),
-                    "total_pages": total_pages,
-                    "total_layout_blocks": sum(len(lp.get('layout_dets', [])) for lp in layout_pages),
-                    "total_content_blocks": len(content_list)
-                },
-                "chunks": chunks,
-                "summary": {
-                    "total_pages": total_pages,
-                    "total_chunks": len(chunks),
-                    "total_nouns": total_nouns,
-                    "content_chunks": len([c for c in chunks if c.get('content') and not c.get('is_layout_bbox')]),
-                    "layout_bboxes": len([c for c in chunks if c.get('is_layout_bbox')])
-                }
-            }
-        })
-
-    except requests.exceptions.ConnectionError as conn_err:
-        logger.error(f"MinerU 连接失败: {conn_err}")
-        return jsonify({
-            "success": False,
-            "error": f"无法连接到 MinerU 服务: {str(conn_err)}"
-        }), 503
-    except Exception as e:
-        logger.error(f"MinerU 解析失败: {str(e)}\n{traceback.format_exc()}")
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }), 500
-
-
-def _category_id_to_type(category_id: int) -> str:
-    """将 minerU category_id 映射为类型字符串"""
-    mapping = {
-        0: 'title',
-        1: 'text',
-        2: 'table',
-        3: 'figure',
-        4: 'table',
-        5: 'figure',
-        6: 'math'
-    }
-    return mapping.get(category_id, 'text')
+    return total_nouns
 
 
 def _build_sections_from_chunks(chunks: list) -> list:
@@ -2006,14 +1678,16 @@ def _build_clauses_from_chunks(chunks: list) -> list:
 @graph_bp.route('/pdf/mineru-parse/<project_id>', methods=['GET'])
 def get_mineru_chunks(project_id: str):
     """
-    获取 MinerU 解析结果（从 intelligent_chunks.json）
+    获取 MinerU 解析结果（从 chunks.json）
+
+    chunks.json 由 ontology/generate 或 mineru_parse 产生，
+    包含 MinerU 的 layout + content + bbox + nouns 数据。
 
     Returns:
         {
             "success": true,
             "data": {
                 "project_id": "xxx",
-                "filename": "xxx.pdf",
                 "chunks": [...],
                 "summary": {...}
             }
@@ -2024,16 +1698,26 @@ def get_mineru_chunks(project_id: str):
         if not project:
             return jsonify({"success": False, "error": f"项目不存在: {project_id}"}), 404
 
-        chunks_data = ProjectManager.get_intelligent_chunks(project_id)
+        # 从 chunks.json 读取 MinerU 数据
+        chunks_data = ProjectManager.get_chunks(project_id)
         if not chunks_data:
-            return jsonify({"success": False, "error": "尚未执行 MinerU 解析"}), 404
+            return jsonify({"success": False, "error": "尚未执行 MinerU 解析，请先上传文档"}), 404
 
-        if chunks_data.get('source') != 'mineru':
-            return jsonify({"success": False, "error": "该项目数据不是由 MinerU 生成"}), 404
+        # 检查是否包含 minerU 特征字段
+        first_chunk = chunks_data[0] if chunks_data else {}
+        has_mineru_fields = bool(first_chunk.get('chunk_id') and first_chunk.get('bbox_viewport'))
 
-        layout_chunks = chunks_data.get('layout_chunks', [])
-        content_chunks = [c for c in layout_chunks if c.get('content') and not c.get('is_layout_bbox')]
-        layout_bboxes = [c for c in layout_chunks if c.get('is_layout_bbox')]
+        if not has_mineru_fields:
+            return jsonify({"success": False, "error": "chunks 不是由 MinerU 生成的"}), 400
+
+        all_chunks = chunks_data
+        content_chunks = [c for c in all_chunks if c.get('content') and not c.get('is_layout_bbox')]
+        layout_bboxes = [c for c in all_chunks if c.get('is_layout_bbox')]
+
+        # 从 chunks 中提取章节（基于标题类型）
+        sections = _build_sections_from_chunks(all_chunks)
+        # 从 chunks 中提取条文（基于条文编号）
+        clauses = _build_clauses_from_chunks(all_chunks)
 
         # 收集所有名词
         all_nouns = set()
@@ -2045,14 +1729,13 @@ def get_mineru_chunks(project_id: str):
             "success": True,
             "data": {
                 "project_id": project_id,
-                "source": chunks_data.get('source'),
-                "parser_version": chunks_data.get('parser_version'),
-                "sections": chunks_data.get('sections', []),
-                "clauses": chunks_data.get('clauses', []),
-                "chunks": layout_chunks,
+                "source": "mineru",
+                "sections": sections,
+                "clauses": clauses,
+                "chunks": all_chunks,
                 "summary": {
-                    "total_pages": max((c.get('page_idx', 0) for c in layout_chunks), default=0) + 1,
-                    "total_chunks": len(layout_chunks),
+                    "total_pages": max((c.get('page_idx', 0) for c in all_chunks), default=0) + 1,
+                    "total_chunks": len(all_chunks),
                     "content_chunks": len(content_chunks),
                     "layout_bboxes": len(layout_bboxes),
                     "total_nouns": len(all_nouns),
@@ -2070,17 +1753,22 @@ def get_mineru_chunks(project_id: str):
 @graph_bp.route('/chunk/intelligent', methods=['POST'])
 def intelligent_chunk():
     """
-    Interface 1.5: 智能Chunks标注分析（增强版 - 支持章节级断点恢复）
+    Phase 2.2: LLM 驱动的智能语义分析
 
-    在 PDF 解析后执行 LLM 智能分块+标注分析：
+    读取 MinerU 解析产生的 chunks.json，在其基础上：
     1. LLM 提取目录（章节结构）
-    2. LLM 提取条文 + 要素
-    3. 根据要素和条文在 PDF 中标注位置
+    2. 逐章 LLM 提取条文 + 语义三元组（Component → Action → Obj @ Condition）
+    3. 逐章 LLM 提取技术要素（Term/Component/Parameter/Formula）
+    4. 建立关联关系：(Term + Situation) - Chunk - Page info
+    5. 保存到 intelligent_chunks.json
+
+    输入: chunks.json（MinerU 产生，含有 chunk_id/page_idx/bbox_viewport/category_id/nouns）
+    输出: intelligent_chunks.json（语义三元组 + 章节 + 要素）
 
     Request (JSON):
         {
             "project_id": "proj_xxxx",      // Required
-            "reset": false                  // Optional, 是否重置并重新分块
+            "reset": false                  // Optional, 是否重置并重新分析
         }
 
     Response:
@@ -2122,7 +1810,7 @@ def intelligent_chunk():
             if not text:
                 return jsonify({
                     "success": False,
-                    "error": "未找到已解析的文档，请先上传并解析文档"
+                    "error": "未找到 MinerU 解析产生的 chunks，请先上传文档触发 MinerU 解析"
                 }), 400
             # 将文本转换为 chunks
             chunks_data = [{"text": text, "metadata": {"source": project.name or "document"}}]
@@ -2202,7 +1890,7 @@ def intelligent_chunk():
         else:
             # 创建新任务
             task_id = task_manager.create_task(
-                task_type="intelligent_chunk_annotation",
+                task_type="llm_semantic_analysis",
                 metadata={"project_id": project_id}
             )
 
@@ -2234,7 +1922,7 @@ def intelligent_chunk():
                         progress_detail=checkpoint_info or {}
                     )
 
-                chunker_logger.info(f"[{task_id}] 智能Chunks标注分析任务开始...")
+                chunker_logger.info(f"[{task_id}] LLM 智能语义分析开始（基于 MinerU chunks）...")
                 chunker_logger.info(f"[{task_id}] 待分析 chunks 数量: {len(text_chunks)}")
 
                 task_mgr.update_task(
@@ -2258,6 +1946,7 @@ def intelligent_chunk():
 
                 # 保存分块结果
                 chunks_result = {
+                    "source": "llm",  # LLM 语义分析（基于 MinerU chunks）
                     "sections": [
                         {
                             "chapter_number": s.chapter_number,
@@ -2344,7 +2033,7 @@ def intelligent_chunk():
             "data": {
                 "project_id": project_id,
                 "task_id": task_id,
-                "message": "智能Chunks标注分析任务已启动（支持章节级断点恢复）",
+                "message": "LLM 智能语义分析任务已启动（基于 MinerU chunks，支持章节级断点恢复）",
                 "checkpoint_v2": checkpoint_v2 is not None,
                 "has_checkpoint": checkpoint_v2 is not None or ProjectManager.get_chunk_checkpoint(project_id) is not None
             }
