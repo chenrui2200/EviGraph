@@ -50,10 +50,8 @@
               {{ mineruMode ? '📊 分析模式' : '🔵 MinerU 标注' }}
             </button>
           </div>
-          <div class="pdf-nav" v-if="totalPages > 0">
-            <button class="nav-btn" @click="changePage(-1)" :disabled="currentPage <= 1">◀</button>
-            <span class="page-indicator">{{ currentPage }} / {{ totalPages }}</span>
-            <button class="nav-btn" @click="changePage(1)" :disabled="currentPage >= totalPages">▶</button>
+          <div class="pdf-page-count" v-if="totalPages > 0">
+            {{ totalPages }} 页
           </div>
         </div>
 
@@ -66,48 +64,57 @@
             <p class="pdf-empty-hint">分析过程中的条文标注将实时显示在此区域</p>
           </div>
 
-          <!-- PDF 渲染 + BBox叠加层 -->
-          <div v-if="pdfUrl" class="pdf-render-wrapper" ref="pdfRenderWrapper">
-            <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
+          <!-- 全量 PDF：每页一个 canvas + SVG 叠加层 -->
+          <div v-if="pdfUrl && renderedPages.length > 0" class="pdf-scroll-container">
+            <div
+              v-for="rp in renderedPages"
+              :key="rp.pageNum"
+              class="pdf-page-wrapper"
+              :data-page="rp.pageNum"
+            >
+              <canvas
+                :ref="el => setCanvasRef(el, rp.pageNum)"
+                class="pdf-canvas"
+              ></canvas>
 
-            <!-- SVG BBox 叠加层 -->
-            <svg
-              v-if="pdfUrl && currentPageAnnotations.length > 0"
-              class="bbox-overlay"
-              :viewBox="`0 0 ${pageWidth} ${pageHeight}`"
-              :style="overlayStyle">
-              <template v-for="ann in currentPageAnnotations" :key="ann.clauseId">
-                <!-- MinerU 模式 bbox -->
-                <rect
-                  v-if="ann.isMineru"
-                  :x="ann.bbox[0]"
-                  :y="ann.bbox[1]"
-                  :width="ann.bbox[2] - ann.bbox[0]"
-                  :height="ann.bbox[3] - ann.bbox[1]"
-                  class="bbox-rect bbox-mineru"
-                  :class="{ 'bbox-active': highlightedClauseId === ann.clauseId }"
-                  :style="{ stroke: categoryIdColor(ann.categoryId) }"
-                  @click="onMineruBboxClick(ann)"
-                />
-                <!-- LLM 分析模式 bbox -->
-                <rect
-                  v-else
-                  :x="ann.bbox[0]"
-                  :y="ann.bbox[1]"
-                  :width="ann.bbox[2] - ann.bbox[0]"
-                  :height="ann.bbox[3] - ann.bbox[1]"
-                  class="bbox-rect"
-                  :class="['bbox-' + ann.type, { 'bbox-active': highlightedClauseId === ann.clauseId }]"
-                  @click="onBboxClick(ann)"
-                />
-              </template>
-            </svg>
+              <!-- SVG BBox 叠加层（每个页面独立） -->
+              <svg
+                v-if="getPageAnnotations(rp.pageNum).length > 0"
+                class="bbox-overlay"
+                :viewBox="`0 0 ${rp.pageWidth} ${rp.pageHeight}`"
+                :style="{ width: rp.canvasWidth + 'px', height: rp.canvasHeight + 'px', top: '0', left: '0' }"
+              >
+                <template v-for="ann in getPageAnnotations(rp.pageNum)" :key="ann.clauseId">
+                  <rect
+                    v-if="ann.isMineru"
+                    :x="ann.bbox[0]"
+                    :y="ann.bbox[1]"
+                    :width="ann.bbox[2] - ann.bbox[0]"
+                    :height="ann.bbox[3] - ann.bbox[1]"
+                    class="bbox-rect bbox-mineru"
+                    :class="{ 'bbox-active': highlightedClauseId === ann.clauseId }"
+                    :style="{ stroke: categoryIdColor(ann.categoryId) }"
+                    @click="onMineruBboxClick(ann)"
+                  />
+                  <rect
+                    v-else
+                    :x="ann.bbox[0]"
+                    :y="ann.bbox[1]"
+                    :width="ann.bbox[2] - ann.bbox[0]"
+                    :height="ann.bbox[3] - ann.bbox[1]"
+                    class="bbox-rect"
+                    :class="['bbox-' + ann.type, { 'bbox-active': highlightedClauseId === ann.clauseId }]"
+                    @click="onBboxClick(ann)"
+                  />
+                </template>
+              </svg>
+            </div>
           </div>
 
           <!-- 加载状态 -->
           <div v-if="pdfLoading" class="pdf-loading">
             <div class="spinner"></div>
-            <span>加载中...</span>
+            <span>正在渲染全部 {{ totalPages }} 页...</span>
           </div>
         </div>
 
@@ -442,16 +449,15 @@ const taskId = ref(null)
 // PDF 渲染
 const pdfUrl = ref('')
 const pdfFileName = ref('')
-const pdfCanvas = ref(null)
+
 const pdfjsLib = ref(null)
 const viewerContainer = ref(null)
 const pdfLoading = ref(false)
-const currentPage = ref(1)
 const totalPages = ref(0)
-const pageWidth = ref(600)
-const pageHeight = ref(800)
 const pdfDoc = ref(null)
 const pdfDocUrl = ref('')
+const renderedPages = ref([])  // [{pageNum, pageWidth, pageHeight, canvasWidth, canvasHeight}]
+const pageCanvasMap = ref({}) // pageNum -> canvas element
 
 // BBox 标注
 const allAnnotations = ref([])
@@ -514,39 +520,42 @@ const statusLabel = computed(() => {
   return map[analysisStatus.value] || analysisStatus.value || '未知'
 })
 
-// 当前页的所有标注
-const currentPageAnnotations = computed(() => {
-  // LLM 分析模式的标注
-  const pageAnns = allAnnotations.value.filter(a => a.page === currentPage.value)
-
-  // MinerU 模式的布局标注
+// 页码 -> 标注列表 的缓存
+const pageAnnotationsCache = computed(() => {
+  const cache = {}
+  // LLM 分析模式标注
+  for (const ann of allAnnotations.value) {
+    if (!cache[ann.page]) cache[ann.page] = []
+    cache[ann.page].push(ann)
+  }
+  // MinerU 模式标注
   if (mineruMode.value && mineruChunks.value.length) {
-    const mineruPageAnns = mineruChunks.value
-      .filter(c => (c.page_idx || 0) + 1 === currentPage.value)
-      .map(c => ({
+    for (const c of mineruChunks.value) {
+      const pageNum = (c.page_idx || 0) + 1
+      if (!cache[pageNum]) cache[pageNum] = []
+      cache[pageNum].push({
         clauseId: c.chunk_id,
-        page: (c.page_idx || 0) + 1,
+        page: pageNum,
         bbox: c.bbox_viewport || c.bbox_pdf || [0, 0, 100, 50],
         type: c.type || 'text',
         categoryId: c.category_id || 1,
         isMineru: true
-      }))
-    return [...pageAnns, ...mineruPageAnns]
+      })
+    }
   }
-  return pageAnns
+  return cache
 })
 
-const overlayStyle = computed(() => {
-  if (!pdfCanvas.value) return {}
-  const canvas = pdfCanvas.value
-  return {
-    position: 'absolute',
-    top: '0',
-    left: '0',
-    width: canvas.width + 'px',
-    height: canvas.height + 'px'
+function getPageAnnotations(pageNum) {
+  return pageAnnotationsCache.value[pageNum] || []
+}
+
+// 设置 canvas ref（用于渲染时获取 canvas 元素）
+function setCanvasRef(el, pageNum) {
+  if (el) {
+    pageCanvasMap.value[pageNum] = el
   }
-})
+}
 
 const poolFilteredClauses = computed(() => {
   return analysisData.value?.clauses || []
@@ -591,7 +600,7 @@ function resetState() {
   pdfDoc.value = null
   pdfDocUrl.value = ''
   totalPages.value = 0
-  currentPage.value = 1
+  renderedPages.value = []
   mineruMode.value = false
   mineruChunks.value = []
   mineruSummary.value = null
@@ -745,16 +754,28 @@ async function initPdfJs() {
 async function loadPdf() {
   if (!pdfFileName.value || !pdfjsLib.value) return
   pdfLoading.value = true
+  renderedPages.value = []
+  pageCanvasMap.value = {}
   try {
-    const apiUrl = `${window.location.origin}/api/graph/project/${currentProjectId.value}/document/${encodeURIComponent(pdfFileName.value)}?t=${Date.now()}`
-    const baseUrl = apiUrl.replace(/\?t=\d+$/, '')
-    pdfUrl.value = apiUrl
+    const stableUrl = `${window.location.origin}/api/graph/project/${currentProjectId.value}/document/${encodeURIComponent(pdfFileName.value)}`
+    pdfUrl.value = stableUrl + `?t=${Date.now()}`
+
     await nextTick()
-    if (pdfDocUrl.value !== baseUrl) {
-      pdfDoc.value = null
-      pdfDocUrl.value = baseUrl
+
+    // 加载 PDF document
+    let pdf
+    if (pdfDoc.value && pdfDocUrl.value === stableUrl) {
+      pdf = pdfDoc.value
+    } else {
+      const loadingTask = pdfjsLib.value.getDocument(stableUrl)
+      pdf = await loadingTask.promise
+      pdfDoc.value = pdf
+      pdfDocUrl.value = stableUrl
+      totalPages.value = pdf.numPages
     }
-    await renderPdfPage(apiUrl, currentPage.value)
+
+    // 渲染所有页面
+    await renderAllPages(pdf)
   } catch (err) {
     console.error('loadPdf error:', err)
   } finally {
@@ -762,57 +783,44 @@ async function loadPdf() {
   }
 }
 
-async function renderPdfPage(pdfSource, pageNum) {
-  if (!pdfjsLib.value || !pdfCanvas.value) return
-  pdfLoading.value = true
-  try {
-    let pdf
-    const isUrl = typeof pdfSource === 'string'
-    const baseSource = isUrl ? pdfSource.replace(/\?t=\d+$/, '') : null
+async function renderAllPages(pdf) {
+  const containerWidth = viewerContainer.value?.clientWidth || 600
+  const pages = []
 
-    if (isUrl && pdfDoc.value && pdfDocUrl.value === baseSource) {
-      pdf = pdfDoc.value
-    } else {
-      const loadingTask = pdfjsLib.value.getDocument(
-        isUrl ? pdfSource : { data: new Uint8Array(pdfSource) }
-      )
-      pdf = await loadingTask.promise
-      if (isUrl) {
-        pdfDoc.value = pdf
-        pdfDocUrl.value = baseSource
-      }
-      totalPages.value = pdf.numPages
-    }
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i)
+    const unscaledViewport = page.getViewport({ scale: 1 })
+    const scale = (containerWidth - 20) / unscaledViewport.width
+    const viewport = page.getViewport({ scale })
 
-    if (pageNum < 1) pageNum = 1
-    if (pageNum > totalPages.value) pageNum = totalPages.value
-    currentPage.value = pageNum
+    pages.push({
+      pageNum: i,
+      pageWidth: unscaledViewport.width,
+      pageHeight: unscaledViewport.height,
+      canvasWidth: viewport.width,
+      canvasHeight: viewport.height
+    })
+  }
 
-    const page = await pdf.getPage(pageNum)
-    const canvas = pdfCanvas.value
-    const context = canvas.getContext('2d')
+  renderedPages.value = pages
+
+  // 等 canvas ref 绑定后再渲染
+  await nextTick()
+
+  for (const rp of pages) {
+    const canvas = pageCanvasMap.value[rp.pageNum]
+    if (!canvas) continue
+    const page = await pdf.getPage(rp.pageNum)
     const containerWidth = viewerContainer.value?.clientWidth || 600
     const unscaledViewport = page.getViewport({ scale: 1 })
     const scale = (containerWidth - 20) / unscaledViewport.width
     const viewport = page.getViewport({ scale })
 
-    pageWidth.value = unscaledViewport.width
-    pageHeight.value = unscaledViewport.height
     canvas.height = viewport.height
     canvas.width = viewport.width
-
+    const context = canvas.getContext('2d')
     await page.render({ canvasContext: context, viewport }).promise
-  } catch (err) {
-    console.error('PDF render error:', err)
-  } finally {
-    pdfLoading.value = false
   }
-}
-
-async function changePage(delta) {
-  const newPage = currentPage.value + delta
-  if (newPage < 1 || newPage > totalPages.value) return
-  await renderPdfPage(pdfUrl.value, newPage)
 }
 
 // ============================================================================
@@ -1003,8 +1011,8 @@ async function handleClauseClick(clause) {
   highlightedClauseId.value = clause.clause_id
 
   const loc = clause.pdf_location
-  if (loc?.page && loc.page !== currentPage.value) {
-    await renderPdfPage(pdfUrl.value, loc.page)
+  if (loc?.page) {
+    scrollToPage(loc.page)
   }
 }
 
@@ -1013,6 +1021,17 @@ function onBboxClick(ann) {
   const clause = analysisData.value?.clauses?.find(c => c.clause_id === ann.clauseId)
   if (clause) {
     expandedClauseId.value = clause.clause_id
+  }
+}
+
+function scrollToPage(pageNum) {
+  const wrapper = viewerContainer.value
+  if (!wrapper) return
+  const rp = renderedPages.value.find(p => p.pageNum === pageNum)
+  if (!rp) return
+  const pageEl = wrapper.querySelector(`[data-page="${pageNum}"]`)
+  if (pageEl) {
+    pageEl.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 }
 
@@ -1172,19 +1191,12 @@ function goToGraphBuild() {
 .pdf-toolbar-title { font-size: 13px; color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
 .pdf-placeholder { color: #9ca3af; }
 .pdf-toolbar-actions { display: flex; align-items: center; gap: 6px; }
-.pdf-nav { display: flex; align-items: center; gap: 6px; }
-.nav-btn { background: #ffffff; border: 1px solid #d0d7de; color: #1a1a2e; width: 26px; height: 26px; border-radius: 4px; cursor: pointer; font-size: 11px; }
-.nav-btn:hover:not(:disabled) { background: #f0f0f0; }
-.nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.page-indicator { font-size: 12px; color: #6b7280; min-width: 60px; text-align: center; }
+.pdf-page-count { font-size: 12px; color: #6b7280; min-width: 40px; text-align: right; }
 
 .pdf-body {
   flex: 1;
   overflow-y: auto;
   position: relative;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
   padding: 10px;
 }
 .pdf-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 12px; color: #9ca3af; }
@@ -1192,10 +1204,11 @@ function goToGraphBuild() {
 .pdf-empty p { margin: 0; font-size: 14px; }
 .pdf-empty-hint { font-size: 12px; color: #9ca3af; }
 
-.pdf-render-wrapper { position: relative; display: inline-block; }
+.pdf-scroll-container { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.pdf-page-wrapper { position: relative; display: inline-block; }
 .pdf-canvas { display: block; max-width: 100%; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
 
-.bbox-overlay { pointer-events: auto; overflow: visible; }
+.bbox-overlay { position: absolute; pointer-events: auto; overflow: visible; }
 .bbox-rect { fill: transparent; stroke-width: 2; cursor: pointer; transition: all 0.2s; }
 .bbox-clause { stroke: #ea580c; fill: #fff7ed; }
 .bbox-element { stroke: #2563eb; fill: #eff6ff; }

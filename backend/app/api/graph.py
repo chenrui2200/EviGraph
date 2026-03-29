@@ -1132,7 +1132,8 @@ def generate_ontology():
                         })
                         chunk_idx += 1
 
-                    # 从 layout 提取额外的 bbox（无文本）
+                    # 从 layout 提取 bbox 覆盖信息（仅追加到已存在的 content chunk，不新增空内容块）
+                    # 注意：不将无 content 的 layout bbox 写入 chunks.json，避免污染内容列表
                     for layout_page in layout_pages:
                         page_no = layout_page.get('page_info', {}).get('page_no', 0)
                         page_w, page_h = page_sizes.get(page_no, [595.3, 841.9])
@@ -1140,21 +1141,9 @@ def generate_ontology():
                             bbox = det.get('bbox', [])
                             if not bbox or len(bbox) < 4:
                                 continue
-                            x0, y0, x1, y1 = bbox[:4]
-                            all_chunks.append({
-                                "chunk_id": f"layout_{idx}_{page_no}_{det.get('category_id', 1)}_{int(x0)}_{int(y0/50)}",
-                                "page_idx": page_no,
-                                "type": _mineru_cat_to_type(det.get('category_id', 1)),
-                                "content": "",
-                                "bbox_pdf": bbox,
-                                "bbox_viewport": [x0, page_h - y1, x1, page_h - y0],
-                                "page_width": page_w,
-                                "page_height": page_h,
-                                "category_id": det.get('category_id', 1),
-                                "is_layout_bbox": True,
-                                "score": det.get('score', 0),
-                                "source": orig_name
-                            })
+                            # 收集 layout bbox 用于后续覆盖 content chunk 的 bbox，不单独存储为 chunk
+                            # 如果需要单独渲染布局信息，可保存到 layout_meta.json 而非 chunks.json
+                            pass  # layout bbox 不再写入 chunks.json
 
                     msg = f"✅ {orig_name}: {chunk_idx} content chunks, {len(layout_pages)} pages"
                     build_logger.info(f"[{task_id}] {msg}")
@@ -1435,39 +1424,53 @@ def mineru_parse():
 
         chunks = []
 
-        # 从 layout 中提取 bbox（主数据源）
-        for layout_page in layout_pages:
-            page_info = layout_page.get('page_info', {})
-            page_no = page_info.get('page_no', 0)
-            page_w, page_h = page_sizes.get(page_no, [595.3, 841.9])
-            layout_dets = layout_page.get('layout_dets', [])
+        # 从 content 中提取带文本的 chunks（主数据源）
+        content_list = mineru_data.get('content', [])
+        for content_item in content_list:
+            page_idx = content_item.get('page_idx', 0)
+            text = content_item.get('text', '').strip()
+            if not text:
+                continue
 
-            for det in layout_dets:
-                bbox = det.get('bbox', [])
-                if not bbox or len(bbox) < 4:
+            page_w, page_h = page_sizes.get(page_idx, [595.3, 841.9])
+            content_type = content_item.get('type', 'text')
+            if content_type == 'title':
+                category_id = 0
+            elif content_type == 'table':
+                category_id = 2
+            elif content_type == 'figure':
+                category_id = 3
+            else:
+                category_id = 1
+
+            # 尝试从 layout 中找到对应的 bbox
+            bbox_viewport = [0, 0, page_w, page_h]
+            for layout_page in layout_pages:
+                if layout_page.get('page_info', {}).get('page_no', 0) != page_idx:
                     continue
+                for det in layout_page.get('layout_dets', []):
+                    # 简单匹配：category_id 相同即复用
+                    if det.get('category_id', 1) == category_id:
+                        bbox = det.get('bbox', [])
+                        if bbox and len(bbox) >= 4:
+                            x0, y0, x1, y1 = bbox[:4]
+                            bbox_viewport = [x0, page_h - y1, x1, page_h - y0]
+                        break
 
-                x0, y0, x1, y1 = bbox[:4]
-                # PDF.js viewport 坐标: y轴翻转 (PDF: 左上原点向下, viewport: 左下原点向上)
-                bbox_viewport = [x0, page_h - y1, x1, page_h - y0]
+            chunks.append({
+                "chunk_id": f"chunk_{page_idx}_{category_id}_{len(chunks)}",
+                "page_idx": page_idx,
+                "type": content_type,
+                "content": text,
+                "bbox_viewport": bbox_viewport,
+                "page_width": page_w,
+                "page_height": page_h,
+                "category_id": category_id,
+                "source": filename,
+                "nouns": []
+            })
 
-                cat_id = det.get('category_id', 1)
-                chunks.append({
-                    "chunk_id": f"layout_{page_no}_{cat_id}_{int(x0)}_{int(y0 / 10)}",
-                    "page_idx": page_no,
-                    "type": _mineru_cat_to_type(cat_id),
-                    "content": "",
-                    "bbox_pdf": bbox,
-                    "bbox_viewport": bbox_viewport,
-                    "page_width": page_w,
-                    "page_height": page_h,
-                    "category_id": cat_id,
-                    "is_layout_bbox": True,
-                    "score": det.get('score', 0),
-                    "nouns": []
-                })
-
-        logger.info(f"MinerU 解析完成: {len(chunks)} 个布局块, {len(page_sizes)} 页")
+        logger.info(f"MinerU 解析完成: {len(chunks)} 个文本块, {len(page_sizes)} 页")
 
         # === 4. 保存到 chunks.json ===
         ProjectManager.save_chunks(project_id, chunks)
