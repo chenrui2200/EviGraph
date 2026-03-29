@@ -628,7 +628,6 @@ const poolFilteredClauses = computed(() => {
 // ============================================================================
 
 onMounted(async () => {
-  console.log('[onMounted] projectId=', props.projectId)
   await initPdfJs()
 
   if (props.projectId === 'new') {
@@ -710,7 +709,6 @@ async function handleNewProject() {
 }
 
 async function loadExistingProject() {
-  console.log('[loadExistingProject] START')
   try {
     const res = await getProject(currentProjectId.value)
     if (!res.success) {
