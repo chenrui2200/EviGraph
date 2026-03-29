@@ -2407,7 +2407,18 @@ def update_clause_entity(project_id: str):
         # 更新字段（只更新提供的字段）
         updated_clause = clauses[target_idx]
         if 'terms' in data:
-            updated_clause['terms'] = data['terms']
+            # 合并: 前端传字符串 → 保留原有 definition；前端传 dict → 用新的
+            existing_terms = {t.get('term_name', '') if isinstance(t, dict) else t: t
+                              for t in (updated_clause.get('terms') or [])}
+            merged_terms = []
+            for t in data['terms']:
+                if isinstance(t, dict):
+                    merged_terms.append(t)
+                elif t in existing_terms:
+                    merged_terms.append(existing_terms[t])
+                else:
+                    merged_terms.append({'term_name': t, 'definition': ''})
+            updated_clause['terms'] = merged_terms
             updated_clause['conditions'] = data.get('conditions', updated_clause.get('conditions', []))
             updated_clause['actions'] = data.get('actions', updated_clause.get('actions', []))
             updated_clause['components'] = data.get('components', updated_clause.get('components', []))
@@ -2417,8 +2428,15 @@ def update_clause_entity(project_id: str):
                 if field in data:
                     updated_clause[field] = data[field]
 
-        # 保存更新
+        # 保存 JSON 更新
         ProjectManager.save_intelligent_chunks(project_id, chunks)
+
+        # 同步 Term 实体到 Neo4j
+        if 'terms' in data and data['terms']:
+            project = ProjectManager.get_project(project_id)
+            if project and project.graph_id:
+                storage = _get_storage()
+                storage.sync_term_entities(project.graph_id, clause_id, updated_clause['terms'])
 
         return jsonify({
             "success": True,

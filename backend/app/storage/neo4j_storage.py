@@ -1332,6 +1332,7 @@ class Neo4jStorage(GraphStorage):
             "name": props.get("name", ""),
             "labels": [l for l in labels if l != "Entity"] if labels else [],
             "summary": props.get("summary", ""),
+            "definition": props.get("definition", ""),
             "attributes": attributes,
             "created_at": props.get("created_at"),
         }
@@ -2377,6 +2378,36 @@ class Neo4jStorage(GraphStorage):
             logger.debug(f"[hierarchical] Created DEFINES relation: {term_uuid} -> {clause_uuid}")
         except Exception as e:
             logger.debug(f"Failed to create defines relation: {e}")
+
+    def sync_term_entities(self, graph_id: str, clause_id: str, terms: List[Dict]):
+        """同步 Clause 的术语实体到 Neo4j（创建 Term 节点 + DEFINES 边）
+
+        terms 格式: [{"term_name": "xxx", "definition": "yyy"}, ...]
+        """
+        if not terms:
+            return
+
+        # 计算 Clause Entity UUID
+        clause_name = f"条款{clause_id}"
+        clause_seed = f"{graph_id}:{clause_name}".encode('utf-8')
+        clause_uuid = str(uuid.UUID(hashlib.md5(clause_seed).hexdigest()))
+
+        def _do_sync(tx):
+            for term in terms:
+                term_name = term.get('term_name', '')
+                definition = term.get('definition', '')
+                if not term_name:
+                    continue
+                # 创建 Term 节点
+                term_uuid = self._create_term_entity(
+                    tx, graph_id, clause_uuid, term_name, definition, clause_id
+                )
+                # 创建 DEFINES 关系
+                self._create_defines_relation(tx, term_uuid, clause_uuid)
+                logger.info(f"[sync_terms] Synced term: {term_name} -> clause {clause_id}")
+
+        with self._driver.session() as session:
+            session.execute_write(_do_sync)
 
     def _create_condition_entity(self, tx, graph_id: str, clause_uuid: str, condition_name: str):
         """创建 Condition（前提条件）实体"""

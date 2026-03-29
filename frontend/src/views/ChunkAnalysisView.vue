@@ -201,7 +201,7 @@
                 <span class="chunk-page">P{{ (chunk.page_idx || 0) + 1 }}</span>
                 <span class="chunk-id">{{ chunk.chunk_id }}</span>
               </div>
-              <div class="chunk-item-content">{{ chunk.content?.substring(0, 120) }}{{ (chunk.content?.length || 0) > 120 ? '...' : '' }}</div>
+              <div class="chunk-item-content">{{ chunk.content }}</div>
             </div>
           </div>
 
@@ -309,8 +309,19 @@
                     <div class="entity-row" v-if="clause.terms?.length || editingClauseId === clause.clause_id">
                       <span class="entity-label term-label">🔵 Term</span>
                       <div class="entity-tags">
-                        <span v-for="(t, i) in (editingClauseId === clause.clause_id ? editingTerms : clause.terms)"
-                              :key="i" class="entity-tag term-tag">{{ typeof t === 'string' ? t : t.term }}</span>
+                        <template v-for="(t, i) in (editingClauseId === clause.clause_id ? editingTerms : clause.terms)" :key="i">
+                          <span v-if="typeof t === 'string'" class="entity-tag term-tag">{{ t }}</span>
+                          <span v-else class="term-item" @click.stop="toggleTermDef(t.term_name)">
+                            <span class="entity-tag term-tag" :class="{ active: expandedTermDefs.has(t.term_name) }">
+                              {{ t.term_name }}
+                            </span>
+                            <span v-if="t.definition" class="term-def-arrow">{{ expandedTermDefs.has(t.term_name) ? '▲' : '▼' }}</span>
+                            <div v-if="expandedTermDefs.has(t.term_name) && t.definition" class="term-definition">
+                              <span class="def-connector">(解释)</span>
+                              {{ t.definition }}
+                            </div>
+                          </span>
+                        </template>
                       </div>
                       <button class="edit-btn" @click.stop="startEditEntity(clause, 'terms')">
                         {{ editingClauseId === clause.clause_id ? '取消' : '编辑' }}
@@ -512,6 +523,7 @@ const editingClauseId = ref(null)
 const editingField = ref('')
 const editingValue = ref('')
 const editingTerms = ref([])
+const expandedTermDefs = ref(new Set())  // 展开的术语定义
 const editingConditions = ref([])
 const editingActions = ref([])
 
@@ -1179,7 +1191,7 @@ function startEditEntity(clause, field) {
 
   if (field === 'terms') {
     editingTerms.value = clause.terms || []
-    editingValue.value = (clause.terms || []).map(t => typeof t === 'string' ? t : t.term).join('，')
+    editingValue.value = (clause.terms || []).map(t => typeof t === 'string' ? t : t.term_name).join('，')
   } else if (field === 'conditions') {
     editingConditions.value = clause.conditions || []
     editingValue.value = (clause.conditions || []).join('，')
@@ -1195,7 +1207,10 @@ async function saveEntity(clauseId, field) {
     const res = await updateClauseEntity(currentProjectId.value, { clause_id: clauseId, [field]: value })
     if (res.success) {
       const clause = analysisData.value?.clauses?.find(c => c.clause_id === clauseId)
-      if (clause) clause[field] = value
+      // 使用 API 返回的完整数据（含 definition 等完整字段）
+      if (clause && res.data) {
+        clause[field] = res.data[field]
+      }
       editingClauseId.value = null
       editingField.value = ''
       editingValue.value = ''
@@ -1208,6 +1223,16 @@ async function saveEntity(clauseId, field) {
   }
 }
 
+function toggleTermDef(termName) {
+  if (expandedTermDefs.value.has(termName)) {
+    expandedTermDefs.value.delete(termName)
+  } else {
+    expandedTermDefs.value.add(termName)
+  }
+  // 触发响应式更新
+  expandedTermDefs.value = new Set(expandedTermDefs.value)
+}
+
 // ============================================================================
 // 知识实体池
 // ============================================================================
@@ -1215,14 +1240,14 @@ async function saveEntity(clauseId, field) {
 function getEntityList(clause, tab) {
   if (tab === 'all') {
     const all = [
-      ...(clause.terms || []).map(t => typeof t === 'string' ? t : t.term),
+      ...(clause.terms || []).map(t => typeof t === 'string' ? t : t.term_name),
       ...(clause.conditions || []),
       ...(clause.actions || []),
       ...(clause.components || [])
     ]
     return [...new Set(all)].slice(0, 20)
   }
-  if (tab === 'terms') return (clause.terms || []).map(t => typeof t === 'string' ? t : t.term)
+  if (tab === 'terms') return (clause.terms || []).map(t => typeof t === 'string' ? t : t.term_name)
   return clause[tab] || []
 }
 
@@ -1435,7 +1460,7 @@ function goToGraphBuild() {
 .chunk-block-type { padding: 1px 6px; border-radius: 4px; font-size: 10px; color: #6b7280; background: #f3f4f6; }
 .chunk-page { font-size: 10px; color: #9ca3af; }
 .chunk-id { font-size: 9px; color: #d1d5db; font-family: monospace; margin-left: auto; }
-.chunk-item-content { font-size: 11px; color: #6b7280; line-height: 1.4; }
+.chunk-item-content { font-size: 11px; color: #6b7280; line-height: 1.4; white-space: pre-wrap; word-break: break-all; }
 
 /* 选中块详情 */
 .mineru-chunk-detail { border-top: 1px solid #e0e0e0; padding: 10px 16px; background: #fafafa; max-height: 200px; overflow-y: auto; }
@@ -1493,16 +1518,22 @@ function goToGraphBuild() {
 .action-label { color: #2563eb; }
 .comp-label { color: #9333ea; }
 
-.entity-tags { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }
+.entity-tags { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; align-items: center; }
 .entity-tag { padding: 2px 7px; border-radius: 10px; font-size: 11px; cursor: pointer; transition: all 0.15s; }
 .term-tag { background: #dcfce7; color: #16a34a; border: 1px solid #bbf7d0; }
 .term-tag:hover { background: #bbf7d0; }
+.term-tag.active { background: #16a34a; color: #fff; }
 .cond-tag { background: #fef9c3; color: #ca8a04; border: 1px solid #fde68a; }
 .cond-tag:hover { background: #fde68a; }
 .action-tag { background: #dbeafe; color: #2563eb; border: 1px solid #bfdbfe; }
 .action-tag:hover { background: #bfdbfe; }
 .comp-tag { background: #f3e8ff; color: #9333ea; border: 1px solid #e9d5ff; }
 .comp-tag:hover { background: #e9d5ff; }
+
+.term-item { display: flex; flex-direction: column; gap: 2px; }
+.term-def-arrow { font-size: 8px; color: #16a34a; text-align: center; line-height: 1; margin-top: -2px; }
+.term-definition { font-size: 11px; color: #374151; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 4px 8px; margin-top: 2px; line-height: 1.4; }
+.def-connector { color: #16a34a; font-weight: 600; margin-right: 4px; }
 
 .edit-btn { background: none; border: 1px solid #d0d7de; color: #6b7280; padding: 1px 6px; border-radius: 4px; cursor: pointer; font-size: 10px; flex-shrink: 0; }
 .edit-btn:hover { background: #f0f0f0; color: #1a1a2e; }
