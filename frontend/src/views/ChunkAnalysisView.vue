@@ -1280,7 +1280,7 @@ function logClass(msg) {
 }
 
 function goToGraphBuild() {
-  router.push({ name: 'Process', params: { projectId: currentProjectId.value } })
+  router.push({ name: 'GraphBuild', params: { projectId: currentProjectId.value } })
 }
 </script>
 
@@ -1463,7 +1463,7 @@ function goToGraphBuild() {
 .chunk-item-content { font-size: 11px; color: #6b7280; line-height: 1.4; white-space: pre-wrap; word-break: break-all; }
 
 /* 选中块详情 */
-.mineru-chunk-detail { border-top: 1px solid #e0e0e0; padding: 10px 16px; background: #fafafa; max-height: 200px; overflow-y: auto; }
+.mineru-chunk-detail { border-top: 1px solid #e0e0e0; padding: 10px 16px; background: #fafafa; overflow-y: auto; }
 .detail-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .detail-type { padding: 2px 8px; background: #667eea22; color: #667eea; border-radius: 8px; font-size: 11px; font-weight: 600; }
 .detail-block-type { padding: 2px 8px; background: #f3f4f6; color: #6b7280; border-radius: 8px; font-size: 11px; }

@@ -225,6 +225,18 @@ export function getChunkAnalysis(projectId) {
 }
 
 /**
+ * 检查项目是否存在 intelligent_chunks.json
+ * @param {String} projectId - 项目ID
+ * @returns {Promise}
+ */
+export function checkHasIntelligentChunks(projectId) {
+  return service({
+    url: `/api/graph/chunk/${projectId}/has_intelligent_chunks`,
+    method: 'get'
+  })
+}
+
+/**
  * 启动/恢复智能Chunks标注分析任务
  * @param {Object} data - Contains project_id, reset (bool)
  * @returns {Promise}

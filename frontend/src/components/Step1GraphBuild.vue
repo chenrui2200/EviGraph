@@ -1,126 +1,16 @@
 <template>
   <div class="workbench-panel">
     <div class="scroll-container">
-      <!-- Step 01: Chunks Analysis -->
+      <!-- Step 01: Graph Build -->
       <div class="step-card" :class="{ 'active': currentPhase === 0, 'completed': currentPhase > 0 }">
         <div class="card-header">
           <div class="step-info">
             <span class="step-num">01</span>
-            <span class="step-title">智能Chunks标注分析</span>
-          </div>
-          <div class="step-status">
-            <span v-if="currentPhase > 0" class="badge success">已完成</span>
-            <span v-else-if="currentPhase === 0" class="badge processing">分析中</span>
-            <span v-else class="badge pending">等待中</span>
-          </div>
-        </div>
-
-        <!-- 重置按钮 -->
-        <div v-if="currentPhase > 0 || (currentPhase === 0 && projectData?.ontology)" class="reset-action-bar">
-          <button class="reset-btn" @click="handleReset" title="重置并重新分析">
-            ↻ 重置
-          </button>
-        </div>
-
-        <div class="card-content">
-          <p class="description">
-            系统自动进行多层级语义分块，提取条文、公式、表格等结构化信息，构建工程规范本体。
-          </p>
-
-          <!-- Loading / Progress -->
-          <div v-if="currentPhase === 0 && ontologyProgress" class="progress-section">
-            <div class="spinner-sm"></div>
-            <span>{{ ontologyProgress.message || '正在分析文档...' }}</span>
-          </div>
-
-          <!-- Detail Overlay -->
-          <div v-if="selectedOntologyItem" class="ontology-detail-overlay">
-            <div class="detail-header">
-               <div class="detail-title-group">
-                  <span class="detail-type-badge">{{ selectedOntologyItem.itemType === 'entity' ? 'ENTITY' : 'RELATION' }}</span>
-                  <span class="detail-name">{{ selectedOntologyItem.name }}</span>
-               </div>
-               <button class="close-btn" @click="selectedOntologyItem = null">×</button>
-            </div>
-            <div class="detail-body">
-               <div class="detail-desc">{{ selectedOntologyItem.description }}</div>
-               
-               <!-- Attributes -->
-               <div class="detail-section" v-if="selectedOntologyItem.attributes?.length">
-                  <span class="section-label">ATTRIBUTES</span>
-                  <div class="attr-list">
-                     <div v-for="attr in selectedOntologyItem.attributes" :key="attr.name" class="attr-item">
-                        <span class="attr-name">{{ attr.name }}</span>
-                        <span class="attr-type">({{ attr.type }})</span>
-                        <span class="attr-desc">{{ attr.description }}</span>
-                     </div>
-                  </div>
-               </div>
-
-               <!-- Examples (Entity) -->
-               <div class="detail-section" v-if="selectedOntologyItem.examples?.length">
-                  <span class="section-label">EXAMPLES</span>
-                  <div class="example-list">
-                     <span v-for="ex in selectedOntologyItem.examples" :key="ex" class="example-tag">{{ ex }}</span>
-                  </div>
-               </div>
-
-               <!-- Source/Target (Relation) -->
-               <div class="detail-section" v-if="selectedOntologyItem.source_targets?.length">
-                  <span class="section-label">CONNECTIONS</span>
-                  <div class="conn-list">
-                     <div v-for="(conn, idx) in selectedOntologyItem.source_targets" :key="idx" class="conn-item">
-                        <span class="conn-node">{{ conn.source }}</span>
-                        <span class="conn-arrow">→</span>
-                        <span class="conn-node">{{ conn.target }}</span>
-                     </div>
-                  </div>
-               </div>
-            </div>
-          </div>
-
-          <!-- Generated Entity Tags -->
-          <div v-if="projectData?.ontology?.entity_types" class="tags-container" :class="{ 'dimmed': selectedOntologyItem }">
-            <span class="tag-label">已生成的实体类型</span>
-            <div class="tags-list">
-              <span
-                v-for="entity in projectData.ontology.entity_types"
-                :key="entity.name"
-                class="entity-tag clickable"
-                @click="selectOntologyItem(entity, 'entity')"
-              >
-                {{ entity.name }}
-              </span>
-            </div>
-          </div>
-
-          <!-- Generated Relation Tags -->
-          <div v-if="projectData?.ontology?.edge_types" class="tags-container" :class="{ 'dimmed': selectedOntologyItem }">
-            <span class="tag-label">已生成的关系类型</span>
-            <div class="tags-list">
-              <span
-                v-for="rel in projectData.ontology.edge_types"
-                :key="rel.name"
-                class="entity-tag clickable"
-                @click="selectOntologyItem(rel, 'relation')"
-              >
-                {{ rel.name }}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Step 02: Graph Build -->
-      <div class="step-card" :class="{ 'active': currentPhase === 1, 'completed': currentPhase > 1 }">
-        <div class="card-header">
-          <div class="step-info">
-            <span class="step-num">02</span>
             <span class="step-title">知识图谱构建 (GraphRAG)</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase > 1" class="badge success">已完成</span>
-            <div v-else-if="currentPhase === 1" class="status-with-action">
+            <span v-if="currentPhase > 0" class="badge success">已完成</span>
+            <div v-else-if="currentPhase === 0 && buildProgress" class="status-with-action">
               <span class="badge processing">{{ buildProgress?.progress || 0 }}%</span>
             </div>
             <div v-else class="badge pending">等待中</div>
@@ -128,7 +18,7 @@
         </div>
 
         <!-- 重置按钮 -->
-        <div v-if="currentPhase > 0" class="reset-action-bar">
+        <div v-if="currentPhase > 0 || buildProgress" class="reset-action-bar">
           <button class="reset-btn" @click="handleReset" title="重置并重新构建">
             ↻ 重置
           </button>
@@ -138,6 +28,15 @@
           <p class="description">
             基于多层级分块结果，系统会自动对文档进行切片，并调用 Neo4j 构建知识图谱，提取实体和关系，形成记忆摘要。
           </p>
+
+          <!-- 启动构建按钮 -->
+          <button
+            v-if="currentPhase === 0 && !buildProgress"
+            class="action-btn start-build-btn"
+            @click="emit('start-build')"
+          >
+            ▶ 开始构建图谱
+          </button>
 
           <!-- Stats Cards -->
           <div class="stats-grid">
@@ -157,15 +56,15 @@
         </div>
       </div>
 
-      <!-- Step 03: Knowledge Recall Hit Test -->
-      <div class="step-card" :class="{ 'active': currentPhase === 2, 'completed': currentPhase >= 2 }">
+      <!-- Step 02: Knowledge Recall Hit Test -->
+      <div class="step-card" :class="{ 'active': currentPhase === 1, 'completed': currentPhase >= 1 }">
         <div class="card-header">
           <div class="step-info">
-            <span class="step-num">03</span>
+            <span class="step-num">02</span>
             <span class="step-title">知识召回命中测试 (Hit Test)</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase >= 2" class="badge accent">就绪</span>
+            <span v-if="currentPhase >= 1" class="badge accent">就绪</span>
             <span v-else class="badge pending">等待中</span>
           </div>
         </div>
@@ -175,7 +74,7 @@
           <p class="description">图谱构建已完成。建议通过视觉化的命中测试验证知识库的召回能力和关联结构。</p>
 
           <button
-            v-if="currentPhase >= 2"
+            v-if="currentPhase >= 1"
             class="action-btn hit-test-btn"
             @click="router.push({ name: 'HitTest', params: { projectId: projectData.project_id } })"
           >
@@ -183,9 +82,9 @@
           </button>
 
           <button
-            v-if="currentPhase >= 2"
-            class="action-btn next-btn"
-            style="margin-top: 12px; background: #fff; border: 1px solid #000; color: #000;"
+            v-if="currentPhase >= 1"
+            class="action-btn"
+            style="background: #fff; border: 1px solid #000; color: #000;"
             @click="router.push({ name: 'AiQa', params: { id: projectData.project_id } })"
           >
             直接创建 AI 应用 ➝
@@ -213,156 +112,27 @@
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { createSimulation } from '../api/simulation'
-import { searchGraph } from '../api/graph'
 
 const router = useRouter()
 
 const props = defineProps({
   currentPhase: { type: Number, default: 0 },
   projectData: Object,
-  ontologyProgress: Object,
   buildProgress: Object,
   graphData: Object,
   systemLogs: { type: Array, default: () => [] }
 })
 
-const emit = defineEmits(['next-step', 'reset-build', 'reset-chunk'])
+const emit = defineEmits(['next-step', 'reset-build', 'start-build'])
 
 const handleReset = () => {
-  const phase = props.currentPhase === 0 ? 'Chunks 标注分析' : '知识图谱构建'
-  if (confirm(`确定要重置"${phase}"并重新开始吗？`)) {
-    if (props.currentPhase === 0) {
-      emit('reset-chunk')
-    } else {
-      emit('reset-build')
-    }
+  if (confirm('确定要重置"知识图谱构建"并重新开始吗？')) {
+    emit('reset-build')
   }
 }
 
-const selectedOntologyItem = ref(null)
 const logContent = ref(null)
 const creatingSimulation = ref(false)
-
-// Hit Test state
-const hitTestQuery = ref('')
-const hitTestLoading = ref(false)
-const hitTestResults = ref(null)
-
-const runHitTest = async () => {
-  if (!hitTestQuery.value.trim() || !props.projectData?.graph_id) return
-
-  hitTestLoading.value = true
-  try {
-    const response = await searchGraph({
-      graph_id: props.projectData.graph_id,
-      query: hitTestQuery.value,
-      limit: 10
-    })
-
-    if (response.success) {
-      hitTestResults.value = response.data
-    }
-  } catch (err) {
-    console.error('Hit test error:', err)
-  } finally {
-    hitTestLoading.value = false
-  }
-}
-
-const parseFactText = (factStr) => {
-  if (!factStr) return { content: '', source: '', page: null, bbox: null }
-
-  // Handle object format from backend
-  if (typeof factStr === 'object') {
-    return {
-      content: factStr.text || '',
-      source: factStr.source || '',
-      page: factStr.page,
-      bbox: factStr.bbox
-    }
-  }
-
-  // Handle string format with regex
-  const sourceMatch = factStr.match(/\[Source: [^\]]+\]$/)
-  if (sourceMatch) {
-    const source = sourceMatch[0].replace('[Source: ', '').replace(']', '')
-    const content = factStr.substring(0, sourceMatch.index).trim()
-    return { content, source, page: null, bbox: null }
-  }
-  return { content: factStr, source: '', page: null, bbox: null }
-}
-
-const handleFinalize = async () => {
-  if (!props.projectData?.project_id || !props.projectData?.graph_id) {
-    console.error('Missing project or graph information')
-    return
-  }
-
-  creatingSimulation.value = true
-  try {
-    // Create a default simulation to enable the Interaction/Report Agent
-    const res = await createSimulation({
-      project_id: props.projectData.project_id,
-      graph_id: props.projectData.graph_id,
-      enable_twitter: true,
-      enable_reddit: true
-    })
-
-    if (res.success && res.data?.simulation_id) {
-      // Emit next-step with simulationId to MainView
-      emit('next-step', { simulationId: res.data.simulation_id })
-    } else {
-      console.error('Failed to create simulation:', res.error)
-      // Fallback: just go to next step without simulationId
-      emit('next-step')
-    }
-  } catch (err) {
-    console.error('Simulation creation error:', err)
-    emit('next-step')
-  } finally {
-    creatingSimulation.value = false
-  }
-}
-
-// Enter environment setup - create simulation and navigate
-const handleEnterEnvSetup = async () => {
-  if (!props.projectData?.project_id || !props.projectData?.graph_id) {
-    console.error('Missing project or graph information')
-    return
-  }
-  
-  creatingSimulation.value = true
-  
-  try {
-    const res = await createSimulation({
-      project_id: props.projectData.project_id,
-      graph_id: props.projectData.graph_id,
-      enable_twitter: true,
-      enable_reddit: true
-    })
-    
-    if (res.success && res.data?.simulation_id) {
-      // Navigate to simulation page
-      router.push({
-        name: 'Simulation',
-        params: { simulationId: res.data.simulation_id }
-      })
-    } else {
-      console.error('Failed to create simulation:', res.error)
-      alert('Failed to create simulation: ' + (res.error || 'Unknown error'))
-    }
-  } catch (err) {
-    console.error('Simulation creation exception:', err)
-    alert('Simulation creation exception: ' + err.message)
-  } finally {
-    creatingSimulation.value = false
-  }
-}
-
-const selectOntologyItem = (item, type) => {
-  selectedOntologyItem.value = { ...item, itemType: type }
-}
 
 const graphStats = computed(() => {
   const nodes = props.graphData?.node_count || props.graphData?.nodes?.length || 0
@@ -508,213 +278,7 @@ watch(() => props.systemLogs.length, () => {
   margin-bottom: 16px;
 }
 
-/* Step 01 Tags */
-.tags-container {
-  margin-top: 12px;
-  transition: opacity 0.3s;
-}
-
-.tags-container.dimmed {
-    opacity: 0.3;
-    pointer-events: none;
-}
-
-.tag-label {
-  display: block;
-  font-size: 10px;
-  color: #AAA;
-  margin-bottom: 8px;
-  font-weight: 600;
-}
-
-.tags-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.entity-tag {
-  background: #F5F5F5;
-  border: 1px solid #EEE;
-  padding: 4px 10px;
-  border-radius: 4px;
-  font-size: 11px;
-  color: #333;
-  font-family: 'JetBrains Mono', monospace;
-  transition: all 0.2s;
-}
-
-.entity-tag.clickable {
-    cursor: pointer;
-}
-
-.entity-tag.clickable:hover {
-    background: #E0E0E0;
-    border-color: #CCC;
-}
-
-/* Ontology Detail Overlay */
-.ontology-detail-overlay {
-    position: absolute;
-    top: 60px; /* Below header roughly */
-    left: 20px;
-    right: 20px;
-    bottom: 20px;
-    background: rgba(255, 255, 255, 0.98);
-    backdrop-filter: blur(4px);
-    z-index: 10;
-    border: 1px solid #EAEAEA;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.05);
-    border-radius: 6px;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    animation: fadeIn 0.2s ease-out;
-}
-
-@keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
-
-.detail-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 16px;
-    border-bottom: 1px solid #EAEAEA;
-    background: #FAFAFA;
-}
-
-.detail-title-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.detail-type-badge {
-    font-size: 9px;
-    font-weight: 700;
-    color: #FFF;
-    background: #000;
-    padding: 2px 6px;
-    border-radius: 2px;
-    text-transform: uppercase;
-}
-
-.detail-name {
-    font-size: 14px;
-    font-weight: 700;
-    font-family: 'JetBrains Mono', monospace;
-}
-
-.close-btn {
-    background: none;
-    border: none;
-    font-size: 18px;
-    color: #999;
-    cursor: pointer;
-    line-height: 1;
-}
-
-.close-btn:hover {
-    color: #333;
-}
-
-.detail-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: 16px;
-}
-
-.detail-desc {
-    font-size: 12px;
-    color: #444;
-    line-height: 1.5;
-    margin-bottom: 16px;
-    padding-bottom: 12px;
-    border-bottom: 1px dashed #EAEAEA;
-}
-
-.detail-section {
-    margin-bottom: 16px;
-}
-
-.section-label {
-    display: block;
-    font-size: 10px;
-    font-weight: 600;
-    color: #AAA;
-    margin-bottom: 8px;
-}
-
-.attr-list, .conn-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-
-.attr-item {
-    font-size: 11px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    align-items: baseline;
-    padding: 4px;
-    background: #F9F9F9;
-    border-radius: 4px;
-}
-
-.attr-name {
-    font-family: 'JetBrains Mono', monospace;
-    font-weight: 600;
-    color: #000;
-}
-
-.attr-type {
-    color: #999;
-    font-size: 10px;
-}
-
-.attr-desc {
-    color: #555;
-    flex: 1;
-    min-width: 150px;
-}
-
-.example-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-
-.example-tag {
-    font-size: 11px;
-    background: #FFF;
-    border: 1px solid #E0E0E0;
-    padding: 3px 8px;
-    border-radius: 12px;
-    color: #555;
-}
-
-.conn-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 11px;
-    padding: 6px;
-    background: #F5F5F5;
-    border-radius: 4px;
-    font-family: 'JetBrains Mono', monospace;
-}
-
-.conn-node {
-    font-weight: 600;
-    color: #333;
-}
-
-.conn-arrow {
-    color: #BBB;
-}
-
-/* Step 02 Stats */
+/* Step 01 Stats */
 .stats-grid {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
@@ -744,131 +308,7 @@ watch(() => props.systemLogs.length, () => {
   display: block;
 }
 
-/* Hit Test Styles */
-.hit-test-box {
-  margin-bottom: 20px;
-  padding: 16px;
-  background: #FAFAFA;
-  border: 1px solid #EAEAEA;
-  border-radius: 6px;
-}
-
-.search-input-wrapper {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.search-input-wrapper input {
-  flex: 1;
-  padding: 8px 12px;
-  background: #FFF;
-  border: 1px solid #DDD;
-  border-radius: 4px;
-  font-family: inherit;
-  font-size: 13px;
-  outline: none;
-}
-
-.search-input-wrapper input:focus {
-  border-color: #FF5722;
-}
-
-.search-input-wrapper button {
-  padding: 0 16px;
-  background: #000;
-  color: #FFF;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: 600;
-}
-
-.hit-test-results {
-  margin-top: 12px;
-}
-
-.results-header {
-  font-size: 11px;
-  color: #999;
-  margin-bottom: 8px;
-  font-weight: 600;
-}
-
-.facts-scroll-area {
-  max-height: 200px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.fact-item {
-  padding-bottom: 12px;
-  border-bottom: 1px dashed #EEE;
-}
-
-.fact-item:last-child {
-  border-bottom: none;
-}
-
-.fact-text {
-  font-size: 12px;
-  color: #333;
-  margin: 0 0 6px 0;
-  line-height: 1.5;
-}
-
-.fact-meta-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: center;
-}
-
-.fact-source, .fact-page, .fact-bbox {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.source-label {
-  font-size: 9px;
-  color: #AAA;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.source-tag, .page-tag, .bbox-tag {
-  font-size: 10px;
-  padding: 1px 6px;
-  font-family: 'JetBrains Mono', monospace;
-  border-radius: 2px;
-}
-
-.source-tag {
-  background: #FFF5F2;
-  border: 1px solid #FFE0D6;
-  color: #FF5722;
-}
-
-.page-tag {
-  background: #E3F2FD;
-  border: 1px solid #BBDEFB;
-  color: #1976D2;
-}
-
-.bbox-tag {
-  background: #F3E5F5;
-  border: 1px solid #E1BEE7;
-  color: #7B1FA2;
-}
-
-.next-btn {
-  margin-top: 10px;
-}
-
-/* Step 03 Button */
+/* Step 02 Button */
 .action-btn {
   width: 100%;
   background: #000;
@@ -880,6 +320,7 @@ watch(() => props.systemLogs.length, () => {
   font-weight: 600;
   cursor: pointer;
   transition: opacity 0.2s;
+  margin-bottom: 12px;
 }
 
 .action-btn:hover:not(:disabled) {
@@ -889,6 +330,10 @@ watch(() => props.systemLogs.length, () => {
 .action-btn:disabled {
   background: #CCC;
   cursor: not-allowed;
+}
+
+.start-build-btn {
+  background: #FF5722;
 }
 
 .progress-section {

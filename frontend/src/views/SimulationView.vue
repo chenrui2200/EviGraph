@@ -139,7 +139,7 @@ const toggleMaximize = (target) => {
 const handleGoBack = () => {
   // Return to process page
   if (projectData.value?.project_id) {
-    router.push({ name: 'Process', params: { projectId: projectData.value.project_id } })
+    router.push({ name: 'GraphBuild', params: { projectId: projectData.value.project_id } })
   } else {
     router.push('/')
   }

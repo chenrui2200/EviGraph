@@ -389,7 +389,7 @@ const closeModal = () => {
 const goToProject = () => {
   if (selectedProject.value?.project_id) {
     router.push({
-      name: 'Process',
+      name: 'GraphBuild',
       params: { projectId: selectedProject.value.project_id }
     })
     closeModal()

@@ -137,8 +137,8 @@ const navigateTo = (step) => {
       alert('请先完成 Step 1 智能Chunk 标注，再进入图谱构建。')
       return
     }
-    emit('navigate', { step: 2, route: { name: 'Process', params: { projectId: props.projectId } } })
-    router.push({ name: 'Process', params: { projectId: props.projectId } })
+    emit('navigate', { step: 2, route: { name: 'GraphBuild', params: { projectId: props.projectId } } })
+    router.push({ name: 'GraphBuild', params: { projectId: props.projectId } })
   }
 }
 </script>

@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Home from '../views/Home.vue'
-import Process from '../views/MainView.vue'
+import GraphBuild from '../views/MainView.vue'
 import SimulationView from '../views/SimulationView.vue'
 import SimulationRunView from '../views/SimulationRunView.vue'
 import ReportView from '../views/ReportView.vue'
@@ -23,9 +23,9 @@ const routes = [
     props: true
   },
   {
-    path: '/process/:projectId',
-    name: 'Process',
-    component: Process,
+    path: '/graph_build/:projectId',
+    name: 'GraphBuild',
+    component: GraphBuild,
     props: true
   },
   {

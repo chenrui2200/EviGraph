@@ -55,13 +55,12 @@
           v-if="currentStep === 1"
           :currentPhase="currentPhase"
           :projectData="projectData"
-          :ontologyProgress="ontologyProgress"
           :buildProgress="buildProgress"
           :graphData="graphData"
           :systemLogs="systemLogs"
           @next-step="handleNextStep"
           @reset-build="handleResetBuild"
-          @reset-chunk="handleResetChunk"
+          @start-build="startBuildGraph"
         />
         <!-- Step 5: Interaction (Analysis) -->
         <Step5Interaction
@@ -82,7 +81,7 @@ import Step1GraphBuild from '../components/Step1GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import Step5Interaction from '../components/Step5Interaction.vue'
 import StepNavigator from '../components/StepNavigator.vue'
-import { generateOntology, getProject, buildGraph, resetIntelligentChunks, getTaskStatus, getGraphData, getTaskEventsURL, updateProject } from '../api/graph'
+import { checkHasIntelligentChunks, getProject, buildGraph, getTaskStatus, getGraphData, getTaskEventsURL, updateProject } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 
 const route = useRoute()
@@ -103,8 +102,7 @@ const graphLoading = ref(false)
 const error = ref('')
 const projectData = ref(null)
 const graphData = ref(null)
-const currentPhase = ref(-1) // -1: Upload, 0: Ontology, 1: Build, 2: Complete
-const ontologyProgress = ref(null)
+const currentPhase = ref(-1) // -1: Upload, 0: Ready to build, 1: Build in progress, 2: Complete
 const buildProgress = ref(null)
 const systemLogs = ref([])
 
@@ -147,7 +145,7 @@ const statusText = computed(() => {
   if (error.value) return 'Error'
   if (currentPhase.value >= 2) return 'Ready'
   if (currentPhase.value === 1) return 'Building Graph'
-  if (currentPhase.value === 0) return 'Analyzing Chunks'
+  if (currentPhase.value === 0) return 'Ready to Build'
   return 'Initializing'
 })
 
@@ -209,58 +207,26 @@ const handleGoBack = async () => {
 // --- Data Logic ---
 
 const initProject = async () => {
-  addLog('Project view initialized.')
+  addLog('GraphBuild view initialized.')
+  // projectId === 'new' 不再直接在此创建，直接重定向到 chunk_analysis
   if (currentProjectId.value === 'new') {
-    await handleNewProject()
-  } else {
-    await loadProject()
-  }
-}
-
-const handleNewProject = async () => {
-  const pending = getPendingUpload()
-  if (!pending.isPending || pending.files.length === 0) {
-    error.value = 'No pending files found.'
-    addLog('Error: No pending files found for new project.')
+    router.replace({ name: 'ChunkAnalysis', params: { projectId: currentProjectId.value } })
     return
   }
-
+  // 检查是否存在 intelligent_chunks.json，无则重定向到 chunk_analysis
   try {
-    loading.value = true
-    currentPhase.value = 0
-    ontologyProgress.value = { message: 'Uploading and analyzing docs...' }
-    addLog('Starting ontology generation: Uploading files...')
-
-    const formData = new FormData()
-    pending.files.forEach(f => formData.append('files', f))
-    formData.append('simulation_requirement', pending.simulationRequirement)
-
-    const res = await generateOntology(formData)
-    if (res.success) {
-      clearPendingUpload()
-      currentProjectId.value = res.data.project_id
-      projectData.value = res.data
-
-      router.replace({ name: 'Process', params: { projectId: res.data.project_id } })
-
-      // Start polling ontology task (instead of jumping to build)
-      const taskId = res.data.task_id
-      if (taskId) {
-        startPollingTask(taskId, 'ontology')
-      }
-
-      addLog(`Chunks analysis task started for project ${res.data.project_id}`)
-    } else {
-      error.value = res.error || 'Chunks analysis failed'
-      addLog(`Error generating ontology: ${error.value}`)
+    const res = await checkHasIntelligentChunks(currentProjectId.value)
+    if (res.success && !res.data.has_intelligent_chunks) {
+      addLog('No intelligent_chunks.json found, redirecting to chunk_analysis...')
+      router.replace({ name: 'ChunkAnalysis', params: { projectId: currentProjectId.value } })
+      return
     }
   } catch (err) {
-    error.value = err.message
-    addLog(`Exception in handleNewProject: ${err.message}`)
-  } finally {
-    loading.value = false
+    console.warn('Failed to check intelligent_chunks:', err)
   }
+  await loadProject()
 }
+
 
 const loadProject = async () => {
   try {
@@ -270,32 +236,19 @@ const loadProject = async () => {
     if (res.success) {
       projectData.value = res.data
 
-      // Restore current step
-      if (res.data.current_step) {
-        currentStep.value = res.data.current_step
-      }
-
       updatePhaseByStatus(res.data.status)
-      addLog(`Project loaded. Status: ${res.data.status}, Step: ${currentStep.value}`)
+      addLog(`Project loaded. Status: ${res.data.status}`)
 
-      // Continue polling ontology generation
-      if (res.data.status === 'ontology_generation' && res.data.ontology_task_id) {
-        currentPhase.value = 0
-        startPollingTask(res.data.ontology_task_id, 'ontology')
-      }
-      // Automatically start graph building
-      else if (res.data.status === 'ontology_generated' && !res.data.graph_id) {
-        await startBuildGraph()
-      } else {
-        const buildStatuses = ['graph_building', 'graph_chunking', 'graph_embedding', 'graph_indexing']
-        if (buildStatuses.includes(res.data.status) && res.data.graph_build_task_id) {
-          currentPhase.value = 1
-          startPollingTask(res.data.graph_build_task_id)
-          startGraphPolling()
-        } else if (res.data.status === 'graph_completed' && res.data.graph_id) {
-          currentPhase.value = 2
-          await loadGraph(res.data.graph_id)
-        }
+      // 已在 graph_build 状态，继续轮询
+      const buildStatuses = ['graph_building', 'graph_chunking', 'graph_embedding', 'graph_indexing']
+      if (buildStatuses.includes(res.data.status) && res.data.graph_build_task_id) {
+        currentPhase.value = 1
+        startPollingTask(res.data.graph_build_task_id)
+        startGraphPolling()
+      } else if (res.data.status === 'graph_completed' && res.data.graph_id) {
+        // 图谱已完成
+        currentPhase.value = 2
+        await loadGraph(res.data.graph_id)
       }
     } else {
       error.value = res.error
@@ -311,19 +264,21 @@ const loadProject = async () => {
 
 const updatePhaseByStatus = (status) => {
   switch (status) {
-    case 'created':
-    case 'ontology_generation':
-      currentPhase.value = 0; break;
-    case 'ontology_generated':
     case 'graph_building':
     case 'graph_chunking':
     case 'graph_embedding':
     case 'graph_indexing':
-      currentPhase.value = 1; break; // Chunks done, graph build in progress
+      currentPhase.value = 1; break; // Graph build in progress
     case 'graph_completed':
       currentPhase.value = 2; break;
     case 'failed':
       error.value = projectData.value?.error || 'Project failed'; break;
+    default:
+      // 如果没有 graph_id，说明还没有开始构建，停留在 phase 0
+      if (!projectData.value?.graph_id) {
+        currentPhase.value = 0
+      }
+      break;
   }
 }
 
@@ -333,32 +288,6 @@ const handleResetBuild = async () => {
   graphData.value = null
   systemLogs.value = []
   await startBuildGraph(true)
-}
-
-const handleResetChunk = async () => {
-  stopPolling()
-  stopGraphPolling()
-  graphData.value = null
-  systemLogs.value = []
-  ontologyProgress.value = { message: 'Resetting and re-analyzing chunks...' }
-  addLog('Resetting intelligent chunk annotation...')
-
-  try {
-    const res = await resetIntelligentChunks({
-      project_id: currentProjectId.value,
-      reset: true
-    })
-    if (res.success) {
-      addLog(`Chunk reset task started. Task ID: ${res.data.task_id}`)
-      startPollingTask(res.data.task_id, 'chunking')
-    } else {
-      error.value = res.error
-      addLog(`Error resetting chunks: ${res.error}`)
-    }
-  } catch (err) {
-    error.value = err.message
-    addLog(`Exception in handleResetChunk: ${err.message}`)
-  }
 }
 
 const startBuildGraph = async (force = false) => {
@@ -414,7 +343,7 @@ const startPollingTask = (taskId, type = 'build') => {
     taskSource.close()
   }
 
-  console.log(`📡 Starting SSE listener (MainView) for ${type} task: ${taskId}`)
+  console.log(`📡 Starting SSE listener (GraphBuild) for task: ${taskId}`)
   const url = getTaskEventsURL(taskId)
   taskSource = new EventSource(url)
 
@@ -424,47 +353,42 @@ const startPollingTask = (taskId, type = 'build') => {
 
       if (msgType === 'init') {
         const task = data
-        console.log(`✅ SSE initialized for ${type} task (MainView)`)
+        console.log(`✅ SSE initialized (GraphBuild)`)
 
-        // Log current message if any
         if (task.message) {
           addLog(task.message)
         }
 
-        updateTaskUI(task, type)
+        updateTaskUI(task)
         return
       }
 
       if (msgType === 'update') {
         const payload = data
 
-        // Log message change
-        const currentProgressMsg = type === 'ontology' ? ontologyProgress.value?.message : buildProgress.value?.message
-        if (payload.message && payload.message !== currentProgressMsg) {
+        if (payload.message && payload.message !== buildProgress.value?.message) {
           addLog(payload.message)
         }
 
-        updateTaskUI(payload, type)
+        updateTaskUI(payload)
 
-        // Close connection on finish
         if (payload.status === 'completed' || payload.status === 'failed') {
-          handleTaskFinished(payload, type)
+          handleTaskFinished(payload)
           stopPolling()
         }
       }
     } catch (err) {
-      console.error('SSE parsing error (MainView):', err)
+      console.error('SSE parsing error (GraphBuild):', err)
     }
   }
 
   taskSource.onerror = (err) => {
-    console.error('SSE connection error (MainView):', err)
-    // Fallback
+    console.error('SSE connection error (GraphBuild):', err)
     getTaskStatus(taskId).then(res => {
       if (res.success) {
-        updateTaskUI(res.data, type)
+        updateTaskUI(res.data)
         if (res.data.status === 'completed' || res.data.status === 'failed') {
-          handleTaskFinished(res.data, type)
+          handleTaskFinished(res.data)
           stopPolling()
         }
       }
@@ -472,43 +396,26 @@ const startPollingTask = (taskId, type = 'build') => {
   }
 }
 
-const updateTaskUI = (taskData, type) => {
-  if (type === 'ontology' || type === 'chunking') {
-    ontologyProgress.value = {
-      progress: taskData.progress ?? (ontologyProgress.value?.progress || 0),
-      message: taskData.message ?? (ontologyProgress.value?.message || 'Analyzing...')
-    }
-  } else {
-    buildProgress.value = {
-      progress: taskData.progress ?? (buildProgress.value?.progress || 0),
-      message: taskData.message ?? (buildProgress.value?.message || 'Processing...')
-    }
+const updateTaskUI = (taskData) => {
+  buildProgress.value = {
+    progress: taskData.progress ?? (buildProgress.value?.progress || 0),
+    message: taskData.message ?? (buildProgress.value?.message || 'Processing...')
   }
 }
 
-const handleTaskFinished = async (taskData, type) => {
+const handleTaskFinished = async (taskData) => {
   if (taskData.status === 'completed') {
-    addLog(`${type === 'ontology' || type === 'chunking' ? 'Chunks analysis' : 'Graph build'} task completed.`)
-
-    if (type === 'ontology' || type === 'chunking') {
-      ontologyProgress.value = null
-      const projRes = await getProject(currentProjectId.value)
-      if (projRes.success) {
-        projectData.value = projRes.data
-        await startBuildGraph()
-      }
-    } else {
-      stopGraphPolling()
-      currentPhase.value = 2
-      const projRes = await getProject(currentProjectId.value)
-      if (projRes.success && projRes.data.graph_id) {
-        projectData.value = projRes.data
-        await loadGraph(projRes.data.graph_id)
-      }
+    addLog('Graph build task completed.')
+    stopGraphPolling()
+    currentPhase.value = 2
+    const projRes = await getProject(currentProjectId.value)
+    if (projRes.success && projRes.data.graph_id) {
+      projectData.value = projRes.data
+      await loadGraph(projRes.data.graph_id)
     }
   } else if (taskData.status === 'failed') {
     error.value = taskData.error || 'Task failed'
-    addLog(`${type === 'ontology' || type === 'chunking' ? 'Chunks analysis' : 'Graph build'} task failed: ${taskData.error}`)
+    addLog(`Graph build task failed: ${taskData.error}`)
   }
 }
 

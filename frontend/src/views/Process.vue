@@ -794,7 +794,7 @@ const handleNewProject = async () => {
 
       // Update URL (no page refresh)
       router.replace({
-        name: 'Process',
+        name: 'GraphBuild',
         params: { projectId: response.data.project_id }
       })
 

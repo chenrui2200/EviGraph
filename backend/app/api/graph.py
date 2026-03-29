@@ -2097,6 +2097,28 @@ def get_intelligent_chunks(project_id: str):
     })
 
 
+@graph_bp.route('/chunk/<project_id>/has_intelligent_chunks', methods=['GET'])
+def check_has_intelligent_chunks(project_id: str):
+    """
+    检查项目是否存在 intelligent_chunks.json 文件
+    用于前端路由守卫：无文件时重定向到 chunk_analysis 页面
+    """
+    project = ProjectManager.get_project(project_id)
+    if not project:
+        return jsonify({
+            "success": False,
+            "error": f"项目不存在: {project_id}"
+        }), 404
+
+    chunks = ProjectManager.get_intelligent_chunks(project_id)
+    return jsonify({
+        "success": True,
+        "data": {
+            "has_intelligent_chunks": chunks is not None
+        }
+    })
+
+
 @graph_bp.route('/chunk/<project_id>/analysis', methods=['GET'])
 def get_chunk_analysis(project_id: str):
     """
