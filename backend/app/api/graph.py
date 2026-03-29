@@ -9,7 +9,7 @@ import queue
 import traceback
 import threading
 import requests
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from flask import request, jsonify, current_app, send_from_directory
 
 from . import graph_bp
@@ -352,17 +352,6 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                 build_logger.error(f"[{task_id}] - 错误消息: {str(e)}")
                 build_logger.error(f"[{task_id}] - 项目ID: {project_id}")
                 build_logger.error(f"[{task_id}] - 图谱ID: {project.graph_id if 'project' in dir() and hasattr(project, 'graph_id') else 'N/A'}")
-
-                # 尝试获取更多上下文信息
-                try:
-                    if 'hierarchical_result' in dir():
-                        build_logger.error(f"[{task_id}] - hierarchical_result 存在: True")
-                    if 'chunks' in dir():
-                        build_logger.error(f"[{task_id}] - chunks 变量存在: True, 长度: {len(chunks) if 'chunks' in dir() and chunks else 0}")
-                    if 'text_chunks' in dir():
-                        build_logger.error(f"[{task_id}] - text_chunks 存在: True")
-                except Exception as diag_e:
-                    build_logger.warning(f"[{task_id}] - 诊断信息收集失败: {diag_e}")
 
                 build_logger.error(f"[{task_id}] ==========================")
 
@@ -1065,88 +1054,62 @@ def generate_ontology():
                     build_logger.info(f"[{task_id}] ✅ MinerU API 成功: {orig_name}")
 
                     # 解析 MinerU 返回
-                    content_list = mineru_data.get('content', [])
-                    layout_pages = mineru_data.get('layout', [])
                     pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
 
+                    # 从 pdf_info_list 精确构建 chunks（跟着 lines 走）
                     # 构建 page_size 映射
-                    page_sizes = {}
-                    for info in pdf_info_list:
-                        page_idx = info.get('page_idx', 0)
-                        page_size = info.get('page_size', [])
-                        if len(page_size) == 2:
-                            page_sizes[page_idx] = page_size
+                    page_sizes_map: dict[int, list] = {}
+                    for page_info in pdf_info_list:
+                        page_idx = page_info.get('page_idx', 0)
+                        page_sizes_map[page_idx] = page_info.get('page_size')
 
-                    # 从 content 构建 chunks（带 bbox_viewport）
-                    chunk_idx = 0
-                    for content_item in content_list:
-                        page_idx = content_item.get('page_idx', 0)
-                        text = content_item.get('text', '').strip()
-                        if not text:
-                            continue
-                        all_text_parts.append(text)
+                    # 把 lines 里的 spans.content 拼在一起
+                    line_texts: list[str] = []
+                    line_bboxes: list[list] = []
+                    for page_info in pdf_info_list:
+                        page_idx = page_info.get('page_idx', 0)
+                        page_w, page_h = page_sizes_map.get(page_idx)
+                        para_blocks = page_info.get('para_blocks', [])
 
-                        # 查找 bbox
-                        block_bbox = None
-                        for info in pdf_info_list:
-                            if info.get('page_idx') == page_idx:
-                                for pb in info.get('para_blocks', []):
-                                    pb_text = ''
-                                    for line in pb.get('lines', []):
-                                        for span in line.get('spans', []):
-                                            pb_text += span.get('content', '')
-                                    if text[:30] in (pb_text or ''):
-                                        block_bbox = pb.get('bbox')
-                                        break
-                                break
+                        for para_block in para_blocks:
+                            block_type = para_block.get('type')
+                            lines = para_block.get('lines', [])
 
-                        page_w, page_h = page_sizes.get(page_idx, [595.3, 841.9])
-                        if block_bbox and len(block_bbox) >= 4:
-                            x0, y0, x1, y1 = block_bbox[:4]
-                            bbox_viewport = [x0, page_h - y1, x1, page_h - y0]
-                        else:
-                            bbox_viewport = [0, 0, page_w, 30]
+                            if not lines:
+                                continue
 
-                        content_type = content_item.get('type', 'text')
-                        text_level = content_item.get('text_level', 0)
-                        if content_type == 'title' or text_level == 1:
-                            category_id = 0
-                        elif content_type == 'table':
-                            category_id = 2
-                        elif content_type == 'figure':
-                            category_id = 3
-                        else:
-                            category_id = 1
+                            for line in lines:
+                                line_bbox = line.get('bbox')
+                                line_content = "".join(span.get('content', '') for span in line.get('spans', []))
 
+                                if line_content.strip():
+                                    line_texts.append(line_content)
+                                    line_bboxes.append(line_bbox)
+
+                            if not line_texts:
+                                continue
+
+                    # 使用 line_texts 和 line_bboxes 构建 all_chunks
+                    for line_idx, (line_text, line_bbox) in enumerate(zip(line_texts, line_bboxes)):
                         all_chunks.append({
-                            "chunk_id": f"chunk_{idx}_{chunk_idx}",
+                            "chunk_id": f"chunk_{idx}_{len(all_chunks)}",
                             "page_idx": page_idx,
-                            "type": content_type,
-                            "content": text,
-                            "bbox_pdf": block_bbox,
-                            "bbox_viewport": bbox_viewport,
+                            "type": "text",
+                            "content": line_text,
+                            "bbox_pdf": line_bbox,
+                            "bbox_viewport": line_bbox,
                             "page_width": page_w,
                             "page_height": page_h,
-                            "category_id": category_id,
+                            "category_id": 1,
                             "source": orig_name
                         })
-                        chunk_idx += 1
+                    
+                    build_logger.info(f"[{task_id}] 文件 {orig_name} 提取 {len(line_texts)} 行文本")
 
-                    # 从 layout 提取 bbox 覆盖信息（仅追加到已存在的 content chunk，不新增空内容块）
-                    # 注意：不将无 content 的 layout bbox 写入 chunks.json，避免污染内容列表
-                    for layout_page in layout_pages:
-                        page_no = layout_page.get('page_info', {}).get('page_no', 0)
-                        page_w, page_h = page_sizes.get(page_no, [595.3, 841.9])
-                        for det in layout_page.get('layout_dets', []):
-                            bbox = det.get('bbox', [])
-                            if not bbox or len(bbox) < 4:
-                                continue
-                            # 收集 layout bbox 用于后续覆盖 content chunk 的 bbox，不单独存储为 chunk
-                            # 如果需要单独渲染布局信息，可保存到 layout_meta.json 而非 chunks.json
-                            pass  # layout bbox 不再写入 chunks.json
 
-                    msg = f"✅ {orig_name}: {chunk_idx} content chunks, {len(layout_pages)} pages"
-                    build_logger.info(f"[{task_id}] {msg}")
+
+
+                    msg = f"[{task_id}] ✅ 已提取 {len(all_chunks)} 个块"
                     task_manager.update_task(task_id, progress=current_progress, message=msg, log=msg)
 
                 if not all_chunks:
@@ -1160,12 +1123,6 @@ def generate_ontology():
 
                 ProjectManager.save_chunks(project.project_id, all_chunks)
                 build_logger.info(f"[{task_id}] ✅ chunks.json 已保存，共 {len(all_chunks)} 个块")
-
-                # 保存原始文本
-                all_text = "\n\n".join(all_text_parts)
-                project.total_text_length = len(all_text)
-                ProjectManager.save_extracted_text(project.project_id, all_text)
-                build_logger.info(f"[{task_id}] ✅ 原始文本已保存，{project.total_text_length} 字符")
 
                 # ========== 阶段 1.3: 提取名词实体（可选，轻量） ==========
                 task_manager.update_task(task_id, progress=75, message="🧠 提取名词实体...", log="提取名词实体")
