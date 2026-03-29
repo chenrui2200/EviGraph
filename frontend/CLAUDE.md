@@ -33,4 +33,4 @@
 ## 相关文件清单
 - `frontend/src/views/MainView.vue`: 应用主布局。
 - `frontend/src/components/GraphPanel.vue`: 核心图谱展示组件。
-- `frontend/src/components/GraphBuild.vue` ~ `Step5Interaction.vue`: 流程化构建步骤。
+- `frontend/src/components/GraphBuild.vue`: 知识图谱构建面板。

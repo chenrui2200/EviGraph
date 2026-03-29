@@ -1,10 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Home from '../views/Home.vue'
 import GraphBuild from '../views/MainView.vue'
-import SimulationView from '../views/SimulationView.vue'
-import SimulationRunView from '../views/SimulationRunView.vue'
-import ReportView from '../views/ReportView.vue'
-import InteractionView from '../views/InteractionView.vue'
 import AiQaView from '../views/AiQaView.vue'
 import HitTestView from '../views/HitTestView.vue'
 import PublicChatView from '../views/PublicChatView.vue'
@@ -44,18 +40,6 @@ const routes = [
     path: '/ai-qa/:id',
     name: 'AiQa',
     component: AiQaView,
-    props: true
-  },
-  {
-    path: '/simulation/:simulationId',
-    name: 'Simulation',
-    component: SimulationView,
-    props: true
-  },
-  {
-    path: '/simulation/:simulationId/start',
-    name: 'SimulationRun',
-    component: SimulationRunView,
     props: true
   },
   // Report功能暂时隐藏

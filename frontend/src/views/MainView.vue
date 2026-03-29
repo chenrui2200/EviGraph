@@ -50,24 +50,16 @@
 
       <!-- Right Panel: Step Components -->
       <div class="panel-wrapper right" :style="rightPanelStyle">
-        <!-- Step 1: Graph Build -->
+        <!-- Graph Build Panel -->
         <GraphBuild
-          v-if="currentStep === 1"
           :currentPhase="currentPhase"
           :projectData="projectData"
           :buildProgress="buildProgress"
           :graphData="graphData"
           :systemLogs="systemLogs"
           :hasIntelligentChunks="hasIntelligentChunks"
-          @next-step="handleNextStep"
           @reset-build="handleResetBuild"
           @start-build="startBuildGraph"
-        />
-        <!-- Step 5: Interaction (Analysis) -->
-        <Step5Interaction
-          v-else-if="currentStep === 5"
-          :simulationId="simulationId"
-          @add-log="addLog"
         />
       </div>
     </main>
@@ -75,14 +67,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import GraphBuild from '../components/GraphBuild.vue'
-import Step2EnvSetup from '../components/Step2EnvSetup.vue'
-import Step5Interaction from '../components/Step5Interaction.vue'
 import StepNavigator from '../components/StepNavigator.vue'
-import { checkHasIntelligentChunks, getProject, buildGraph, getTaskStatus, getGraphData, getTaskEventsURL, updateProject } from '../api/graph'
+import { checkHasIntelligentChunks, getProject, buildGraph, getTaskStatus, getGraphData, getTaskEventsURL } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 
 const route = useRoute()
@@ -91,14 +81,9 @@ const router = useRouter()
 // Layout State
 const viewMode = ref('split') // graph | split | workbench
 
-// Step State
-const currentStep = ref(1) // 1: Graph Build, 5: Interaction
-const stepNames = ['Graph Build', '', '', '', 'Interaction']
-
 // Data State
 const currentProjectId = ref(route.params.projectId)
 const hasIntelligentChunks = ref(false)
-const simulationId = ref(null)
 const loading = ref(false)
 const graphLoading = ref(false)
 const error = ref('')
@@ -170,41 +155,6 @@ const toggleMaximize = (target) => {
   }
 }
 
-const handleNextStep = async (params = {}) => {
-  if (params.simulationId) {
-    simulationId.value = params.simulationId
-  }
-
-  // If coming from Step 1 (Graph Build), skip to Step 5 (Interaction/Analysis)
-  if (currentStep.value === 1) {
-    currentStep.value = 5
-  } else if (currentStep.value < 5) {
-    currentStep.value++
-  }
-
-  addLog(`Entering Step ${currentStep.value}: ${stepNames[currentStep.value - 1]}`)
-
-  // Persist current step
-  try {
-    await updateProject(currentProjectId.value, { current_step: currentStep.value })
-  } catch (err) {
-    console.error('Failed to persist current step:', err)
-  }
-}
-
-const handleGoBack = async () => {
-  if (currentStep.value > 1) {
-    currentStep.value--
-    addLog(`Back to Step ${currentStep.value}: ${stepNames[currentStep.value - 1]}`)
-
-    // Persist current step
-    try {
-      await updateProject(currentProjectId.value, { current_step: currentStep.value })
-    } catch (err) {
-      console.error('Failed to persist current step:', err)
-    }
-  }
-}
 
 // --- Data Logic ---
 
