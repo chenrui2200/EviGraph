@@ -182,15 +182,42 @@
             </div>
           </div>
 
+          <!-- Chunks 列表（联动 PDF 标注） -->
+          <div class="mineru-chunk-list" ref="mineruchunkListRef">
+            <div
+              v-for="chunk in mineruChunks"
+              :key="chunk.chunk_id"
+              class="mineru-chunk-item"
+              :class="{ 'chunk-active': mineruSelectedChunk?.chunk_id === chunk.chunk_id }"
+              :data-chunk-id="chunk.chunk_id"
+              @click="onMineruChunkClick(chunk)"
+            >
+              <div class="chunk-item-header">
+                <span
+                  class="chunk-type-badge"
+                  :style="{ background: categoryIdColor(chunk.category_id || 1) + '22', color: categoryIdColor(chunk.category_id || 1) }"
+                >{{ categoryIdLabel(chunk.category_id) }}</span>
+                <span class="chunk-page">P{{ (chunk.page_idx || 0) + 1 }}</span>
+                <span class="chunk-id">{{ chunk.chunk_id }}</span>
+              </div>
+              <div class="chunk-item-content">{{ chunk.content?.substring(0, 120) }}{{ (chunk.content?.length || 0) > 120 ? '...' : '' }}</div>
+            </div>
+          </div>
+
           <!-- 选中块详情 -->
           <div v-if="mineruSelectedChunk" class="mineru-chunk-detail">
             <div class="detail-header">
               <span class="detail-type">{{ categoryIdLabel(mineruSelectedChunk.category_id) }}</span>
               <span class="detail-page">页 {{ (mineruSelectedChunk.page_idx || 0) + 1 }}</span>
             </div>
+            <div class="detail-content">{{ mineruSelectedChunk.content }}</div>
             <div v-if="mineruSelectedChunk.bbox_viewport" class="detail-bbox">
               <span class="detail-bbox-label">bbox_viewport:</span>
               <span class="detail-bbox-val">{{ mineruSelectedChunk.bbox_viewport.join(', ') }}</span>
+            </div>
+            <div v-if="mineruSelectedChunk.bbox_pdf" class="detail-bbox">
+              <span class="detail-bbox-label">bbox_pdf:</span>
+              <span class="detail-bbox-val">{{ mineruSelectedChunk.bbox_pdf.join(', ') }}</span>
             </div>
           </div>
         </div>
@@ -488,6 +515,7 @@ const mineruMode = ref(false)
 const mineruChunks = ref([])
 const mineruSelectedChunk = ref(null)
 const mineruSummary = ref(null)
+const mineruchunkListRef = ref(null)
 
 // 知识实体池
 const poolTabs = [
@@ -716,7 +744,33 @@ function toggleMineruMode() {
 
 function onMineruBboxClick(ann) {
   highlightedClauseId.value = ann.clauseId
-  mineruSelectedChunk.value = mineruChunks.value.find(c => c.chunk_id === ann.clauseId)
+  const chunk = mineruChunks.value.find(c => c.chunk_id === ann.clauseId)
+  mineruSelectedChunk.value = chunk
+  if (chunk) {
+    scrollChunkListToItem(chunk.chunk_id)
+  }
+}
+
+function onMineruChunkClick(chunk) {
+  if (mineruSelectedChunk.value?.chunk_id === chunk.chunk_id) {
+    mineruSelectedChunk.value = null
+    highlightedClauseId.value = null
+    return
+  }
+  mineruSelectedChunk.value = chunk
+  highlightedClauseId.value = chunk.chunk_id
+  // 滚动 PDF 到对应页面
+  const pageNum = (chunk.page_idx || 0) + 1
+  scrollToPage(pageNum)
+}
+
+function scrollChunkListToItem(chunkId) {
+  nextTick(() => {
+    const el = mineruchunkListRef.value?.querySelector(`[data-chunk-id="${chunkId}"]`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  })
 }
 
 function categoryIdLabel(catId) {
@@ -1289,10 +1343,28 @@ function goToGraphBuild() {
 .info-label { color: #6b7280; min-width: 60px; }
 .info-value { color: #1a1a2e; font-weight: 600; }
 
-.mineru-chunk-detail { border-top: 1px solid #e0e0e0; padding: 10px 16px; background: #fafafa; }
+/* Chunks 列表 */
+.mineru-chunk-list { max-height: 240px; overflow-y: auto; border-top: 1px solid #e0e0e0; }
+.mineru-chunk-item {
+  padding: 8px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.mineru-chunk-item:hover { background: #f5f5ff; }
+.chunk-active { background: #eff6ff; border-left: 3px solid #2563eb; }
+.chunk-item-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.chunk-type-badge { padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
+.chunk-page { font-size: 10px; color: #9ca3af; }
+.chunk-id { font-size: 9px; color: #d1d5db; font-family: monospace; margin-left: auto; }
+.chunk-item-content { font-size: 11px; color: #6b7280; line-height: 1.4; }
+
+/* 选中块详情 */
+.mineru-chunk-detail { border-top: 1px solid #e0e0e0; padding: 10px 16px; background: #fafafa; max-height: 200px; overflow-y: auto; }
 .detail-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .detail-type { padding: 2px 8px; background: #667eea22; color: #667eea; border-radius: 8px; font-size: 11px; font-weight: 600; }
 .detail-page { font-size: 11px; color: #9ca3af; }
+.detail-content { font-size: 11px; color: #374151; line-height: 1.5; margin-bottom: 8px; white-space: pre-wrap; word-break: break-all; }
 .detail-bbox { display: flex; align-items: center; gap: 6px; font-size: 10px; }
 .detail-bbox-label { color: #9ca3af; }
 .detail-bbox-val { color: #6b7280; font-family: monospace; }
