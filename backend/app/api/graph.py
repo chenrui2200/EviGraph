@@ -1064,11 +1064,10 @@ def generate_ontology():
                         page_sizes_map[page_idx] = page_info.get('page_size')
 
                     # 把 lines 里的 spans.content 拼在一起
-                    line_texts: list[str] = []
-                    line_bboxes: list[list] = []
+                    line_metadata = []
                     for page_info in pdf_info_list:
                         page_idx = page_info.get('page_idx', 0)
-                        page_w, page_h = page_sizes_map.get(page_idx)
+                        # page_w, page_h = page_sizes_map.get(page_idx)
                         para_blocks = page_info.get('para_blocks', [])
 
                         for para_block in para_blocks:
@@ -1083,28 +1082,27 @@ def generate_ontology():
                                 line_content = "".join(span.get('content', '') for span in line.get('spans', []))
 
                                 if line_content.strip():
-                                    line_texts.append(line_content)
-                                    line_bboxes.append(line_bbox)
+                                    line_metadata.append((line_content, line_bbox, page_idx, block_type))
 
-                            if not line_texts:
-                                continue
 
-                    # 使用 line_texts 和 line_bboxes 构建 all_chunks
-                    for line_idx, (line_text, line_bbox) in enumerate(zip(line_texts, line_bboxes)):
+                    # 使用 line_metadata 构建 all_chunks
+                    for line_content, line_bbox, page_idx, block_type in line_metadata:
+                        page_w, page_h = page_sizes_map.get(page_idx)
                         all_chunks.append({
                             "chunk_id": f"chunk_{idx}_{len(all_chunks)}",
                             "page_idx": page_idx,
                             "type": "text",
-                            "content": line_text,
+                            "content": line_content,
                             "bbox_pdf": line_bbox,
                             "bbox_viewport": line_bbox,
                             "page_width": page_w,
                             "page_height": page_h,
                             "category_id": 1,
+                            "block_type": block_type,
                             "source": orig_name
                         })
                     
-                    build_logger.info(f"[{task_id}] 文件 {orig_name} 提取 {len(line_texts)} 行文本")
+                    build_logger.info(f"[{task_id}] 文件 {orig_name} 提取 {len(line_metadata)} 行文本")
 
 
 
@@ -1605,11 +1603,6 @@ def _build_clauses_from_chunks(chunks: list) -> list:
             elif any(kw in content for kw in ['禁止', '不应', '不得']):
                 req_type = 'prohibited'
 
-            # 判断是否为术语定义章节
-            is_term_def = False
-            if c.get('page_idx', 0) < 3 and '术语' in content:
-                is_term_def = True
-
             clauses.append({
                 "clause_id": clause_id,
                 "clause_title": clause_title,
@@ -1621,7 +1614,6 @@ def _build_clauses_from_chunks(chunks: list) -> list:
                 "components": [],
                 "objects": [],
                 "parent_chapter": None,
-                "is_term_definition": is_term_def,
                 "page_idx": c.get('page_idx', 0),
                 "bbox_viewport": c.get('bbox_viewport', []),
                 "nouns": c.get('nouns', []),

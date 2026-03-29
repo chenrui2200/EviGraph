@@ -85,10 +85,18 @@
                 :style="{ width: rp.canvasWidth + 'px', height: rp.canvasHeight + 'px', top: '0', left: '0' }"
               >
                 <template v-for="ann in getPageAnnotations(rp.pageNum)" :key="ann.clauseId">
+                  <!--
+                    坐标转换：PDF 坐标系（原点在左下角，Y 轴向上）
+                              → SVG 坐标系（原点在左上角，Y 轴向下）
+                    bbox: [x0_pdf, y0_pdf, x1_pdf, y1_pdf]
+                    SVG rect:
+                      y = pageHeight - y1_pdf   ← Y 轴翻转
+                      h = y1_pdf - y0_pdf       ← 高度不变（两坐标系 Y 都向下测量）
+                  -->
                   <rect
                     v-if="ann.isMineru"
                     :x="ann.bbox[0]"
-                    :y="ann.bbox[1]"
+                    :y="rp.pageHeight - ann.bbox[3]"
                     :width="ann.bbox[2] - ann.bbox[0]"
                     :height="ann.bbox[3] - ann.bbox[1]"
                     class="bbox-rect bbox-mineru"
@@ -99,7 +107,7 @@
                   <rect
                     v-else
                     :x="ann.bbox[0]"
-                    :y="ann.bbox[1]"
+                    :y="rp.pageHeight - ann.bbox[3]"
                     :width="ann.bbox[2] - ann.bbox[0]"
                     :height="ann.bbox[3] - ann.bbox[1]"
                     class="bbox-rect"
@@ -197,6 +205,7 @@
                   class="chunk-type-badge"
                   :style="{ background: categoryIdColor(chunk.category_id || 1) + '22', color: categoryIdColor(chunk.category_id || 1) }"
                 >{{ categoryIdLabel(chunk.category_id) }}</span>
+                <span class="chunk-block-type">{{ chunk.block_type || '' }}</span>
                 <span class="chunk-page">P{{ (chunk.page_idx || 0) + 1 }}</span>
                 <span class="chunk-id">{{ chunk.chunk_id }}</span>
               </div>
@@ -208,6 +217,7 @@
           <div v-if="mineruSelectedChunk" class="mineru-chunk-detail">
             <div class="detail-header">
               <span class="detail-type">{{ categoryIdLabel(mineruSelectedChunk.category_id) }}</span>
+              <span class="detail-block-type">{{ mineruSelectedChunk.block_type || '' }}</span>
               <span class="detail-page">页 {{ (mineruSelectedChunk.page_idx || 0) + 1 }}</span>
             </div>
             <div class="detail-content">{{ mineruSelectedChunk.content }}</div>
@@ -413,7 +423,7 @@
         <span>实时日志</span>
         <span class="log-toggle">{{ logDrawerOpen ? '▼' : '▲' }}</span>
       </div>
-      <div class="log-drawer-body" v-if="logDrawerOpen">
+      <div class="log-drawer-body" v-if="logDrawerOpen" ref="logScrollEl">
         <div v-for="(log, i) in realtimeLogs" :key="i" class="log-line" :class="logClass(log)">
           {{ log }}
         </div>
@@ -452,7 +462,8 @@ import {
   startChunking,
   updateClauseEntity,
   getTaskStatus,
-  getMineruChunks
+  getMineruChunks,
+  getTaskEventsURL
 } from '../api/graph'
 import StepNavigator from '../components/StepNavigator.vue'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
@@ -501,6 +512,8 @@ const starting = ref(false)
 const progressPercent = ref(0)
 const hasAutoExpanded = ref(false)
 let pollInterval = null
+let taskSource = null
+const logScrollEl = ref(null)
 
 // 实体编辑
 const editingClauseId = ref(null)
@@ -614,6 +627,7 @@ watch(() => props.projectId, async (newId) => {
 
 onUnmounted(() => {
   if (pollInterval) clearInterval(pollInterval)
+  if (taskSource) taskSource.close()
 })
 
 function resetState() {
@@ -703,6 +717,7 @@ async function loadExistingProject() {
     if (res.data.status === 'graph_chunked') {
       await loadAnalysis()
     } else if (res.data.status === 'graph_chunking') {
+      startTaskSSE()
       startProgressPolling()
       try { await loadAnalysis() } catch (e) { /* 尚未生成 */ }
     } else if (res.data.status === 'ontology_generated' || res.data.status === 'created') {
@@ -893,6 +908,7 @@ async function handleStartChunking() {
       taskId.value = res.data.task_id
       analysisStatus.value = 'graph_chunking'
       realtimeLogs.value.push(`任务已启动: ${res.data.message}`)
+      startTaskSSE()
       startProgressPolling()
     } else {
       realtimeLogs.value.push(`❌ 启动失败: ${res.error}`)
@@ -924,6 +940,7 @@ async function handleResetChunking() {
       expandedChapters.value = {}
       expandedClauseId.value = null
       highlightedClauseId.value = null
+      startTaskSSE()
       startProgressPolling()
     } else {
       realtimeLogs.value.push(`❌ 重置失败: ${res.error}`)
@@ -936,6 +953,62 @@ async function handleResetChunking() {
 }
 
 let pollCount = 0
+
+// ============================================================================
+// SSE 实时日志流
+// ============================================================================
+
+function startTaskSSE() {
+  if (!taskId.value) return
+  if (taskSource) taskSource.close()
+
+  const url = getTaskEventsURL(taskId.value)
+  taskSource = new EventSource(url)
+
+  taskSource.onmessage = async (event) => {
+    try {
+      const { type: msgType, data } = JSON.parse(event.data)
+
+      if (msgType === 'init') {
+        // 初始化：加载已有日志
+        if (data.logs?.length) {
+          data.logs.forEach(l => {
+            if (!realtimeLogs.value.find(existing => existing === l.message)) {
+              realtimeLogs.value.push(l.message)
+            }
+          })
+        }
+        return
+      }
+
+      if (msgType === 'update') {
+        const payload = data
+        if (payload.new_logs?.length) {
+          payload.new_logs.forEach(l => {
+            if (!realtimeLogs.value.find(existing => existing === l.message)) {
+              realtimeLogs.value.push(l.message)
+            }
+          })
+        }
+        if (payload.status === 'completed' || payload.status === 'failed') {
+          taskSource.close()
+          taskSource = null
+        }
+      }
+    } catch (err) {
+      console.error('SSE 解析错误:', err)
+    }
+  }
+
+  taskSource.onerror = () => {
+    taskSource.close()
+    taskSource = null
+  }
+}
+
+// ============================================================================
+// 进度轮询
+// ============================================================================
 
 function startProgressPolling() {
   if (pollInterval) clearInterval(pollInterval)
@@ -1167,6 +1240,18 @@ function poolTabClass(tab) {
 }
 
 // ============================================================================
+// 日志自动滚动
+// ============================================================================
+
+watch(() => realtimeLogs.value.length, () => {
+  nextTick(() => {
+    if (logScrollEl.value) {
+      logScrollEl.value.scrollTop = logScrollEl.value.scrollHeight
+    }
+  })
+})
+
+// ============================================================================
 // 日志 & 导航
 // ============================================================================
 
@@ -1355,6 +1440,7 @@ function goToGraphBuild() {
 .chunk-active { background: #eff6ff; border-left: 3px solid #2563eb; }
 .chunk-item-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 .chunk-type-badge { padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
+.chunk-block-type { padding: 1px 6px; border-radius: 4px; font-size: 10px; color: #6b7280; background: #f3f4f6; }
 .chunk-page { font-size: 10px; color: #9ca3af; }
 .chunk-id { font-size: 9px; color: #d1d5db; font-family: monospace; margin-left: auto; }
 .chunk-item-content { font-size: 11px; color: #6b7280; line-height: 1.4; }
@@ -1363,6 +1449,7 @@ function goToGraphBuild() {
 .mineru-chunk-detail { border-top: 1px solid #e0e0e0; padding: 10px 16px; background: #fafafa; max-height: 200px; overflow-y: auto; }
 .detail-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .detail-type { padding: 2px 8px; background: #667eea22; color: #667eea; border-radius: 8px; font-size: 11px; font-weight: 600; }
+.detail-block-type { padding: 2px 8px; background: #f3f4f6; color: #6b7280; border-radius: 8px; font-size: 11px; }
 .detail-page { font-size: 11px; color: #9ca3af; }
 .detail-content { font-size: 11px; color: #374151; line-height: 1.5; margin-bottom: 8px; white-space: pre-wrap; word-break: break-all; }
 .detail-bbox { display: flex; align-items: center; gap: 6px; font-size: 10px; }
