@@ -309,8 +309,10 @@ const startBuildGraph = async (force = false) => {
       addLog(`Error starting build: ${res.error}`)
     }
   } catch (err) {
-    error.value = err.message
-    addLog(`Exception in startBuildGraph: ${err.message}`)
+    // 从 AxiosError 中提取后端返回的 error 信息
+    const msg = err.response?.data?.error || err.response?.data?.message || err.message
+    error.value = msg
+    addLog(`Build request failed: ${msg}`)
   }
 }
 

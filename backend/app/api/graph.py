@@ -2593,14 +2593,25 @@ def build_graph():
         project.use_semantic = use_semantic
         ProjectManager.save_project(project)
 
-        # Get extracted text
+        # Get extracted text (legacy) or intelligent chunks (preferred)
         text = ProjectManager.get_extracted_text(project_id)
-        if not text:
-            logger.warning(f"Build graph failed: no extracted text for project {project_id}")
+        intelligent_chunks = ProjectManager.get_intelligent_chunks(project_id)
+        has_text = text and len(text.strip()) > 0
+        has_intelligent = intelligent_chunks is not None
+        logger.info(f"[build] project={project_id} has_text={has_text} has_intelligent_chunks={has_intelligent}")
+
+        if not has_text and not has_intelligent:
+            logger.warning(f"Build graph failed: no text data for project {project_id}")
             return jsonify({
                 "success": False,
-                "error": "Extracted text not found"
+                "error": "No text data found. Please go to '智能Chunks标注分析' first."
             }), 400
+
+        # Log which data source will be used
+        if has_intelligent:
+            logger.info(f"Project {project_id} using intelligent_chunks.json (has {len(intelligent_chunks.get('clauses', []))} clauses)")
+        else:
+            logger.info(f"Project {project_id} using legacy extracted_text.txt")
 
         # Get storage in request context (background thread cannot access current_app)
         storage = _get_storage()

@@ -35,13 +35,11 @@ export function generateOntology(formData) {
  * @returns {Promise}
  */
 export function buildGraph(data) {
-  return requestWithRetry(() =>
-    service({
-      url: '/api/graph/build',
-      method: 'post',
-      data
-    })
-  )
+  return service({
+    url: '/api/graph/build',
+    method: 'post',
+    data
+  })
 }
 
 /**

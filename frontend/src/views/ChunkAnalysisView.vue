@@ -718,7 +718,8 @@ async function loadExistingProject() {
     }
 
     // 根据状态决定后续流程
-    if (res.data.status === 'graph_chunked') {
+    if (res.data.status === 'graph_chunked' || res.data.status === 'graph_completed') {
+      // graph_completed: 图谱已构建完成，直接展示已有的分析数据
       await loadAnalysis()
     } else if (res.data.status === 'graph_chunking') {
       startTaskSSE()
