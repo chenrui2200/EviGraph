@@ -85,18 +85,10 @@
                 :style="{ width: rp.canvasWidth + 'px', height: rp.canvasHeight + 'px', top: '0', left: '0' }"
               >
                 <template v-for="ann in getPageAnnotations(rp.pageNum)" :key="ann.clauseId">
-                  <!--
-                    坐标转换：PDF 坐标系（原点在左下角，Y 轴向上）
-                              → SVG 坐标系（原点在左上角，Y 轴向下）
-                    bbox: [x0_pdf, y0_pdf, x1_pdf, y1_pdf]
-                    SVG rect:
-                      y = pageHeight - y1_pdf   ← Y 轴翻转
-                      h = y1_pdf - y0_pdf       ← 高度不变（两坐标系 Y 都向下测量）
-                  -->
                   <rect
                     v-if="ann.isMineru"
                     :x="ann.bbox[0]"
-                    :y="rp.pageHeight - ann.bbox[3]"
+                    :y="ann.bbox[1]"
                     :width="ann.bbox[2] - ann.bbox[0]"
                     :height="ann.bbox[3] - ann.bbox[1]"
                     class="bbox-rect bbox-mineru"
@@ -107,7 +99,7 @@
                   <rect
                     v-else
                     :x="ann.bbox[0]"
-                    :y="rp.pageHeight - ann.bbox[3]"
+                    :y="ann.bbox[1]"
                     :width="ann.bbox[2] - ann.bbox[0]"
                     :height="ann.bbox[3] - ann.bbox[1]"
                     class="bbox-rect"

@@ -1073,16 +1073,19 @@ def generate_ontology():
                         for para_block in para_blocks:
                             block_type = para_block.get('type')
                             lines = para_block.get('lines', [])
+                            line_bbox = para_block.get('bbox')
 
                             if not lines:
                                 continue
 
+                            line_content = ""
                             for line in lines:
-                                line_bbox = line.get('bbox')
-                                line_content = "".join(span.get('content', '') for span in line.get('spans', []))
+                                #line_bbox = line.get('bbox')
+                                span_content = "".join(span.get('content', '') for span in line.get('spans', []))
+                                line_content += '\n' + span_content
 
-                                if line_content.strip():
-                                    line_metadata.append((line_content, line_bbox, page_idx, block_type))
+                            if line_content.strip():
+                                line_metadata.append((line_content, line_bbox, page_idx, block_type))
 
 
                     # 使用 line_metadata 构建 all_chunks
