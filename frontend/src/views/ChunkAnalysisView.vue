@@ -6,18 +6,6 @@
         <div class="brand" @click="router.push('/')">Knowledge EviGrap</div>
       </div>
 
-      <div class="header-center">
-        <div class="view-switcher">
-          <button
-            v-for="mode in ['chunk']"
-            :key="mode"
-            class="switch-btn active"
-          >
-            Chunk Analysis
-          </button>
-        </div>
-      </div>
-
       <div class="header-right">
         <StepNavigator
           :projectId="currentProjectId"
@@ -640,6 +628,7 @@ const poolFilteredClauses = computed(() => {
 // ============================================================================
 
 onMounted(async () => {
+  console.log('[onMounted] projectId=', props.projectId)
   await initPdfJs()
 
   if (props.projectId === 'new') {
@@ -721,6 +710,7 @@ async function handleNewProject() {
 }
 
 async function loadExistingProject() {
+  console.log('[loadExistingProject] START')
   try {
     const res = await getProject(currentProjectId.value)
     if (!res.success) {
@@ -742,26 +732,24 @@ async function loadExistingProject() {
       }
     }
 
+    // 并行加载 PDF 和分析数据（MinerU + 智能分析）
+    const tasks = []
     if (pdfFileName.value) {
-      await loadPdf()
+      tasks.push(loadPdf())
     }
+    tasks.push(loadMineruResults())
 
-    // 根据状态决定后续流程
     if (res.data.status === 'graph_chunked' || res.data.status === 'graph_completed') {
-      // graph_completed: 图谱已构建完成，直接展示已有的分析数据
-      await loadAnalysis()
+      tasks.push(loadAnalysis())
     } else if (res.data.status === 'graph_chunking') {
+      tasks.push(loadAnalysis())
       startTaskSSE()
       startProgressPolling()
-      try { await loadAnalysis() } catch (e) { /* 尚未生成 */ }
     } else if (res.data.status === 'ontology_generated' || res.data.status === 'created') {
       showStartButton.value = true
-      // 自动加载 MinerU 解析结果
-      await loadMineruResults()
     }
 
-    // 尝试加载 MinerU 结果
-    await loadMineruResults()
+    await Promise.allSettled(tasks)
   } catch (err) {
     realtimeLogs.value.push(`❌ 加载项目失败: ${err.message}`)
   }
@@ -775,14 +763,14 @@ async function loadMineruResults() {
   if (!currentProjectId.value) return
   try {
     const res = await getMineruChunks(currentProjectId.value)
-    if (res.success) {
-      mineruChunks.value = res.data.chunks || []
+    if (res && Array.isArray(res.data?.chunks)) {
+      mineruChunks.value = res.data.chunks
       mineruSummary.value = res.data.summary
       mineruMode.value = mineruChunks.value.length > 0
       realtimeLogs.value.push(`✅ MinerU 解析结果已加载: ${mineruChunks.value.length} 个布局块`)
     }
   } catch (e) {
-    // 忽略，没有 MinerU 结果
+    // 静默忽略
   }
 }
 
@@ -888,41 +876,39 @@ async function loadPdf() {
 
 async function renderAllPages(pdf) {
   const containerWidth = viewerContainer.value?.clientWidth || 600
-  const pages = []
 
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i)
-    const unscaledViewport = page.getViewport({ scale: 1 })
-    const scale = (containerWidth - 20) / unscaledViewport.width
-    const viewport = page.getViewport({ scale })
-
-    pages.push({
-      pageNum: i,
-      pageWidth: unscaledViewport.width,
-      pageHeight: unscaledViewport.height,
-      canvasWidth: viewport.width,
-      canvasHeight: viewport.height
+  // 并行获取所有页面元数据（getPage 内部解析内容，较耗时）
+  const pageMetas = await Promise.all(
+    Array.from({ length: pdf.numPages }, async (_, i) => {
+      const page = await pdf.getPage(i + 1)
+      const unscaledViewport = page.getViewport({ scale: 1 })
+      const scale = (containerWidth - 20) / unscaledViewport.width
+      const viewport = page.getViewport({ scale })
+      return {
+        pageNum: i + 1,
+        page,
+        pageWidth: unscaledViewport.width,
+        pageHeight: unscaledViewport.height,
+        canvasWidth: viewport.width,
+        canvasHeight: viewport.height,
+        viewport
+      }
     })
-  }
+  )
 
-  renderedPages.value = pages
+  renderedPages.value = pageMetas
 
   // 等 canvas ref 绑定后再渲染
   await nextTick()
 
-  for (const rp of pages) {
+  // 串行渲染（PDF.js 渲染本身是 GPU 操作，并行反而可能冲突）
+  for (const rp of pageMetas) {
     const canvas = pageCanvasMap.value[rp.pageNum]
     if (!canvas) continue
-    const page = await pdf.getPage(rp.pageNum)
-    const containerWidth = viewerContainer.value?.clientWidth || 600
-    const unscaledViewport = page.getViewport({ scale: 1 })
-    const scale = (containerWidth - 20) / unscaledViewport.width
-    const viewport = page.getViewport({ scale })
-
-    canvas.height = viewport.height
-    canvas.width = viewport.width
+    canvas.height = rp.canvasHeight
+    canvas.width = rp.canvasWidth
     const context = canvas.getContext('2d')
-    await page.render({ canvasContext: context, viewport }).promise
+    await rp.page.render({ canvasContext: context, viewport: rp.viewport }).promise
   }
 }
 
