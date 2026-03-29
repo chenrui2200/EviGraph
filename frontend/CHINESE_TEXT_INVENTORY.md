@@ -123,8 +123,8 @@ Complete inventory of Chinese text found in the MiroFish frontend application th
 
 ---
 
-### 8. **components/Step1GraphBuild.vue** (36 occurrences, 31 unique)
-**Location:** `/src/components/Step1GraphBuild.vue`
+### 8. **components/GraphBuild.vue** (36 occurrences, 31 unique)
+**Location:** `/src/components/GraphBuild.vue`
 **Priority:** MEDIUM (Workflow step component)
 
 **Key User-Facing Strings:**
@@ -418,7 +418,7 @@ Complete inventory of Chinese text found in the MiroFish frontend application th
 | Step3Simulation.vue | Medium | 103 | HIGH |
 | SimulationView.vue | Medium | 56 | HIGH |
 | SimulationRunView.vue | Medium | 64 | HIGH |
-| Step1GraphBuild.vue | Medium | 31 | MEDIUM |
+| GraphBuild.vue | Medium | 31 | MEDIUM |
 | MainView.vue | Low | 14 | MEDIUM |
 | InteractionView.vue | Low | 17 | MEDIUM |
 | ReportView.vue | Low | 17 | MEDIUM |

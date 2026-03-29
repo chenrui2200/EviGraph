@@ -7,7 +7,7 @@
 提供用户交互界面：
 - 项目管理流程 (上传 -> 本体生成 -> 图谱构建 -> 仿真/问答)。
 - 基于 D3.js 的图谱可视化 (`components/GraphPanel.vue`)。
-- 分步向导式的构建流程 (`components/Step1GraphBuild.vue` 等)。
+- 分步向导式的构建流程 (`components/GraphBuild.vue` 等)。
 - 交互式 AI 问答界面。
 
 ## 入口与启动
@@ -33,4 +33,4 @@
 ## 相关文件清单
 - `frontend/src/views/MainView.vue`: 应用主布局。
 - `frontend/src/components/GraphPanel.vue`: 核心图谱展示组件。
-- `frontend/src/components/Step1GraphBuild.vue` ~ `Step5Interaction.vue`: 流程化构建步骤。
+- `frontend/src/components/GraphBuild.vue` ~ `Step5Interaction.vue`: 流程化构建步骤。

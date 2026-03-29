@@ -2598,7 +2598,14 @@ def build_graph():
         intelligent_chunks = ProjectManager.get_intelligent_chunks(project_id)
         has_text = text and len(text.strip()) > 0
         has_intelligent = intelligent_chunks is not None
-        logger.info(f"[build] project={project_id} has_text={has_text} has_intelligent_chunks={has_intelligent}")
+
+        # Debug: 检查文件是否存在
+        text_path = ProjectManager._get_project_text_path(project_id)
+        chunks_path = ProjectManager._get_intelligent_chunks_path(project_id)
+        logger.info(f"[build] project={project_id}")
+        logger.info(f"[build]   extracted_text.txt exists={os.path.exists(text_path)}, size={os.path.getsize(text_path) if os.path.exists(text_path) else 0}")
+        logger.info(f"[build]   intelligent_chunks.json exists={os.path.exists(chunks_path)}, size={os.path.getsize(chunks_path) if os.path.exists(chunks_path) else 0}")
+        logger.info(f"[build]   has_text={has_text} has_intelligent_chunks={has_intelligent}")
 
         if not has_text and not has_intelligent:
             logger.warning(f"Build graph failed: no text data for project {project_id}")

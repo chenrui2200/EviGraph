@@ -25,13 +25,18 @@
         </div>
 
         <div class="card-content">
+          <!-- 无 intelligent_chunks 时显示提示 -->
+          <div v-if="!hasIntelligentChunks" class="no-chunks-warning">
+            ⚠️ 尚未完成智能Chunks分析，请先在「智能Chunks标注分析」页面完成分析。
+          </div>
+
           <p class="description">
             基于多层级分块结果，系统会自动对文档进行切片，并调用 Neo4j 构建知识图谱，提取实体和关系，形成记忆摘要。
           </p>
 
           <!-- 启动构建按钮 -->
           <button
-            v-if="currentPhase === 0 && !buildProgress"
+            v-if="currentPhase === 0 && !buildProgress && hasIntelligentChunks"
             class="action-btn start-build-btn"
             @click="emit('start-build')"
           >
@@ -120,7 +125,8 @@ const props = defineProps({
   projectData: Object,
   buildProgress: Object,
   graphData: Object,
-  systemLogs: { type: Array, default: () => [] }
+  systemLogs: { type: Array, default: () => [] },
+  hasIntelligentChunks: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['next-step', 'reset-build', 'start-build'])
@@ -309,6 +315,16 @@ watch(() => props.systemLogs.length, () => {
 }
 
 /* Step 02 Button */
+.no-chunks-warning {
+  padding: 12px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #c2410c;
+  margin-bottom: 16px;
+}
+
 .action-btn {
   width: 100%;
   background: #000;

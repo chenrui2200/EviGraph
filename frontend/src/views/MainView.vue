@@ -51,13 +51,14 @@
       <!-- Right Panel: Step Components -->
       <div class="panel-wrapper right" :style="rightPanelStyle">
         <!-- Step 1: Graph Build -->
-        <Step1GraphBuild
+        <GraphBuild
           v-if="currentStep === 1"
           :currentPhase="currentPhase"
           :projectData="projectData"
           :buildProgress="buildProgress"
           :graphData="graphData"
           :systemLogs="systemLogs"
+          :hasIntelligentChunks="hasIntelligentChunks"
           @next-step="handleNextStep"
           @reset-build="handleResetBuild"
           @start-build="startBuildGraph"
@@ -77,7 +78,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
-import Step1GraphBuild from '../components/Step1GraphBuild.vue'
+import GraphBuild from '../components/GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import Step5Interaction from '../components/Step5Interaction.vue'
 import StepNavigator from '../components/StepNavigator.vue'
@@ -96,6 +97,7 @@ const stepNames = ['Graph Build', '', '', '', 'Interaction']
 
 // Data State
 const currentProjectId = ref(route.params.projectId)
+const hasIntelligentChunks = ref(false)
 const simulationId = ref(null)
 const loading = ref(false)
 const graphLoading = ref(false)
@@ -208,18 +210,19 @@ const handleGoBack = async () => {
 
 const initProject = async () => {
   addLog('GraphBuild view initialized.')
-  // projectId === 'new' 不再直接在此创建，直接重定向到 chunk_analysis
   if (currentProjectId.value === 'new') {
     router.replace({ name: 'ChunkAnalysis', params: { projectId: currentProjectId.value } })
     return
   }
-  // 检查是否存在 intelligent_chunks.json，无则重定向到 chunk_analysis
   try {
     const res = await checkHasIntelligentChunks(currentProjectId.value)
-    if (res.success && !res.data.has_intelligent_chunks) {
-      addLog('No intelligent_chunks.json found, redirecting to chunk_analysis...')
-      router.replace({ name: 'ChunkAnalysis', params: { projectId: currentProjectId.value } })
-      return
+    if (res.success) {
+      hasIntelligentChunks.value = res.data.has_intelligent_chunks
+      if (!res.data.has_intelligent_chunks) {
+        addLog('No intelligent_chunks.json found, redirecting to chunk_analysis...')
+        router.replace({ name: 'ChunkAnalysis', params: { projectId: currentProjectId.value } })
+        return
+      }
     }
   } catch (err) {
     console.warn('Failed to check intelligent_chunks:', err)
@@ -291,6 +294,10 @@ const handleResetBuild = async () => {
 }
 
 const startBuildGraph = async (force = false) => {
+  if (!hasIntelligentChunks.value && !force) {
+    addLog('Cannot build: no intelligent_chunks.json found')
+    return
+  }
   try {
     currentPhase.value = 1
     buildProgress.value = { progress: 0, message: force ? 'Resetting and starting build...' : 'Starting build...' }

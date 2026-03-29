@@ -2,26 +2,41 @@
   <div class="chunk-analysis-view">
     <!-- Header -->
     <header class="ca-header">
-      <div class="ca-header-left">
+      <div class="header-left">
+        <div class="brand" @click="router.push('/')">Knowledge EviGrap</div>
+      </div>
+
+      <div class="header-center">
+        <div class="view-switcher">
+          <button
+            v-for="mode in ['chunk']"
+            :key="mode"
+            class="switch-btn active"
+          >
+            Chunk Analysis
+          </button>
+        </div>
+      </div>
+
+      <div class="header-right">
         <StepNavigator
           :projectId="currentProjectId"
           :projectStatus="analysisStatus"
           :currentStep="1"
         />
-        <span class="ca-project-name" v-if="projectName">{{ projectName }}</span>
-      </div>
-      <div class="ca-header-right">
+        <div class="step-divider"></div>
+        <span class="status-indicator" :class="'status-' + analysisStatus">
+          <span class="dot" :style="{ background: statusDotColor }"></span>
+          {{ statusLabel }}
+        </span>
         <div v-if="analysisStatus === 'graph_chunking'" class="progress-wrapper">
           <div class="progress-bar">
             <div class="progress-fill" :style="{ width: progressPercent + '%' }"></div>
           </div>
           <span class="progress-text">{{ progressPercent }}%</span>
         </div>
-        <span class="status-badge" :class="'status-' + analysisStatus">
-          {{ statusLabel }}
-        </span>
         <button
-          v-if="analysisStatus === 'graph_chunked'"
+          v-if="analysisStatus === 'graph_chunked' || analysisStatus === 'graph_completed'"
           class="goto-build-btn"
           @click="goToGraphBuild">
           进入图谱构建 →
@@ -563,6 +578,20 @@ const statusLabel = computed(() => {
     'failed': '失败'
   }
   return map[analysisStatus.value] || analysisStatus.value || '未知'
+})
+
+const statusDotColor = computed(() => {
+  const colorMap = {
+    'graph_chunking': '#FF5722',
+    'graph_chunked': '#4CAF50',
+    'graph_completed': '#4CAF50',
+    'graph_building': '#FF5722',
+    'failed': '#F44336',
+    'ontology_generation': '#FF5722',
+    'ontology_generated': '#4CAF50',
+    'created': '#CCC'
+  }
+  return colorMap[analysisStatus.value] || '#CCC'
 })
 
 // 页码 -> 标注列表 的缓存
@@ -1296,32 +1325,86 @@ function goToGraphBuild() {
 }
 
 /* Header */
-.ca-header {
+.header-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.brand {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 800;
+  font-size: 18px;
+  letter-spacing: 1px;
+  cursor: pointer;
+}
+.view-switcher {
+  display: flex;
+  background: #F5F5F5;
+  padding: 4px;
+  border-radius: 6px;
+  gap: 4px;
+}
+.switch-btn {
+  border: none;
+  background: transparent;
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #666;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.switch-btn.active {
+  background: #FFF;
+  color: #000;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  justify-content: flex-end;
+}
+.step-divider {
+  width: 1px;
+  height: 14px;
+  background-color: #E0E0E0;
+}
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #666;
+  font-weight: 500;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #CCC;
+}
+.status-indicator .dot { }
+
+header.ca-header {
+  height: 60px;
+  border-bottom: 1px solid #EAEAEA;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 20px;
-  background: #ffffff;
-  border-bottom: 1px solid #e0e0e0;
+  padding: 0 24px;
+  background: #FFF;
+  z-index: 100;
+  position: relative;
   flex-shrink: 0;
-  gap: 16px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
 }
-.ca-header-left { display: flex; align-items: center; gap: 12px; flex: 1; }
-.ca-project-name { font-size: 14px; color: #9CA3AF; padding-left: 12px; border-left: 1px solid #E5E7EB; margin-left: 4px; }
-.ca-header-right { display: flex; align-items: center; gap: 12px; }
 .progress-wrapper { display: flex; align-items: center; gap: 8px; }
 .progress-bar { width: 120px; height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; }
 .progress-fill { height: 100%; background: linear-gradient(90deg, #2563eb, #3b82f6); border-radius: 3px; transition: width 0.5s ease; }
 .progress-text { font-size: 12px; color: #6b7280; min-width: 36px; }
 
-.status-badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
-.status-graph_chunking { background: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe; }
-.status-graph_chunked { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
-.status-failed { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
-.status-ontology_generated { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
-.status-ontology_generation { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
-.status-created { background: #f9fafb; color: #6b7280; border: 1px solid #e5e7eb; }
 .goto-build-btn { background: #2563eb; color: white; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .goto-build-btn:hover { background: #1d4ed8; }
 
