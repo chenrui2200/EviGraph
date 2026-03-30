@@ -774,7 +774,9 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                 terms=cd.get('terms', []),
                 formula_content=cd.get('formula_content'),
                 clause_items=clause_items,
-                metadata=cd.get('metadata', {})
+                metadata=cd.get('metadata', {}),
+                source=cd.get('source', ''),
+                page=cd.get('page')
             )
             result.clauses.append(clause)
 
@@ -1254,6 +1256,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                     applicable_systems=systems,
                     cross_refs=self._build_cross_refs(cd),
                     source=source_info.get("source", ""),
+                    page=source_info.get("page"),
                     triplets=triplets,
                     clause_items=clause_items,
                     is_term_definition=cd.get("is_term_definition", False),

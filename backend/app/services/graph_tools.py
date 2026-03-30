@@ -1676,7 +1676,9 @@ Your response:"""
             logger.debug(f"Batch get nodes for PDF info failed: {e}")
             nodes_map = {}
 
-        missing_uuids: List[str] = []
+        # Step 1: Quick path — use node's own pdf_* properties if bbox is available
+        complete_uuids: List[str] = []
+        partial_uuids: List[str] = []
 
         for node_uuid in node_uuids:
             pdf_info: Dict[str, Any] = {
@@ -1691,44 +1693,58 @@ Your response:"""
                 bbox = node.get("pdf_bbox") or node.get("bbox")
                 page_width = node.get("pdf_page_width") or node.get("page_width")
                 page_height = node.get("pdf_page_height") or node.get("page_height")
-                if source or page:
-                    pdf_info.update({
-                        "source": source,
-                        "page": page,
-                        "bbox": bbox,
-                        "page_width": page_width,
-                        "page_height": page_height,
-                    })
+                pdf_info.update({
+                    "source": source,
+                    "page": page,
+                    "bbox": bbox,
+                    "page_width": page_width,
+                    "page_height": page_height,
+                })
+                # Complete: has bbox (can locate on PDF)
+                if bbox is not None:
                     result[node_uuid] = pdf_info
+                    complete_uuids.append(node_uuid)
                 else:
-                    missing_uuids.append(node_uuid)
+                    partial_uuids.append(node_uuid)
             else:
-                missing_uuids.append(node_uuid)
+                partial_uuids.append(node_uuid)
 
-        # Step 2: Fallback to Episode for missing nodes
-        for node_uuid in missing_uuids:
+        # Step 2: Enrich partial nodes — try node's own episodes first, then Term->Clause
+        for node_uuid in partial_uuids:
+            if node_uuid in result:
+                continue  # already complete from Step 1
             pdf_info: Dict[str, Any] = {
                 "source": None, "page": None, "bbox": None,
                 "page_width": None, "page_height": None, "episode_text": None,
             }
             try:
+                # Try node's own episodes (MENTIONS relationship)
                 node_eps = self.storage.get_node_episodes(node_uuid, limit=1)
                 if node_eps:
                     ep = node_eps[0]
                     meta = ep.get("metadata", {})
-                    ep_source = ep.get("source") or meta.get("source")
-                    ep_page = ep.get("page") or meta.get("page")
-                    ep_bbox = meta.get("bbox")
-                    ep_page_width = meta.get("page_width") or meta.get("pageWidth")
-                    ep_page_height = meta.get("page_height") or meta.get("pageHeight")
                     pdf_info.update({
-                        "source": ep_source,
-                        "page": ep_page,
-                        "bbox": ep_bbox,
-                        "page_width": ep_page_width,
-                        "page_height": ep_page_height,
+                        "source": ep.get("source") or meta.get("source"),
+                        "page": ep.get("page") or meta.get("page"),
+                        "bbox": meta.get("bbox"),
+                        "page_width": meta.get("page_width") or meta.get("pageWidth"),
+                        "page_height": meta.get("page_height") or meta.get("pageHeight"),
                         "episode_text": ep.get("text"),
                     })
+                else:
+                    # Term nodes: follow DEFINES to find Clause, then get its episodes
+                    clause_eps = self.storage.get_term_clause_episodes(node_uuid, limit=1)
+                    if clause_eps:
+                        clause_ep = clause_eps[0]
+                        meta = clause_ep.get("metadata", {})
+                        pdf_info.update({
+                            "source": clause_ep.get("source") or meta.get("source"),
+                            "page": clause_ep.get("page") or meta.get("page"),
+                            "bbox": meta.get("bbox"),
+                            "page_width": meta.get("page_width") or meta.get("pageWidth"),
+                            "page_height": meta.get("page_height") or meta.get("pageHeight"),
+                            "episode_text": clause_ep.get("text"),
+                        })
             except Exception:
                 pass
             result[node_uuid] = pdf_info

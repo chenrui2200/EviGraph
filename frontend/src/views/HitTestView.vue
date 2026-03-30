@@ -950,6 +950,7 @@ const highlightInGraph = (fact) => {
     highlightedNodeId.value = nodeId
   }
 }
+const highlightFactInGraph = highlightInGraph
 
 const clearHighlight = () => {
   highlightedNodeId.value = selectedNodeId.value

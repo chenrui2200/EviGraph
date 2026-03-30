@@ -4,8 +4,10 @@ Uses project context mechanism with server-side state persistence
 """
 
 import os
+import re
 import json
 import queue
+import shutil
 import traceback
 import threading
 import requests
@@ -93,6 +95,10 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
 
                 # 优先使用已保存的智能分块结果（LLM分析结果），避免重复LLM调用
                 intelligent_chunks_data = ProjectManager.get_intelligent_chunks(project_id)
+
+                # 回填 page 信息（旧数据可能缺少 page，从 chunks.json 匹配）
+                if intelligent_chunks_data:
+                    _backfill_page_info(project_id, intelligent_chunks_data, build_logger)
 
                 if intelligent_chunks_data:
                     # 直接使用 LLM 分析结果，不再重复调用 LLM
@@ -915,6 +921,80 @@ def get_project_document(project_id: str, filename: str):
     return response
 
 
+# ============================================================================
+# 辅助函数
+# ============================================================================
+
+def _backfill_page_info(project_id: str, intelligent_chunks_data: Dict, logger) -> None:
+    """
+    回填 intelligent_chunks.json 中缺失的 page 信息。
+
+    从 chunks.json（MinerU 解析产物）中查找对应 clause_id 的 page_idx，
+    填充到 clauses 的 page 字段中。确保旧数据也能支持定位到文档页面。
+    """
+    chunks_data = ProjectManager.get_chunks(project_id)
+    if not chunks_data:
+        logger.debug(f"[{project_id}] 回填 page: chunks.json 不存在，跳过")
+        return
+
+    # 构建 clause_id → page 的映射
+    # MinerU chunks 中的 page_idx 字段对应页码
+    clause_page_map: Dict[str, int] = {}
+    clause_bbox_map: Dict[str, Dict] = {}
+
+    for chunk in chunks_data:
+        chunk_id = chunk.get('chunk_id', '')
+        content = chunk.get('content', '')
+
+        # 尝试从 chunk_id 中提取 clause_id（格式: chunk_0_123）
+        # 同时也通过内容匹配来找 clause
+        page_idx = chunk.get('page_idx')
+        bbox = chunk.get('bbox_pdf') or chunk.get('bbox_viewport')
+        source = chunk.get('source', '')
+
+        if page_idx is not None and content:
+            # 提取条款编号（匹配形如 "2.0.36"、"5.2.8" 等）
+            matches = re.findall(r'\b(\d+(?:\.\d+)+)\b', content)
+            for m in matches:
+                if m not in clause_page_map:
+                    clause_page_map[m] = page_idx
+                    clause_bbox_map[m] = {
+                        'bbox': bbox,
+                        'page_idx': page_idx,
+                        'page_width': chunk.get('page_width'),
+                        'page_height': chunk.get('page_height'),
+                        'source': source
+                    }
+                break  # 只取第一个条款编号作为代表
+
+    if not clause_page_map:
+        logger.debug(f"[{project_id}] 回填 page: chunks.json 中无条款编号，跳过")
+        return
+
+    # 回填到 clauses
+    filled_count = 0
+    for clause in intelligent_chunks_data.get('clauses', []):
+        clause_id = clause.get('clause_id', '')
+        if clause_id and clause.get('page') is None and clause_id in clause_page_map:
+            page_info = clause_page_map[clause_id]
+            bbox_info = clause_bbox_map[clause_id]
+            clause['page'] = page_info
+            clause['bbox'] = bbox_info.get('bbox')
+            clause['metadata'] = clause.get('metadata', {})
+            clause['metadata']['page_idx'] = bbox_info['page_idx']
+            clause['metadata']['page_width'] = bbox_info.get('page_width')
+            clause['metadata']['page_height'] = bbox_info.get('page_height')
+            clause['metadata']['source'] = bbox_info.get('source')
+            filled_count += 1
+
+    if filled_count > 0:
+        # 保存回填后的数据
+        ProjectManager.save_intelligent_chunks(project_id, intelligent_chunks_data)
+        logger.info(f"[{project_id}] 回填 page: 成功填充 {filled_count}/{len(intelligent_chunks_data.get('clauses', []))} 个条款的 page 信息")
+    else:
+        logger.debug(f"[{project_id}] 回填 page: 无需填充（clauses 已包含 page 或未匹配到条款编号）")
+
+
 # ============== Interface 1: Upload Files and Generate Ontology ==============
 
 @graph_bp.route('/ontology/generate', methods=['POST'])
@@ -947,34 +1027,49 @@ def generate_ontology():
                 "error": "Please upload at least one document file"
             }), 400
 
-        # Create project first
+        # 1. 创建项目对象（仅内存中，不创建目录）
         project = ProjectManager.create_project(name=project_name)
         project.simulation_requirement = simulation_requirement
 
-        # Save files to disk immediately (cannot do this in background thread as request context will be gone)
+        # 2. 先验证所有文件，全部有效后才写入磁盘（避免留下空目录）
+        valid_files = [
+            f for f in uploaded_files
+            if f and f.filename and allowed_file(f.filename)
+        ]
+        if not valid_files:
+            return jsonify({
+                "success": False,
+                "error": "No valid files uploaded"
+            }), 400
+
+        # 3. 创建项目目录结构（此时才开始写磁盘）
+        ProjectManager.init_project_dirs(project.project_id)
+
+        # 4. 保存文件到磁盘
         saved_files = []
         file_save_errors = []
-        for file in uploaded_files:
-            if file and file.filename and allowed_file(file.filename):
-                try:
-                    file_info = ProjectManager.save_file_to_project(
-                        project.project_id,
-                        file,
-                        file.filename
-                    )
-                    saved_files.append(file_info)
-                    project.files.append({
-                        "filename": file_info["original_filename"],
-                        "size": file_info["size"]
-                    })
-                except Exception as file_err:
-                    logger.warning(f"Failed to save file {file.filename}: {file_err}")
-                    file_save_errors.append(f"{file.filename}: {file_err}")
+        for file in valid_files:
+            try:
+                file_info = ProjectManager.save_file_to_project(
+                    project.project_id,
+                    file,
+                    file.filename
+                )
+                saved_files.append(file_info)
+                project.files.append({
+                    "filename": file_info["original_filename"],
+                    "size": file_info["size"]
+                })
+            except Exception as file_err:
+                logger.warning(f"Failed to save file {file.filename}: {file_err}")
+                file_save_errors.append(f"{file.filename}: {file_err}")
 
         if not saved_files:
-            ProjectManager.delete_project(project.project_id)
+            # 清理刚创建的目录
+            shutil.rmtree(ProjectManager._get_project_dir(project.project_id), ignore_errors=True)
             return jsonify({"success": False, "error": "No valid files uploaded"}), 400
 
+        # 5. 保存项目元数据
         ProjectManager.save_project(project)
 
         # Create task

@@ -236,6 +236,12 @@ class ProjectManager:
     @classmethod
     def _get_project_dir(cls, project_id: str) -> str:
         """Get project directory path, ensure it exists"""
+        if not project_id:
+            import traceback
+            from ..utils.logger import get_logger
+            logger = get_logger('mirofish.project')
+            logger.error(f"[BUG] _get_project_dir called with empty project_id!\n{traceback.format_stack()}")
+            raise ValueError("project_id cannot be empty")
         project_dir = os.path.join(cls.PROJECTS_DIR, project_id)
         os.makedirs(project_dir, exist_ok=True)
         return project_dir
@@ -263,7 +269,9 @@ class ProjectManager:
     @classmethod
     def create_project(cls, name: str = "Unnamed Project") -> Project:
         """
-        Create new project
+        Create new project (in-memory only, no directory/file I/O).
+
+        Directory structure is created separately in generate_ontology after files are saved.
 
         Args:
             name: Project name
@@ -271,8 +279,6 @@ class ProjectManager:
         Returns:
             Newly created Project object
         """
-        cls._ensure_projects_dir()
-
         project_id = f"proj_{uuid.uuid4().hex[:12]}"
         now = datetime.now().isoformat()
 
@@ -284,16 +290,19 @@ class ProjectManager:
             updated_at=now
         )
 
-        # Create project directory structure
+        return project
+
+    @classmethod
+    def init_project_dirs(cls, project_id: str) -> None:
+        """
+        Create the on-disk directory structure for a project.
+        Called explicitly after all files have been saved successfully.
+        """
+        cls._ensure_projects_dir()
         project_dir = cls._get_project_dir(project_id)
         files_dir = cls._get_project_files_dir(project_id)
         os.makedirs(project_dir, exist_ok=True)
         os.makedirs(files_dir, exist_ok=True)
-
-        # Save project metadata
-        cls.save_project(project)
-
-        return project
 
     @classmethod
     def save_project(cls, project: Project) -> None:
