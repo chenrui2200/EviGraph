@@ -71,6 +71,8 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "clause_id": clause.clause_id,
         "clause_title": clause.clause_title,
         "content": clause.content,
+        "source": clause.source or "",
+        "page": clause.page,
         "requirement_type": clause.requirement_type.value if hasattr(clause.requirement_type, 'value') else str(clause.requirement_type),
         "conditions": clause.conditions or [],
         "actions": clause.actions or [],

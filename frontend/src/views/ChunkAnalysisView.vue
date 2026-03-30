@@ -275,9 +275,14 @@
         <div class="chapter-tree" v-if="analysisData">
           <div class="tree-header">
             <span>章节树</span>
-            <button class="expand-all-btn" @click="toggleAllChapters">
-              {{ allExpanded ? '全部收起' : '全部展开' }}
-            </button>
+            <div class="tree-actions">
+              <button class="reset-chunks-btn" @click="handleResetChunking" :disabled="starting">
+                🔄 重新分析
+              </button>
+              <button class="expand-all-btn" @click="toggleAllChapters">
+                {{ allExpanded ? '全部收起' : '全部展开' }}
+              </button>
+            </div>
           </div>
 
           <div class="tree-body">
@@ -1554,8 +1559,12 @@ header.ca-header {
   color: #1a1a2e;
   border-bottom: 1px solid #e0e0e0;
 }
+.tree-actions { display: flex; align-items: center; gap: 6px; }
 .expand-all-btn { background: none; border: 1px solid #d0d7de; color: #6b7280; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
 .expand-all-btn:hover { background: #f0f0f0; color: #1a1a2e; }
+.reset-chunks-btn { background: none; border: 1px solid #d97706; color: #d97706; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+.reset-chunks-btn:hover:not(:disabled) { background: #fff7ed; }
+.reset-chunks-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .tree-body { overflow-y: auto; max-height: calc(60vh - 80px); }
 
 .chapter-item { border-bottom: 1px solid #f0f0f0; }

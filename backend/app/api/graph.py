@@ -162,6 +162,8 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                             clause_id=c.get('clause_id', ''),
                             clause_title=c.get('clause_title', ''),
                             content=c.get('content', ''),
+                            source=c.get('source'),
+                            page=c.get('page'),
                             requirement_type=req_type,
                             triplets=clause_triplets,
                             parent_chapter=c.get('parent_chapter'),
@@ -2089,7 +2091,7 @@ def get_intelligent_chunks(project_id: str):
         return jsonify({
             "success": False,
             "error": "尚未执行 LLM 分块"
-        }), 404
+        }), 200
 
     return jsonify({
         "success": True,
@@ -2142,7 +2144,7 @@ def get_chunk_analysis(project_id: str):
         return jsonify({
             "success": False,
             "error": "尚未执行 LLM 分块"
-        }), 404
+        }), 200
 
     sections = chunks.get('sections', [])
     clauses = chunks.get('clauses', [])
