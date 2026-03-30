@@ -249,7 +249,7 @@ class ProjectManager:
     @classmethod
     def _get_project_meta_path(cls, project_id: str) -> str:
         """Get project metadata file path"""
-        return os.path.join(cls._get_project_dir(project_id), 'project.json')
+        return os.path.join(cls.PROJECTS_DIR, project_id, 'project.json')
 
     @classmethod
     def _get_project_files_dir(cls, project_id: str) -> str:
@@ -312,6 +312,8 @@ class ProjectManager:
         temp_path = meta_path + ".tmp"
 
         try:
+            # Ensure parent directory exists
+            os.makedirs(os.path.dirname(meta_path), exist_ok=True)
             # Write to temporary file first to ensure atomicity
             with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(project.to_dict(), f, ensure_ascii=False, indent=2)
