@@ -53,8 +53,24 @@
               </label>
               <label class="checkbox-label">
                 <input type="checkbox" v-model="objectFirstMode" />
-                <span>Object-first DFS 检索</span>
+                <span>Root-first DFS 检索</span>
               </label>
+              <!-- Root Type 切换 -->
+              <span v-if="objectFirstMode" class="depth-label">
+                根节点类型
+                <div class="root-type-pills">
+                  <button
+                    class="depth-pill"
+                    :class="{ active: rootType === 'Object' }"
+                    @click="rootType = 'Object'"
+                  >Object</button>
+                  <button
+                    class="depth-pill"
+                    :class="{ active: rootType === 'Term' }"
+                    @click="rootType = 'Term'"
+                  >Term</button>
+                </div>
+              </span>
               <span v-if="objectFirstMode" class="depth-label">
                 深度
                 <div class="depth-pills">
@@ -84,16 +100,16 @@
             <!-- ===== Object-first DFS 检索结果 ===== -->
             <div v-if="objectFirstRows.length > 0" class="results-list">
               <div class="results-header">
-                <span>Object-first DFS 命中 (Found {{ objectFirstRows.length }} Objects)</span>
+                <span>Root-first DFS 命中 (Found {{ objectFirstRows.length }} {{ rootType }}s)</span>
                 <button class="reset-filter-btn" @click="resetFilter">重置视图</button>
               </div>
 
               <div class="results-summary-card">
                 <div class="summary-title">💡 检索分析</div>
                 <p class="summary-content">
-                  本次 Object-first 检索命中了 {{ objectFirstRows.length }} 个 Object 节点，
+                  本次 Root-first 检索命中了 {{ objectFirstRows.length }} 个 {{ rootType }} 节点，
                   共 {{ objectFirstRows.reduce((s, r) => s + (r.facts?.length || 0), 0) }} 条关联事实。
-                  每个 Object 节点为一行结果，DFS 深度优先遍历其关联知识。
+                  每个 {{ rootType }} 节点为一行结果，DFS 深度优先遍历其关联知识。
                 </p>
               </div>
 
@@ -109,10 +125,10 @@
                   @mouseleave="clearHighlight"
                   @click="selectObjectRow(row)"
                 >
-                  <!-- Object 节点标题 -->
+                  <!-- Root 节点标题 -->
                   <div class="object-row-header">
                     <div class="object-name">
-                      <span class="object-badge">Object</span>
+                      <span class="object-badge" :class="{ term: rootType === 'Term' }">{{ rootType }}</span>
                       <strong>{{ row.object_node?.name || 'Unknown' }}</strong>
                     </div>
                     <div class="object-score">
@@ -362,6 +378,7 @@ const searching = ref(false)
 const searchQuery = ref('')
 const filterGraph = ref(true)
 const objectFirstMode = ref(true)  // Object-first DFS 检索模式
+const rootType = ref('Object')     // Root-first 根节点类型: Object 或 Term
 const maxDepth = ref(3)             // DFS 最大深度
 const fullGraphData = ref({ nodes: [], edges: [] })
 // 传统检索结果（facts/nodes/edges）
@@ -844,12 +861,13 @@ const handleSearch = async () => {
   searching.value = true
   try {
     if (objectFirstMode.value) {
-      // Object-first DFS 检索
+      // Root-first DFS 检索
       const res = await searchObjectFirst({
         graph_id: graphId.value,
         query: searchQuery.value,
         limit: 15,
-        max_depth: maxDepth.value
+        max_depth: maxDepth.value,
+        root_type: rootType.value
       })
       if (res.success) {
         objectFirstRows.value = res.data.rows || []
@@ -883,6 +901,7 @@ const handleSearch = async () => {
 const resetFilter = () => {
   results.value = { facts: [], nodes: [], edges: [] }
   objectFirstRows.value = []
+  rootType.value = 'Object'
 }
 
 const highlightInGraph = (fact) => {
@@ -1694,6 +1713,22 @@ onMounted(async () => {
   border-left: 1px solid #e0e0e0;
 }
 
+.root-type-pills {
+  display: flex;
+  gap: 4px;
+}
+
+.root-type-pills .depth-pill {
+  width: auto;
+  min-width: 50px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 13px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .depth-pills {
   display: flex;
   gap: 4px;
@@ -1776,6 +1811,10 @@ onMounted(async () => {
   font-weight: 700;
   padding: 2px 8px;
   border-radius: 10px;
+}
+
+.object-badge.term {
+  background: #9c27b0;
 }
 
 .object-score {

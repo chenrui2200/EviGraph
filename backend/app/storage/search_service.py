@@ -128,6 +128,39 @@ ORDER BY score DESC
 LIMIT $limit
 """
 
+# --- Term node search Cypher queries ---
+
+# Cypher for vector similarity search on Term entity nodes
+_VECTOR_SEARCH_TERM_NODES = """
+CALL db.index.vector.queryNodes('entity_embedding', $limit, $query_vector)
+YIELD node, score
+WHERE node.graph_id = $graph_id AND 'Term' IN labels(node)
+RETURN node AS n, score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
+# Cypher for fulltext search on Term nodes specifically
+_FULLTEXT_SEARCH_TERM_NODES = """
+CALL db.index.fulltext.queryNodes('entity_fulltext', $query_text)
+YIELD node, score
+WHERE node.graph_id = $graph_id AND 'Term' IN labels(node)
+RETURN node AS n, score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
+# Fallback: direct CONTAINS search for Term nodes
+_CONTAINS_SEARCH_TERM_NODES = """
+MATCH (n:Entity {graph_id: $graph_id})
+WHERE 'Term' IN labels(n)
+  AND (toLower(n.name) CONTAINS toLower($keyword)
+       OR toLower(n.summary) CONTAINS toLower($keyword))
+RETURN n, 1.0 AS score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
 # Cypher for vector search on episodes (raw text chunks)
 _VECTOR_SEARCH_EPISODES = """
 CALL db.index.vector.queryNodes('episode_embedding', $limit, $query_vector)
@@ -504,6 +537,127 @@ class SearchService:
             return results
         except Exception as e:
             logger.debug(f"Object CONTAINS search failed: {e}")
+
+        return []
+
+    def search_term_nodes(
+        self,
+        session: Neo4jSession,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search Term nodes specifically using hybrid scoring (vector + keyword).
+        Only returns nodes with label 'Term'.
+
+        Returns list of dicts with node properties + 'score'.
+        """
+        _index_status.check_indexes(session)
+
+        query_vector = self.embedding.embed(query)
+
+        vector_results = []
+        if _index_status.entity_embedding:
+            vector_results = self._run_term_node_vector_search(
+                session, graph_id, query_vector, limit * 2
+            )
+        else:
+            logger.debug("Skipping Term node vector search (index not available)")
+
+        keyword_results = self._run_term_node_keyword_search(
+            session, graph_id, query, limit * 2
+        )
+
+        merged = self._merge_results(
+            vector_results, keyword_results, key="uuid", limit=limit
+        )
+        logger.debug(
+            f"Term node search '{query}': "
+            f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
+            f"merged={len(merged)}, vector_index={'available' if _index_status.entity_embedding else 'N/A'}"
+        )
+        return merged
+
+    def _run_term_node_vector_search(
+        self, session: Neo4jSession, graph_id: str, query_vector: List[float], limit: int
+    ) -> List[Dict[str, Any]]:
+        """Run vector similarity search on Term entity embedding."""
+        try:
+            result = session.run(
+                _VECTOR_SEARCH_TERM_NODES,
+                graph_id=graph_id,
+                query_vector=query_vector,
+                limit=limit,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                for record in result
+            ]
+            logger.debug(f"Term vector search: {len(results)} results (index available)")
+            return results
+        except Exception as e:
+            logger.debug(f"Vector Term node search failed: {e}")
+            return []
+
+    def _run_term_node_keyword_search(
+        self, session: Neo4jSession, graph_id: str, query: str, limit: int
+    ) -> List[Dict[str, Any]]:
+        """Run fulltext search on Term entity name + summary with CONTAINS fallback."""
+        # Strategy 1: Fulltext index search (primary)
+        try:
+            safe_query = self._escape_lucene(query)
+            result = session.run(
+                _FULLTEXT_SEARCH_TERM_NODES,
+                graph_id=graph_id,
+                query_text=safe_query,
+                limit=limit,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                for record in result
+            ]
+            if results:
+                logger.debug(f"Term keyword search (fulltext): '{query}' -> {len(results)} results")
+                return results
+        except Exception as e:
+            logger.debug(f"Term fulltext search failed: {e}")
+
+        # Strategy 2: Fulltext index with wildcard (partial match)
+        try:
+            wildcard_query = "*" + self._escape_lucene(query.strip()) + "*"
+            result = session.run(
+                _FULLTEXT_SEARCH_TERM_NODES,
+                graph_id=graph_id,
+                query_text=wildcard_query,
+                limit=limit,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                for record in result
+            ]
+            if results:
+                logger.debug(f"Term keyword search (wildcard): '{query}' -> {len(results)} results")
+                return results
+        except Exception as e:
+            logger.debug(f"Term wildcard search failed: {e}")
+
+        # Strategy 3: Direct CONTAINS fallback (no index required)
+        try:
+            result = session.run(
+                _CONTAINS_SEARCH_TERM_NODES,
+                graph_id=graph_id,
+                keyword=query.strip(),
+                limit=limit,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                for record in result
+            ]
+            logger.debug(f"Term keyword search (contains): '{query}' -> {len(results)} results")
+            return results
+        except Exception as e:
+            logger.debug(f"Term CONTAINS search failed: {e}")
 
         return []
 

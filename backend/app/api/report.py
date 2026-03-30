@@ -432,17 +432,18 @@ def search_graph_tool():
 @report_bp.route('/tools/search-object-first', methods=['POST'])
 def search_object_first_tool():
     """
-    Object-first DFS search tool.
-    Results are grouped by Object node, each Object = one row.
+    Root-node DFS search tool (Object-first or Term-first).
+    Results are grouped by root node (Object or Term), each root node = one row.
 
     Request body:
         - graph_id: str (required)
         - query: str (required)
-        - limit: int (optional, default 10) - max Object rows
+        - limit: int (optional, default 10) - max root node rows
         - max_depth: int (optional, default 3) - DFS max depth
+        - root_type: str (optional, default "Object") - "Object" or "Term"
 
     Response:
-        ObjectFirstSearchResult with 'rows' grouped by Object node.
+        ObjectFirstSearchResult with 'rows' grouped by root node.
         Each row contains: object_node, traversal_paths, traversal_edges, facts.
     """
     try:
@@ -451,11 +452,14 @@ def search_object_first_tool():
         query = data.get('query')
         limit = data.get('limit', 10)
         max_depth = data.get('max_depth', 3)
+        root_type = data.get('root_type', 'Object')
 
         if not graph_id:
             return jsonify({"success": False, "error": "Please provide graph_id"}), 400
         if not query:
             return jsonify({"success": False, "error": "Please provide query"}), 400
+        if root_type not in ("Object", "Term"):
+            return jsonify({"success": False, "error": "root_type must be 'Object' or 'Term'"}), 400
 
         storage = current_app.extensions.get('neo4j_storage')
         if not storage:
@@ -467,6 +471,7 @@ def search_object_first_tool():
             query=query,
             limit=limit,
             max_depth=max_depth,
+            root_type=root_type,
         )
 
         return jsonify({"success": True, "data": result.to_dict()})

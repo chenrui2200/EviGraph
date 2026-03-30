@@ -133,6 +133,26 @@ class GraphStorage(ABC):
             List of Object node dicts with 'score' field.
         """
 
+    @abstractmethod
+    def search_term_nodes(
+        self,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search Term nodes specifically using hybrid scoring.
+        Only returns nodes with label 'Term'.
+
+        Args:
+            graph_id: Graph to search in
+            query: Search query text
+            limit: Max results
+
+        Returns:
+            List of Term node dicts with 'score' field.
+        """
+
     # --- Graph info ---
 
     @abstractmethod

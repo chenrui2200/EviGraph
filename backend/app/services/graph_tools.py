@@ -1232,37 +1232,49 @@ Your response:"""
         query: str,
         limit: int = 10,
         max_depth: int = 3,
+        root_type: str = "Object",
     ) -> ObjectFirstSearchResult:
         """
-        Object-first DFS 检索。
+        Root-node-first DFS 检索。
 
         检索策略：
-        1. 首轮命中 Object 节点（混合向量+关键词搜索，仅返回 Object 类型）
-        2. 从每个 Object 节点出发，深度优先遍历图谱
-        3. 每个 Object 节点生成一条结果行（ObjectFirstRow）
+        1. 首轮命中 root_type 节点（Object 或 Term，支持混合向量+关键词搜索）
+        2. 从每个根节点出发，深度优先遍历图谱
+        3. 每个根节点生成一条结果行（ObjectFirstRow）
         4. 对各行按相关性打分排序
 
         Args:
             graph_id: 图谱 ID
             query: 检索查询
-            limit: 最多返回多少个 Object 行
+            limit: 最多返回多少个根节点行
             max_depth: DFS 最大深度（默认 3）
+            root_type: 根节点类型，"Object"（默认）或 "Term"
 
         Returns:
-            ObjectFirstSearchResult，按 Object 节点分组的 DFS 检索结果
+            ObjectFirstSearchResult，按根节点分组的 DFS 检索结果
         """
-        logger.info(f"Object-first DFS search: graph_id={graph_id}, query={query[:50]}..., max_depth={max_depth}")
+        valid_root_types = ["Object", "Term"]
+        if root_type not in valid_root_types:
+            root_type = "Object"
+        logger.info(f"Root-node DFS search: graph_id={graph_id}, query={query[:50]}..., max_depth={max_depth}, root_type={root_type}")
 
         try:
-            # Step 1: 搜索 Object 节点（首轮必须命中 Object）
-            object_nodes = self.storage.search_object_nodes(
-                graph_id=graph_id,
-                query=query,
-                limit=limit,
-            )
+            # Step 1: 搜索根节点（Object 或 Term）
+            if root_type == "Term":
+                root_nodes = self.storage.search_term_nodes(
+                    graph_id=graph_id,
+                    query=query,
+                    limit=limit,
+                )
+            else:
+                root_nodes = self.storage.search_object_nodes(
+                    graph_id=graph_id,
+                    query=query,
+                    limit=limit,
+                )
 
-            if not object_nodes:
-                logger.info("No Object nodes found for the query")
+            if not root_nodes:
+                logger.info(f"No {root_type} nodes found for the query")
                 return ObjectFirstSearchResult(
                     query=query,
                     rows=[],
@@ -1270,31 +1282,31 @@ Your response:"""
                     total_facts=0,
                 )
 
-            # Step 2: 对每个 Object 节点进行 DFS 遍历
+            # Step 2: 对每个根节点进行 DFS 遍历
             rows = []
             all_facts_count = 0
-            seen_fact_texts = set()
+            seen_fact_texts: set = set()
 
-            for obj_node in object_nodes:
-                obj_uuid = obj_node.get("uuid", "")
+            for root_node in root_nodes:
+                obj_uuid = root_node.get("uuid", "")
                 row = self._dfs_from_object(
                     graph_id=graph_id,
                     object_uuid=obj_uuid,
-                    object_data=obj_node,
+                    object_data=root_node,
                     max_depth=max_depth,
                     seen_fact_texts=seen_fact_texts,
                 )
                 rows.append(row)
                 all_facts_count += len(row.facts)
 
-            # Step 3: 对行进行 LLM 重排（基于 Object 节点与查询的相关性 + 事实数量）
+            # Step 3: 对行进行 LLM 重排（基于根节点与查询的相关性 + 事实数量）
             scored_rows = self._rerank_object_rows(query, rows)
 
             # Step 4: 取 top limit 行
             final_rows = scored_rows[:limit]
 
             logger.info(
-                f"Object-first search complete: {len(final_rows)} Object rows, "
+                f"Root-node DFS search complete: {len(final_rows)} {root_type} rows, "
                 f"{all_facts_count} total facts"
             )
 
@@ -1306,7 +1318,7 @@ Your response:"""
             )
 
         except Exception as e:
-            logger.error(f"Object-first search failed: {str(e)}")
+            logger.error(f"Root-node DFS search failed: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
             return ObjectFirstSearchResult(

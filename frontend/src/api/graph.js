@@ -157,7 +157,7 @@ export function searchGraph(data) {
 
 /**
  * Object-first DFS search - results grouped by Object node
- * @param {Object} data - Contains graph_id, query, limit, max_depth
+ * @param {Object} data - Contains graph_id, query, limit, max_depth, root_type
  * @returns {Promise}
  */
 export function searchObjectFirst(data) {

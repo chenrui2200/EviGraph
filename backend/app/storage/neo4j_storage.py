@@ -1165,6 +1165,28 @@ class Neo4jStorage(GraphStorage):
                         n[k] = v.isoformat()
             return results
 
+    def search_term_nodes(
+        self,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search Term nodes specifically using hybrid scoring (vector + keyword).
+        Only returns nodes with label 'Term'.
+
+        Returns list of dicts with node properties + 'score'.
+        """
+        with self._driver.session() as session:
+            results = self._search.search_term_nodes(
+                session, graph_id, query, limit
+            )
+            for n in results:
+                for k, v in n.items():
+                    if hasattr(v, "isoformat"):
+                        n[k] = v.isoformat()
+            return results
+
     # ----------------------------------------------------------------
     # Graph info
     # ----------------------------------------------------------------
