@@ -77,6 +77,20 @@
                   >{{ d }}</button>
                 </div>
               </span>
+              <span class="depth-label sim-label">
+                相似度阈值
+                <div class="sim-slider-wrap">
+                  <input
+                    type="range"
+                    v-model.number="similarityThreshold"
+                    min="50"
+                    max="100"
+                    step="5"
+                    class="sim-slider"
+                  />
+                  <span class="sim-value" :class="simValueClass">{{ similarityThreshold }}</span>
+                </div>
+              </span>
             </div>
           </div>
 
@@ -391,6 +405,13 @@ const searchQuery = ref('')
 const filterGraph = ref(true)
 const rootTypes = ref(['Object', 'Term']) // 根节点类型多选: Object 和/或 Term
 const maxDepth = ref(3)             // DFS 最大深度
+const similarityThreshold = ref(50) // 相似度阈值 (50-100)，低于此值的结果被丢弃
+
+// 相似度阈值颜色：中=橙，高=绿
+const simValueClass = computed(() => {
+  if (similarityThreshold.value >= 75) return 'high'
+  return 'mid'
+})
 const fullGraphData = ref({ nodes: [], edges: [] })
 // 传统检索结果（facts/nodes/edges）
 const results = ref({ facts: [], nodes: [], edges: [] })
@@ -894,8 +915,9 @@ const handleSearch = async () => {
     searchTimings.value.object_s = (objectRes.duration_ms || 0) / 1000
     searchTimings.value.term_s = (termRes.duration_ms || 0) / 1000
 
-    const termRows = (termRes.success ? termRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= 50).map(r => ({ ...r, root_type: 'Term' }))
-    const objectRows = (objectRes.success ? objectRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= 50).map(r => ({ ...r, root_type: 'Object' }))
+    const termRows = (termRes.success ? termRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= similarityThreshold.value).map(r => ({ ...r, root_type: 'Term' }))
+    const objectRows = (objectRes.success ? objectRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= similarityThreshold.value).map(r => ({ ...r, root_type: 'Object' }))
+    // similarityThreshold 范围 50-100
 
     // 合并: Term 排前，Object 排后
     allObjectFirstRows.value = [...termRows, ...objectRows]
@@ -1784,6 +1806,44 @@ onMounted(async () => {
   color: #fff;
   font-weight: 700;
   box-shadow: 0 2px 6px rgba(64, 158, 255, 0.4);
+}
+
+.sim-label {
+  border-left: none;
+  padding-left: 0;
+  margin-left: 0;
+}
+
+.sim-slider-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sim-slider {
+  width: 100px;
+  height: 4px;
+  accent-color: #409eff;
+  cursor: pointer;
+}
+
+.sim-value {
+  font-size: 13px;
+  font-weight: 700;
+  min-width: 28px;
+  text-align: center;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.sim-value.mid {
+  color: #e6a23c;
+  background: #fdf6ec;
+}
+
+.sim-value.high {
+  color: #67c23a;
+  background: #f0f9eb;
 }
 
 .object-rows-list {
