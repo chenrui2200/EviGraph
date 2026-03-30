@@ -1042,6 +1042,8 @@ class Neo4jStorage(GraphStorage):
                 episodes.append({
                     "uuid": props.get("uuid"),
                     "text": props.get("data"),
+                    "source": props.get("source"),
+                    "page": props.get("page"),
                     "metadata": metadata,
                     "created_at": props.get("created_at")
                 })
@@ -1083,6 +1085,8 @@ class Neo4jStorage(GraphStorage):
                 episodes.append({
                     "uuid": props.get("uuid"),
                     "text": props.get("data"),
+                    "source": props.get("source"),
+                    "page": props.get("page"),
                     "metadata": metadata
                 })
             return episodes
@@ -1946,7 +1950,12 @@ class Neo4jStorage(GraphStorage):
                 e.created_at = datetime()
             ON MATCH SET
                 e.embedding = $embedding,
-                e.summary = COALESCE(e.summary, $summary)
+                e.summary = COALESCE(e.summary, $summary),
+                e.pdf_source = COALESCE(e.pdf_source, $pdf_source),
+                e.pdf_page = COALESCE(e.pdf_page, $pdf_page),
+                e.pdf_bbox = COALESCE(e.pdf_bbox, $pdf_bbox),
+                e.pdf_page_width = COALESCE(e.pdf_page_width, $pdf_page_width),
+                e.pdf_page_height = COALESCE(e.pdf_page_height, $pdf_page_height)
             """,
             gid=graph_id,
             name_lower=clause_name.lower(),
@@ -2171,7 +2180,7 @@ class Neo4jStorage(GraphStorage):
                 e.created_at = datetime(){extra_props}
             ON MATCH SET
                 e.embedding = $embedding,
-                e.summary = CASE WHEN e.summary = '' OR e.summary IS NULL THEN $summary ELSE e.summary END
+                e.summary = CASE WHEN e.summary = '' OR e.summary IS NULL THEN $summary ELSE e.summary END{extra_props}
             """,
             gid=graph_id,
             name_lower=entity_name.lower(),
@@ -2439,7 +2448,12 @@ class Neo4jStorage(GraphStorage):
                     e.created_at = datetime()
                 ON MATCH SET
                     e.definition = COALESCE(e.definition, $definition),
-                    e.summary = COALESCE(e.summary, $summary)
+                    e.summary = COALESCE(e.summary, $summary),
+                    e.pdf_source = COALESCE(e.pdf_source, $pdf_source),
+                    e.pdf_page = COALESCE(e.pdf_page, $pdf_page),
+                    e.pdf_bbox = COALESCE(e.pdf_bbox, $pdf_bbox),
+                    e.pdf_page_width = COALESCE(e.pdf_page_width, $pdf_page_width),
+                    e.pdf_page_height = COALESCE(e.pdf_page_height, $pdf_page_height)
                 """,
                 gid=graph_id,
                 name_lower=term_name.lower(),

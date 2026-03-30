@@ -103,6 +103,9 @@
                 <p class="summary-content">
                   本次检索命中了 {{ allObjectFirstRows.length }} 个根节点（Term: {{ allObjectFirstRows.filter(r => r.root_type === 'Term').length }}, Object: {{ allObjectFirstRows.filter(r => r.root_type === 'Object').length }}），
                   共 {{ allObjectFirstRows.reduce((s, r) => s + (r.facts?.length || 0), 0) }} 条关联事实。Term 优先排在前面。
+                  <template v-if="searchTimings.object_ms || searchTimings.term_ms">
+                    耗时：Object搜索 {{ searchTimings.object_ms }}ms，Term搜索 {{ searchTimings.term_ms }}ms。
+                  </template>
                 </p>
               </div>
 
@@ -128,6 +131,14 @@
                       <span class="score-tag" :title="`相关性: ${row.relevance_score?.toFixed(1)}`">
                         {{ row.relevance_score?.toFixed(1) || '?' }}
                       </span>
+                      <button
+                        v-if="row.object_node?.pdf_info?.source && !invalidSources.includes(row.object_node.pdf_info.source)"
+                        class="locate-btn root-locate-btn"
+                        @click.stop="viewDocument({ uuid: row.object_node.uuid, source: row.object_node.pdf_info.source, page: row.object_node.pdf_info.page || 1, bbox: row.object_node.pdf_info.bbox, page_width: row.object_node.pdf_info.page_width, page_height: row.object_node.pdf_info.page_height, graph_id: graphId || projectId })"
+                        title="定位到文档"
+                      >
+                        定位文档
+                      </button>
                     </div>
                   </div>
 
@@ -377,6 +388,8 @@ const fullGraphData = ref({ nodes: [], edges: [] })
 const results = ref({ facts: [], nodes: [], edges: [] })
 // Object-first 检索结果（全部原始结果，合并后的）
 const allObjectFirstRows = ref([])
+// 检索耗时记录（ms）
+const searchTimings = ref({ object_ms: 0, term_ms: 0 })
 
 // 按 root_type 过滤后的显示结果（Term 优先 + checkbox 过滤）
 const filteredObjectFirstRows = computed(() => {
@@ -870,6 +883,8 @@ const handleSearch = async () => {
         root_type: 'Term'
       })
     ])
+    searchTimings.value.object_ms = objectRes.duration_ms || 0
+    searchTimings.value.term_ms = termRes.duration_ms || 0
 
     const termRows = (termRes.success ? termRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= 50).map(r => ({ ...r, root_type: 'Term' }))
     const objectRows = (objectRes.success ? objectRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= 50).map(r => ({ ...r, root_type: 'Object' }))
@@ -889,6 +904,8 @@ const resetFilter = () => {
   results.value = { facts: [], nodes: [], edges: [] }
   allObjectFirstRows.value = []
   rootTypes.value = ['Object', 'Term']
+  searchTimings.value.object_ms = 0
+  searchTimings.value.term_ms = 0
 }
 
 const highlightInGraph = (fact) => {
@@ -1814,6 +1831,22 @@ onMounted(async () => {
   padding: 2px 8px;
   border-radius: 8px;
   border: 1px solid #e1f3d8;
+  margin-right: 8px;
+}
+
+.root-locate-btn {
+  padding: 2px 10px;
+  background: #f0f7ff;
+  color: #409eff;
+  border: 1px solid #c6e2ff;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.root-locate-btn:hover {
+  background: #e6f0ff;
 }
 
 .object-summary {

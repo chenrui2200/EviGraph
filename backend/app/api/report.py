@@ -4,6 +4,7 @@ Provides interfaces for simulation report generation, retrieval, and conversatio
 """
 
 import os
+import time
 import traceback
 import threading
 from flask import request, jsonify, send_file, current_app
@@ -466,6 +467,7 @@ def search_object_first_tool():
             raise ValueError("GraphStorage not initialized — check Neo4j connection")
 
         tools = GraphToolsService(storage=storage)
+        t0 = time.time()
         result = tools.search_object_first(
             graph_id=graph_id,
             query=query,
@@ -473,8 +475,9 @@ def search_object_first_tool():
             max_depth=max_depth,
             root_type=root_type,
         )
+        duration_ms = round((time.time() - t0) * 1000, 1)
 
-        return jsonify({"success": True, "data": result.to_dict()})
+        return jsonify({"success": True, "data": result.to_dict(), "duration_ms": duration_ms})
     except Exception as e:
         logger.error(f"Object-first search failed: {str(e)}")
         return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500

@@ -1575,14 +1575,21 @@ Your response:"""
             # Fallback: query Episode via MENTIONS relationship
             node_eps = self.storage.get_node_episodes(node_uuid, limit=1)
             if node_eps:
-                meta = node_eps[0].get("metadata", {})
+                ep = node_eps[0]
+                meta = ep.get("metadata", {})
+                # Episode 的 source/page 可能是直接属性，也可能在 metadata_json 中
+                ep_source = ep.get("source") or meta.get("source")
+                ep_page = ep.get("page") or meta.get("page")
+                ep_bbox = meta.get("bbox")
+                ep_page_width = meta.get("page_width") or meta.get("pageWidth")
+                ep_page_height = meta.get("page_height") or meta.get("pageHeight")
                 pdf_info.update({
-                    "source": meta.get("source"),
-                    "page": meta.get("page"),
-                    "bbox": meta.get("bbox"),
-                    "page_width": meta.get("page_width"),
-                    "page_height": meta.get("page_height"),
-                    "episode_text": node_eps[0].get("text"),
+                    "source": ep_source,
+                    "page": ep_page,
+                    "bbox": ep_bbox,
+                    "page_width": ep_page_width,
+                    "page_height": ep_page_height,
+                    "episode_text": ep.get("text"),
                 })
         except Exception:
             pass
