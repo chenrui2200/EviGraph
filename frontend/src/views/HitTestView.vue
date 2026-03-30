@@ -91,6 +91,14 @@
               <p>正在从图谱中检索相关事实...</p>
             </div>
 
+            <!-- 搜索完成但无结果 -->
+            <div v-if="!searching && !allObjectFirstRows.length && !results.facts.length && searchQuery" class="no-results-card">
+              <div class="summary-title">💡 检索分析</div>
+              <p class="summary-content">
+                未检索到相关知识。请尝试调整关键词或扩展搜索范围。
+              </p>
+            </div>
+
             <!-- ===== Object-first DFS 检索结果 ===== -->
             <div v-if="filteredObjectFirstRows.length > 0" class="results-list">
               <div class="results-header">
@@ -1313,6 +1321,18 @@ onMounted(async () => {
   border-radius: 8px;
   padding: 12px 16px;
   margin-bottom: 16px;
+}
+
+.no-results-card {
+  background: #fdf6ec;
+  border: 1px solid #faecd8;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.no-results-card .summary-content {
+  color: #e6a23c;
 }
 
 .summary-title {
