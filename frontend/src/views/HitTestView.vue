@@ -103,8 +103,8 @@
                 <p class="summary-content">
                   本次检索命中了 {{ allObjectFirstRows.length }} 个根节点（Term: {{ allObjectFirstRows.filter(r => r.root_type === 'Term').length }}, Object: {{ allObjectFirstRows.filter(r => r.root_type === 'Object').length }}），
                   共 {{ allObjectFirstRows.reduce((s, r) => s + (r.facts?.length || 0), 0) }} 条关联事实。Term 优先排在前面。
-                  <template v-if="searchTimings.object_ms || searchTimings.term_ms">
-                    耗时：Object搜索 {{ searchTimings.object_ms }}ms，Term搜索 {{ searchTimings.term_ms }}ms。
+                  <template v-if="searchTimings.object_s || searchTimings.term_s">
+                    耗时：Object搜索 {{ searchTimings.object_s.toFixed(2) }}s，Term搜索 {{ searchTimings.term_s.toFixed(2) }}s。
                   </template>
                 </p>
               </div>
@@ -388,8 +388,8 @@ const fullGraphData = ref({ nodes: [], edges: [] })
 const results = ref({ facts: [], nodes: [], edges: [] })
 // Object-first 检索结果（全部原始结果，合并后的）
 const allObjectFirstRows = ref([])
-// 检索耗时记录（ms）
-const searchTimings = ref({ object_ms: 0, term_ms: 0 })
+// 检索耗时记录（秒）
+const searchTimings = ref({ object_s: 0, term_s: 0 })
 
 // 按 root_type 过滤后的显示结果（Term 优先 + checkbox 过滤）
 const filteredObjectFirstRows = computed(() => {
@@ -883,8 +883,8 @@ const handleSearch = async () => {
         root_type: 'Term'
       })
     ])
-    searchTimings.value.object_ms = objectRes.duration_ms || 0
-    searchTimings.value.term_ms = termRes.duration_ms || 0
+    searchTimings.value.object_s = (objectRes.duration_ms || 0) / 1000
+    searchTimings.value.term_s = (termRes.duration_ms || 0) / 1000
 
     const termRows = (termRes.success ? termRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= 50).map(r => ({ ...r, root_type: 'Term' }))
     const objectRows = (objectRes.success ? objectRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= 50).map(r => ({ ...r, root_type: 'Object' }))
@@ -904,8 +904,8 @@ const resetFilter = () => {
   results.value = { facts: [], nodes: [], edges: [] }
   allObjectFirstRows.value = []
   rootTypes.value = ['Object', 'Term']
-  searchTimings.value.object_ms = 0
-  searchTimings.value.term_ms = 0
+  searchTimings.value.object_s = 0
+  searchTimings.value.term_s = 0
 }
 
 const highlightInGraph = (fact) => {

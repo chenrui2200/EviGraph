@@ -1305,6 +1305,17 @@ Your response:"""
             # Step 4: 取 top limit 行
             final_rows = scored_rows[:limit]
 
+            # Step 5: 批量获取 top rows 的根节点 PDF 定位信息
+            if final_rows:
+                root_uuids = [row.object_node.get("uuid") for row in final_rows]
+                root_uuids = [uid for uid in root_uuids if uid]
+                if root_uuids:
+                    batch_pdf_info = self._batch_get_node_pdf_info(root_uuids)
+                    for row in final_rows:
+                        root_uuid = row.object_node.get("uuid")
+                        if root_uuid and root_uuid in batch_pdf_info:
+                            row.object_node["pdf_info"] = batch_pdf_info[root_uuid]
+
             logger.info(
                 f"Root-node DFS search complete: {len(final_rows)} {root_type} rows, "
                 f"{all_facts_count} total facts"
@@ -1337,7 +1348,7 @@ Your response:"""
         seen_fact_texts: set,
     ) -> ObjectFirstRow:
         """
-        从一个 Object 节点执行 DFS 遍历，收集所有关联节点和边。
+        从一个 Object 节点执行优化的迭代 DFS 遍历，收集所有关联节点和边。
 
         遍历规则（Normative KG Schema）：
         - Object --OPERATES_ON--> Action
@@ -1345,6 +1356,12 @@ Your response:"""
         - Action --MANDATES/RECOMMENDS/PROHIBITS--> 子Action/Component
         - Condition --TRIGGERS--> Action
         - 任意节点均可能被 Component/Section/Term 等节点引用
+
+        优化策略：
+        - Phase 1：栈式迭代遍历，每节点调用一次 get_node_edges / get_node_outgoing_edges，
+          收集所有邻居 UUID 到 pending_neighbors，零递归。
+        - Phase 2：批量调用 get_nodes_batch 一次性获取所有邻居节点数据，
+          用 neighbor_map 填充 facts 中的邻居名称（消除逐节点 get_node 调用）。
 
         Args:
             graph_id: 图谱 ID
@@ -1359,117 +1376,139 @@ Your response:"""
         traversal_nodes: List[ObjectPathNode] = []
         traversal_edges: List[ObjectPathEdge] = []
         facts: List[Dict[str, Any]] = []
-
-        # visited set 防止 DFS 中重复访问同一节点
         visited: set = set()
-        # 深度优先递归遍历
-        self._dfs_visit(
-            node_uuid=object_uuid,
-            node_data=object_data,
-            depth=0,
-            max_depth=max_depth,
-            visited=visited,
-            traversal_nodes=traversal_nodes,
-            traversal_edges=traversal_edges,
-            facts=facts,
-            graph_id=graph_id,
-            seen_fact_texts=seen_fact_texts,
-            bidirectional=True,  # Object 起始节点允许双向探索
-        )
 
-        # 构建 Object 节点详情（包含 PDF 定位信息）
-        obj_pdf_info = self._get_node_pdf_info(object_uuid)
-        obj_detail = {
-            "uuid": object_uuid,
-            "name": object_data.get("name", ""),
-            "labels": object_data.get("labels", []),
-            "summary": object_data.get("summary", ""),
-            "pdf_info": obj_pdf_info,
-        }
+        # Phase 1: Stack-based iterative DFS — one edge query per node
+        # Stack items: (node_uuid, node_data, depth)
+        stack: List[tuple] = [(object_uuid, object_data, 0)]
+        # Collect pending neighbor info for Phase 2
+        # neighbor_info: List[(neighbor_uuid, depth, edge_dict)]
+        pending_neighbor_info: List[tuple] = []
 
-        return ObjectFirstRow(
-            object_node=obj_detail,
-            traversal_paths=traversal_nodes,
-            traversal_edges=traversal_edges,
-            facts=facts,
-            relevance_score=0.0,  # 初值，重排时会更新
-        )
+        while stack:
+            node_uuid, node_data, depth = stack.pop()
 
-    def _dfs_visit(
-        self,
-        node_uuid: str,
-        node_data: Optional[Dict[str, Any]],
-        depth: int,
-        max_depth: int,
-        visited: set,
-        traversal_nodes: List[ObjectPathNode],
-        traversal_edges: List[ObjectPathEdge],
-        facts: List[Dict[str, Any]],
-        graph_id: str,
-        seen_fact_texts: set,
-        bidirectional: bool = False,  # Object 起始节点允许双向，之后严格单向
-    ):
-        """
-        DFS 递归访问单个节点及其邻居。
+            if node_uuid in visited or depth > max_depth:
+                continue
+            visited.add(node_uuid)
 
-        收集节点的：
-        - PathNode（DFS 路径节点）
-        - 关联边（RELATION）及其对端节点
-        - 边关联的事实文本（去重后加入 facts）
-        """
-        if node_uuid in visited or depth > max_depth:
-            return
+            # Add node to DFS path
+            if node_data:
+                traversal_nodes.append(ObjectPathNode(
+                    uuid=node_uuid,
+                    name=node_data.get("name", ""),
+                    labels=node_data.get("labels", []),
+                    summary=node_data.get("summary", ""),
+                    depth=depth,
+                ))
 
-        visited.add(node_uuid)
+            # Determine edge query mode
+            is_root = (depth == 0)
+            try:
+                if is_root:
+                    edges = self.storage.get_node_edges(node_uuid)
+                else:
+                    edges = self.storage.get_node_outgoing_edges(node_uuid)
+            except Exception as e:
+                logger.debug(f"Failed to get edges for node {node_uuid[:8]}: {e}")
+                edges = []
 
-        # 添加到 DFS 路径节点
-        if node_data:
-            traversal_nodes.append(ObjectPathNode(
-                uuid=node_uuid,
-                name=node_data.get("name", ""),
-                labels=node_data.get("labels", []),
-                summary=node_data.get("summary", ""),
-                depth=depth,
-            ))
+            for edge in edges:
+                edge_uuid = edge.get("uuid", "")
+                edge_fact = edge.get("fact", "")
+                src_uuid = edge.get("source_node_uuid", "")
+                tgt_uuid = edge.get("target_node_uuid", "")
+                edge_name = edge.get("name", "")
 
-        # 获取边：双向(bidirectional=True) 或严格单向(bidirectional=False)
-        try:
-            if bidirectional:
-                # Object 起始节点：双向探索，发现所有邻居
-                edges = self.storage.get_node_edges(node_uuid)
-            else:
-                # 其他节点：严格按语义方向，只取出边
-                edges = self.storage.get_node_outgoing_edges(node_uuid)
-        except Exception as e:
-            logger.debug(f"Failed to get edges for node {node_uuid[:8]}: {e}")
-            edges = []
+                neighbor_uuid = tgt_uuid
 
-        for edge in edges:
-            edge_uuid = edge.get("uuid", "")
-            edge_fact = edge.get("fact", "")
-            src_uuid = edge.get("source_node_uuid", "")
-            tgt_uuid = edge.get("target_node_uuid", "")
-            edge_name = edge.get("name", "")
+                # Add edge to traversal path
+                traversal_edges.append(ObjectPathEdge(
+                    uuid=edge_uuid,
+                    name=edge_name,
+                    fact=edge_fact,
+                    source_node_uuid=src_uuid,
+                    target_node_uuid=tgt_uuid,
+                    depth=depth,
+                ))
 
-            # 确定对端节点 UUID（出边模式下 src_uuid == node_uuid）
-            neighbor_uuid = tgt_uuid
+                # Collect neighbor for Phase 2 batch fetch (avoid recursive get_node call here)
+                if neighbor_uuid and neighbor_uuid not in visited:
+                    pending_neighbor_info.append((neighbor_uuid, depth + 1, edge, edge_fact, edge_name, src_uuid, tgt_uuid))
 
-            # 添加边到 DFS 路径
-            traversal_edges.append(ObjectPathEdge(
-                uuid=edge_uuid,
-                name=edge_name,
-                fact=edge_fact,
-                source_node_uuid=src_uuid,
-                target_node_uuid=tgt_uuid,
-                depth=depth,
-            ))
+                # Process fact text inline (fact generation does NOT need neighbor data)
+                fact_to_add = edge_fact
+                if not fact_to_add and edge_name:
+                    # Placeholder — will be filled in Phase 2 after neighbor_map is ready
+                    fact_to_add = None  # Mark as pending
 
-            # 去重收集事实（RELATION 边用 fact 文本，语义边合成 fact）
-            fact_to_add = edge_fact
-            if not fact_to_add and edge_name:
-                # 语义三元组边没有显式 fact，根据边类型合成
-                _neighbor = self.storage.get_node(neighbor_uuid)
-                neighbor_name = (_neighbor.get("name", "") if _neighbor else "")
+                if fact_to_add:
+                    norm = self.normalize_text(fact_to_add)
+                    if norm and norm not in seen_fact_texts:
+                        seen_fact_texts.add(norm)
+                        ep_ids = edge.get("episode_ids", [])
+                        source_info = {"source": "Graph", "page": None, "bbox": None,
+                                       "page_width": None, "page_height": None}
+                        original_text = ""
+                        if ep_ids:
+                            try:
+                                eps = self.storage.get_episodes(
+                                    [ep_ids[0]] if isinstance(ep_ids, list) else [ep_ids]
+                                )
+                                if eps:
+                                    meta = eps[0].get("metadata", {})
+                                    source_info.update({
+                                        "source": meta.get("source", "Graph"),
+                                        "page": meta.get("page"),
+                                        "bbox": meta.get("bbox"),
+                                        "page_width": meta.get("page_width"),
+                                        "page_height": meta.get("page_height"),
+                                    })
+                                    original_text = eps[0].get("text", "")
+                            except Exception:
+                                pass
+
+                        facts.append({
+                            "uuid": edge_uuid,
+                            "text": fact_to_add,
+                            "original_text": original_text,
+                            "source": source_info["source"],
+                            "page": source_info["page"],
+                            "bbox": source_info["bbox"],
+                            "page_width": source_info.get("page_width"),
+                            "page_height": source_info.get("page_height"),
+                            "graph_id": graph_id,
+                            "source_node_uuid": src_uuid,
+                            "target_node_uuid": tgt_uuid,
+                            "relation_name": edge_name,
+                            "traversal_depth": depth,
+                        })
+
+                # Push neighbor onto stack for next iteration
+                if neighbor_uuid and neighbor_uuid not in visited:
+                    # We don't have neighbor_data yet — use None; Phase 2 will fill it
+                    stack.append((neighbor_uuid, None, depth + 1))
+
+        # Phase 2: Batch fetch all visited neighbor data in one call
+        neighbor_uuids = [n_uuid for n_uuid, _, _, _, _, _, _ in pending_neighbor_info]
+        neighbor_uuids.append(object_uuid)  # Also include root to ensure it's in map
+
+        neighbor_map: Dict[str, Dict[str, Any]] = {}
+        if neighbor_uuids:
+            try:
+                neighbor_map = self.storage.get_nodes_batch(neighbor_uuids)
+            except Exception as e:
+                logger.debug(f"Batch get nodes failed: {e}")
+                neighbor_map = {}
+
+        # Phase 2: Synthesize facts for semantic edges that lacked explicit edge_fact.
+        # Neighbors were already added to traversal_nodes during Phase 1 (stack pop).
+        # neighbor_map resolves neighbor_name for fact synthesis.
+        for neighbor_uuid, n_depth, edge, edge_fact, edge_name, src_uuid, tgt_uuid in pending_neighbor_info:
+            # Synthesize fact for semantic edges (those without explicit edge_fact)
+            if not edge_fact and edge_name:
+                neighbor_data = neighbor_map.get(neighbor_uuid, {})
+                neighbor_name = neighbor_data.get("name", "")
                 rel_facts = {
                     "MANDATES": f"强制要求: {neighbor_name}",
                     "RECOMMENDS": f"推荐: {neighbor_name}",
@@ -1482,12 +1521,10 @@ Your response:"""
                 }
                 fact_to_add = rel_facts.get(edge_name, f"[{edge_name}] {neighbor_name}")
 
-            if fact_to_add:
                 norm = self.normalize_text(fact_to_add)
                 if norm and norm not in seen_fact_texts:
                     seen_fact_texts.add(norm)
-
-                    # 获取边的 PDF 定位信息
+                    edge_uuid = edge.get("uuid", "")
                     ep_ids = edge.get("episode_ids", [])
                     source_info = {"source": "Graph", "page": None, "bbox": None,
                                    "page_width": None, "page_height": None}
@@ -1523,29 +1560,46 @@ Your response:"""
                         "source_node_uuid": src_uuid,
                         "target_node_uuid": tgt_uuid,
                         "relation_name": edge_name,
-                        "traversal_depth": depth,
+                        "traversal_depth": n_depth - 1,
                     })
 
-            # 递归访问对端邻居
-            if neighbor_uuid and neighbor_uuid not in visited:
-                try:
-                    neighbor_data = self.storage.get_node(neighbor_uuid)
-                except Exception:
-                    neighbor_data = None
+        # Build Object node detail (with PDF info added later by caller via batch)
+        obj_detail = {
+            "uuid": object_uuid,
+            "name": object_data.get("name", ""),
+            "labels": object_data.get("labels", []),
+            "summary": object_data.get("summary", ""),
+            "pdf_info": {},  # Will be filled by search_object_first via batch call
+        }
 
-                self._dfs_visit(
-                    node_uuid=neighbor_uuid,
-                    node_data=neighbor_data,
-                    depth=depth + 1,
-                    max_depth=max_depth,
-                    visited=visited,
-                    traversal_nodes=traversal_nodes,
-                    traversal_edges=traversal_edges,
-                    facts=facts,
-                    graph_id=graph_id,
-                    seen_fact_texts=seen_fact_texts,
-                    bidirectional=False,  # 严格单向遍历
-                )
+        return ObjectFirstRow(
+            object_node=obj_detail,
+            traversal_paths=traversal_nodes,
+            traversal_edges=traversal_edges,
+            facts=facts,
+            relevance_score=0.0,
+        )
+
+    def _dfs_visit(
+        self,
+        node_uuid: str,
+        node_data: Optional[Dict[str, Any]],
+        depth: int,
+        max_depth: int,
+        visited: set,
+        traversal_nodes: List[ObjectPathNode],
+        traversal_edges: List[ObjectPathEdge],
+        facts: List[Dict[str, Any]],
+        graph_id: str,
+        seen_fact_texts: set,
+        bidirectional: bool = False,
+    ):
+        """
+        [已废弃 — 保留签名以兼容外部调用]
+        DFS 递归访问已由 _dfs_from_object 中的迭代版本替代。
+        该方法不再执行任何操作，遍历逻辑完全在 _dfs_from_object 内完成。
+        """
+        pass
 
     def _get_node_pdf_info(self, node_uuid: str) -> Dict[str, Any]:
         """获取节点的 PDF 定位信息，优先读节点自身属性（Clause），回退查 Episode"""
@@ -1594,6 +1648,92 @@ Your response:"""
         except Exception:
             pass
         return pdf_info
+
+    def _batch_get_node_pdf_info(
+        self,
+        node_uuids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        批量获取多个节点的 PDF 定位信息。
+
+        策略：优先读取节点自身的 pdf_* 属性（快速路径），对缺失的节点回退查 Episode。
+
+        Args:
+            node_uuids: 节点 UUID 列表
+
+        Returns:
+            Dict[node_uuid -> pdf_info dict]
+        """
+        result: Dict[str, Dict[str, Any]] = {}
+
+        if not node_uuids:
+            return result
+
+        # Step 1: Batch fetch all nodes
+        try:
+            nodes_map = self.storage.get_nodes_batch(node_uuids)
+        except Exception as e:
+            logger.debug(f"Batch get nodes for PDF info failed: {e}")
+            nodes_map = {}
+
+        missing_uuids: List[str] = []
+
+        for node_uuid in node_uuids:
+            pdf_info: Dict[str, Any] = {
+                "source": None, "page": None, "bbox": None,
+                "page_width": None, "page_height": None, "episode_text": None,
+            }
+
+            node = nodes_map.get(node_uuid)
+            if node:
+                source = node.get("pdf_source") or node.get("source")
+                page = node.get("pdf_page") or node.get("page")
+                bbox = node.get("pdf_bbox") or node.get("bbox")
+                page_width = node.get("pdf_page_width") or node.get("page_width")
+                page_height = node.get("pdf_page_height") or node.get("page_height")
+                if source or page:
+                    pdf_info.update({
+                        "source": source,
+                        "page": page,
+                        "bbox": bbox,
+                        "page_width": page_width,
+                        "page_height": page_height,
+                    })
+                    result[node_uuid] = pdf_info
+                else:
+                    missing_uuids.append(node_uuid)
+            else:
+                missing_uuids.append(node_uuid)
+
+        # Step 2: Fallback to Episode for missing nodes
+        for node_uuid in missing_uuids:
+            pdf_info: Dict[str, Any] = {
+                "source": None, "page": None, "bbox": None,
+                "page_width": None, "page_height": None, "episode_text": None,
+            }
+            try:
+                node_eps = self.storage.get_node_episodes(node_uuid, limit=1)
+                if node_eps:
+                    ep = node_eps[0]
+                    meta = ep.get("metadata", {})
+                    ep_source = ep.get("source") or meta.get("source")
+                    ep_page = ep.get("page") or meta.get("page")
+                    ep_bbox = meta.get("bbox")
+                    ep_page_width = meta.get("page_width") or meta.get("pageWidth")
+                    ep_page_height = meta.get("page_height") or meta.get("pageHeight")
+                    pdf_info.update({
+                        "source": ep_source,
+                        "page": ep_page,
+                        "bbox": ep_bbox,
+                        "page_width": ep_page_width,
+                        "page_height": ep_page_height,
+                        "episode_text": ep.get("text"),
+                    })
+            except Exception:
+                pass
+            result[node_uuid] = pdf_info
+
+        return result
 
     def _rerank_object_rows(
         self,

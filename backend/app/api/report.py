@@ -477,10 +477,34 @@ def search_object_first_tool():
         )
         duration_ms = round((time.time() - t0) * 1000, 1)
 
+        # Debug: 打印第一行 object_node 的 PDF 信息
+        if result.rows:
+            first = result.rows[0]
+            logger.info(f"[DEBUG] row[0] object_node keys: {list(first.object_node.keys())}")
+            logger.info(f"[DEBUG] row[0] pdf_info: {first.object_node.get('pdf_info')}")
+            logger.info(f"[DEBUG] row[0] facts[0]: {first.facts[0] if first.facts else 'N/A'}")
+
         return jsonify({"success": True, "data": result.to_dict(), "duration_ms": duration_ms})
     except Exception as e:
         logger.error(f"Object-first search failed: {str(e)}")
         return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@report_bp.route('/debug/node-pdf', methods=['GET'])
+def debug_node_pdf():
+    """调试接口：查看节点的 PDF 属性"""
+    node_uuid = request.args.get('uuid')
+    if not node_uuid:
+        return jsonify({"error": "uuid required"}), 400
+    storage = current_app.extensions.get('neo4j_storage')
+    if not storage:
+        return jsonify({"error": "no storage"}), 500
+    node = storage.get_node(node_uuid)
+    eps = storage.get_node_episodes(node_uuid, limit=3)
+    return jsonify({
+        "node": node,
+        "episodes": [{"source": e.get("source"), "page": e.get("page"), "metadata": e.get("metadata")} for e in eps]
+    })
 
 
 @report_bp.route('/tools/statistics', methods=['POST'])

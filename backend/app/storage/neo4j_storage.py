@@ -956,6 +956,46 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             return self._call_with_retry(session.execute_read, _read)
 
+    def get_edges_for_nodes_batch(self, node_uuids: List[str], bidirectional: bool = True) -> Dict[str, List[Dict[str, Any]]]:
+        """批量获取多个节点的所有边（一次性 Cypher 查询）"""
+        if not node_uuids:
+            return {}
+        def _read(tx):
+            rel_type = "[r]-(m)" if bidirectional else "[r]->(m)"
+            result = tx.run(
+                f"""
+                MATCH (n:Entity)-{rel_type}
+                WHERE n.uuid IN $uuids AND m:Entity
+                RETURN n.uuid AS node_uuid, r, startNode(r).uuid AS src_uuid, endNode(r).uuid AS tgt_uuid
+                """,
+                uuids=node_uuids,
+            )
+            edges_map: Dict[str, List[Dict[str, Any]]] = {uid: [] for uid in node_uuids}
+            for record in result:
+                src_uuid = record["src_uuid"]
+                edges_map.setdefault(src_uuid, []).append(
+                    self._edge_to_dict(record["r"], record["src_uuid"], record["tgt_uuid"])
+                )
+            return edges_map
+        with self._driver.session() as session:
+            return self._call_with_retry(session.execute_read, _read)
+
+    def get_nodes_batch(self, node_uuids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """批量获取多个节点数据"""
+        if not node_uuids:
+            return {}
+        def _read(tx):
+            result = tx.run(
+                "MATCH (n:Entity) WHERE n.uuid IN $uuids RETURN n, labels(n) AS labels",
+                uuids=node_uuids,
+            )
+            return {
+                record["n"]["uuid"]: self._node_to_dict(record["n"], record["labels"])
+                for record in result
+            }
+        with self._driver.session() as session:
+            return self._call_with_retry(session.execute_read, _read)
+
     def get_nodes_by_label(self, graph_id: str, label: str) -> List[Dict[str, Any]]:
         def _read(tx):
             # Dynamic label in query (safe — label comes from ontology, not user input)
@@ -1361,6 +1401,12 @@ class Neo4jStorage(GraphStorage):
             "definition": props.get("definition", ""),
             "attributes": attributes,
             "created_at": props.get("created_at"),
+            # PDF 定位信息
+            "pdf_source": props.get("pdf_source"),
+            "pdf_page": props.get("pdf_page"),
+            "pdf_bbox": props.get("pdf_bbox"),
+            "pdf_page_width": props.get("pdf_page_width"),
+            "pdf_page_height": props.get("pdf_page_height"),
         }
 
     @staticmethod
@@ -1849,6 +1895,10 @@ class Neo4jStorage(GraphStorage):
 
         with self._driver.session() as session:
             def _create_episode_and_entities(tx):
+                # 提取 PDF 定位信息作为直接属性
+                ep_source = metadata.get("source", "")
+                ep_page = metadata.get("page", 0)
+
                 # 1. 创建Episode节点
                 tx.run(
                     """
@@ -1859,12 +1909,16 @@ class Neo4jStorage(GraphStorage):
                         ep.metadata_json = $metadata_json,
                         ep.processed = true,
                         ep.embedding = $embedding,
-                        ep.created_at = $created_at
+                        ep.created_at = $created_at,
+                        ep.source = $source,
+                        ep.page = $page
                     ON MATCH SET
                         ep.graph_id = $graph_id,
                         ep.data = $data,
                         ep.metadata_json = $metadata_json,
-                        ep.embedding = $embedding
+                        ep.embedding = $embedding,
+                        ep.source = COALESCE(ep.source, $source),
+                        ep.page = COALESCE(ep.page, $page)
                     """,
                     uuid=episode_id,
                     graph_id=graph_id,
@@ -1872,6 +1926,8 @@ class Neo4jStorage(GraphStorage):
                     metadata_json=metadata_json,
                     embedding=embedding,
                     created_at=now,
+                    source=ep_source,
+                    page=ep_page,
                 )
 
                 # 2. 添加层级标签
