@@ -1548,12 +1548,31 @@ Your response:"""
                 )
 
     def _get_node_pdf_info(self, node_uuid: str) -> Dict[str, Any]:
-        """获取节点的 PDF 定位信息"""
+        """获取节点的 PDF 定位信息，优先读节点自身属性（Clause），回退查 Episode"""
         pdf_info = {
             "source": None, "page": None, "bbox": None,
             "page_width": None, "page_height": None, "episode_text": None,
         }
         try:
+            # Fast path: read directly from node's own pdf_* properties
+            node = self.storage.get_node(node_uuid)
+            if node:
+                source = node.get("pdf_source") or node.get("source")
+                page = node.get("pdf_page") or node.get("page")
+                bbox = node.get("pdf_bbox") or node.get("bbox")
+                page_width = node.get("pdf_page_width") or node.get("page_width")
+                page_height = node.get("pdf_page_height") or node.get("page_height")
+                if source or page:
+                    pdf_info.update({
+                        "source": source,
+                        "page": page,
+                        "bbox": bbox,
+                        "page_width": page_width,
+                        "page_height": page_height,
+                    })
+                    return pdf_info
+
+            # Fallback: query Episode via MENTIONS relationship
             node_eps = self.storage.get_node_episodes(node_uuid, limit=1)
             if node_eps:
                 meta = node_eps[0].get("metadata", {})

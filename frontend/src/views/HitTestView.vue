@@ -198,7 +198,7 @@
                           深度{{ fact.traversal_depth }}
                         </span>
                         <button
-                          v-if="fact.page && fact.source !== 'Local Search'"
+                          v-if="fact.source && fact.source !== 'Local Search' && fact.source !== 'Graph'"
                           class="locate-btn"
                           @click.stop="viewDocument(fact)"
                         >
@@ -262,7 +262,7 @@
                       <span v-if="fact.page">(P{{ fact.page }})</span>
                     </span>
                     <button
-                      v-if="fact.page && fact.source !== 'Local Search'"
+                      v-if="fact.source && fact.source !== 'Local Search' && fact.source !== 'Graph'"
                       class="locate-btn"
                       @click.stop="viewDocument(fact)"
                     >

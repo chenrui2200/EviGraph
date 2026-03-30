@@ -1920,6 +1920,13 @@ class Neo4jStorage(GraphStorage):
         # 获取条款级要求类型（fallback）
         clause_requirement = metadata.get('requirement_type', 'recommended').lower()
 
+        # 提取 PDF 定位信息
+        pdf_source = metadata.get('source')
+        pdf_page = metadata.get('page')
+        pdf_bbox = metadata.get('bbox')
+        pdf_page_width = metadata.get('page_width')
+        pdf_page_height = metadata.get('page_height')
+
         # 创建Clause Entity节点
         tx.run(
             """
@@ -1931,6 +1938,11 @@ class Neo4jStorage(GraphStorage):
                 e.embedding = $embedding,
                 e.clause_id = $clause_id,
                 e.requirement_type = $req_type,
+                e.pdf_source = $pdf_source,
+                e.pdf_page = $pdf_page,
+                e.pdf_bbox = $pdf_bbox,
+                e.pdf_page_width = $pdf_page_width,
+                e.pdf_page_height = $pdf_page_height,
                 e.created_at = datetime()
             ON MATCH SET
                 e.embedding = $embedding,
@@ -1943,7 +1955,12 @@ class Neo4jStorage(GraphStorage):
             summary=content[:500] if content else "",
             embedding=embedding,
             clause_id=clause_id,
-            req_type=clause_requirement
+            req_type=clause_requirement,
+            pdf_source=pdf_source,
+            pdf_page=pdf_page,
+            pdf_bbox=pdf_bbox,
+            pdf_page_width=pdf_page_width,
+            pdf_page_height=pdf_page_height,
         )
 
         # 链接Episode -> Clause (MENTIONS)
@@ -1967,7 +1984,9 @@ class Neo4jStorage(GraphStorage):
             if term_name:
                 logger.info(f"[hierarchical] 创建术语定义: {term_name}")
                 term_entity_uuid = self._create_term_entity(
-                    tx, graph_id, entity_uuid, term_name, term_definition, clause_id
+                    tx, graph_id, entity_uuid, term_name, term_definition, clause_id,
+                    pdf_source=pdf_source, pdf_page=pdf_page, pdf_bbox=pdf_bbox,
+                    pdf_page_width=pdf_page_width, pdf_page_height=pdf_page_height
                 )
                 self._create_defines_relation(tx, term_entity_uuid, entity_uuid)
             return  # 术语章节不需要三元组处理
@@ -2351,7 +2370,10 @@ class Neo4jStorage(GraphStorage):
             logger.debug(f"Failed to create parameter entity: {e}")
 
     def _create_term_entity(self, tx, graph_id: str, clause_uuid: str,
-                           term_name: str, definition: str, source_id: str = "") -> str:
+                           term_name: str, definition: str, source_id: str = "",
+                           pdf_source: str = None, pdf_page: int = None,
+                           pdf_bbox: list = None, pdf_page_width: int = None,
+                           pdf_page_height: int = None) -> str:
         """创建 Term（术语）实体"""
         entity_seed = f"{graph_id}:Term:{term_name}".encode('utf-8')
         entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
@@ -2366,6 +2388,11 @@ class Neo4jStorage(GraphStorage):
                     e.definition = $definition,
                     e.source_id = $source_id,
                     e.summary = $summary,
+                    e.pdf_source = $pdf_source,
+                    e.pdf_page = $pdf_page,
+                    e.pdf_bbox = $pdf_bbox,
+                    e.pdf_page_width = $pdf_page_width,
+                    e.pdf_page_height = $pdf_page_height,
                     e.created_at = datetime()
                 ON MATCH SET
                     e.definition = COALESCE(e.definition, $definition),
@@ -2377,7 +2404,12 @@ class Neo4jStorage(GraphStorage):
                 name=term_name,
                 definition=definition,
                 source_id=source_id,
-                summary=f"{term_name}: {definition[:200]}" if definition else term_name
+                summary=f"{term_name}: {definition[:200]}" if definition else term_name,
+                pdf_source=pdf_source,
+                pdf_page=pdf_page,
+                pdf_bbox=pdf_bbox,
+                pdf_page_width=pdf_page_width,
+                pdf_page_height=pdf_page_height,
             )
             logger.debug(f"[hierarchical] Created Term entity: {term_name}")
         except Exception as e:
