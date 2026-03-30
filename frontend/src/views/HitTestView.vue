@@ -51,27 +51,21 @@
                 <input type="checkbox" v-model="filterGraph" />
                 <span>自动过滤关联图结构</span>
               </label>
-              <label class="checkbox-label">
-                <input type="checkbox" v-model="objectFirstMode" />
-                <span>Root-first DFS 检索</span>
-              </label>
-              <!-- Root Type 切换 -->
-              <span v-if="objectFirstMode" class="depth-label">
+              <!-- 根节点类型多选 -->
+              <span class="depth-label">
                 根节点类型
-                <div class="root-type-pills">
-                  <button
-                    class="depth-pill"
-                    :class="{ active: rootType === 'Object' }"
-                    @click="rootType = 'Object'"
-                  >Object</button>
-                  <button
-                    class="depth-pill"
-                    :class="{ active: rootType === 'Term' }"
-                    @click="rootType = 'Term'"
-                  >Term</button>
+                <div class="root-type-checks">
+                  <label class="checkbox-label root-type-check">
+                    <input type="checkbox" value="Object" v-model="rootTypes" />
+                    <span>Object</span>
+                  </label>
+                  <label class="checkbox-label root-type-check">
+                    <input type="checkbox" value="Term" v-model="rootTypes" />
+                    <span>Term</span>
+                  </label>
                 </div>
               </span>
-              <span v-if="objectFirstMode" class="depth-label">
+              <span class="depth-label">
                 深度
                 <div class="depth-pills">
                   <button
@@ -87,7 +81,7 @@
           </div>
 
           <div class="results-container">
-            <div v-if="!results.facts.length && !objectFirstRows.length && !searching" class="empty-results">
+            <div v-if="!results.facts.length && !allObjectFirstRows.length && !searching" class="empty-results">
               <div class="empty-icon">🔎</div>
               <p>在上方输入内容并点击查询，测试知识召回效果</p>
             </div>
@@ -98,25 +92,24 @@
             </div>
 
             <!-- ===== Object-first DFS 检索结果 ===== -->
-            <div v-if="objectFirstRows.length > 0" class="results-list">
+            <div v-if="filteredObjectFirstRows.length > 0" class="results-list">
               <div class="results-header">
-                <span>Root-first DFS 命中 (Found {{ objectFirstRows.length }} {{ rootType }}s)</span>
+                <span>Root-first DFS 命中 (Term: {{ allObjectFirstRows.filter(r => r.root_type === 'Term').length }}, Object: {{ allObjectFirstRows.filter(r => r.root_type === 'Object').length }})</span>
                 <button class="reset-filter-btn" @click="resetFilter">重置视图</button>
               </div>
 
               <div class="results-summary-card">
                 <div class="summary-title">💡 检索分析</div>
                 <p class="summary-content">
-                  本次 Root-first 检索命中了 {{ objectFirstRows.length }} 个 {{ rootType }} 节点，
-                  共 {{ objectFirstRows.reduce((s, r) => s + (r.facts?.length || 0), 0) }} 条关联事实。
-                  每个 {{ rootType }} 节点为一行结果，DFS 深度优先遍历其关联知识。
+                  本次检索命中了 {{ allObjectFirstRows.length }} 个根节点（Term: {{ allObjectFirstRows.filter(r => r.root_type === 'Term').length }}, Object: {{ allObjectFirstRows.filter(r => r.root_type === 'Object').length }}），
+                  共 {{ allObjectFirstRows.reduce((s, r) => s + (r.facts?.length || 0), 0) }} 条关联事实。Term 优先排在前面。
                 </p>
               </div>
 
               <!-- Object-first 行列表 -->
               <div class="object-rows-list">
                 <div
-                  v-for="(row, rowIdx) in objectFirstRows"
+                  v-for="(row, rowIdx) in filteredObjectFirstRows"
                   :key="rowIdx"
                   :id="`object-row-${rowIdx}`"
                   class="object-row-card"
@@ -128,7 +121,7 @@
                   <!-- Root 节点标题 -->
                   <div class="object-row-header">
                     <div class="object-name">
-                      <span class="object-badge" :class="{ term: rootType === 'Term' }">{{ rootType }}</span>
+                      <span class="object-badge" :class="{ term: row.root_type === 'Term' }">{{ row.root_type }}</span>
                       <strong>{{ row.object_node?.name || 'Unknown' }}</strong>
                     </div>
                     <div class="object-score">
@@ -212,7 +205,7 @@
             </div>
 
             <!-- ===== 传统检索结果 ===== -->
-            <div v-if="results.facts.length > 0 && !objectFirstMode" class="results-list">
+            <div v-if="results.facts.length > 0 && !allObjectFirstRows.length" class="results-list">
               <div class="results-header">
                 <span>检索命中汇总 (Found {{ results.facts.length }} items)</span>
                 <button class="reset-filter-btn" @click="resetFilter">重置视图</button>
@@ -377,14 +370,18 @@ const graphLoading = ref(false)
 const searching = ref(false)
 const searchQuery = ref('')
 const filterGraph = ref(true)
-const objectFirstMode = ref(true)  // Object-first DFS 检索模式
-const rootType = ref('Object')     // Root-first 根节点类型: Object 或 Term
+const rootTypes = ref(['Object', 'Term']) // 根节点类型多选: Object 和/或 Term
 const maxDepth = ref(3)             // DFS 最大深度
 const fullGraphData = ref({ nodes: [], edges: [] })
 // 传统检索结果（facts/nodes/edges）
 const results = ref({ facts: [], nodes: [], edges: [] })
-// Object-first 检索结果（rows 分组）
-const objectFirstRows = ref([])
+// Object-first 检索结果（全部原始结果，合并后的）
+const allObjectFirstRows = ref([])
+
+// 按 root_type 过滤后的显示结果（Term 优先 + checkbox 过滤）
+const filteredObjectFirstRows = computed(() => {
+  return allObjectFirstRows.value.filter(row => rootTypes.value.includes(row.root_type))
+})
 const showDocViewer = ref(false)
 const pdfLoading = ref(false)
 const expandedFacts = ref(new Set())
@@ -629,11 +626,11 @@ const submitSupplement = async () => {
 // Graph Filtering
 const filteredGraphData = computed(() => {
   // Object-first 模式：基于 DFS 遍历路径过滤
-  if (objectFirstRows.value.length > 0) {
+  if (allObjectFirstRows.value.length > 0) {
     if (!filterGraph.value) return fullGraphData.value
     const resultNodeIds = new Set()
     const resultEdgeIds = new Set()
-    objectFirstRows.value.forEach(row => {
+    allObjectFirstRows.value.forEach(row => {
       // Object 节点
       if (row.object_node?.uuid) resultNodeIds.add(row.object_node.uuid)
       // DFS 遍历路径节点
@@ -860,36 +857,30 @@ const handleSearch = async () => {
   if (!searchQuery.value.trim() || !graphId.value) return
   searching.value = true
   try {
-    if (objectFirstMode.value) {
-      // Root-first DFS 检索
-      const res = await searchObjectFirst({
+    // 并行查询 Object 和 Term，合并时 Term 排在 Object 前面
+    const [objectRes, termRes] = await Promise.all([
+      searchObjectFirst({
         graph_id: graphId.value,
         query: searchQuery.value,
         limit: 15,
         max_depth: maxDepth.value,
-        root_type: rootType.value
-      })
-      if (res.success) {
-        objectFirstRows.value = res.data.rows || []
-        results.value = { facts: [], nodes: [], edges: [] }
-      }
-    } else {
-      // 传统混合检索
-      const res = await searchGraph({
+        root_type: 'Object'
+      }),
+      searchObjectFirst({
         graph_id: graphId.value,
         query: searchQuery.value,
         limit: 15,
-        scope: 'both'
+        max_depth: maxDepth.value,
+        root_type: 'Term'
       })
-      if (res.success) {
-        results.value = {
-          facts: res.data.facts || [],
-          nodes: res.data.nodes || [],
-          edges: res.data.edges || []
-        }
-        objectFirstRows.value = []
-      }
-    }
+    ])
+
+    const termRows = (termRes.success ? termRes.data.rows || [] : []).map(r => ({ ...r, root_type: 'Term' }))
+    const objectRows = (objectRes.success ? objectRes.data.rows || [] : []).map(r => ({ ...r, root_type: 'Object' }))
+
+    // 合并: Term 排前，Object 排后
+    allObjectFirstRows.value = [...termRows, ...objectRows]
+    results.value = { facts: [], nodes: [], edges: [] }
   } catch (err) {
     console.error('Search failed:', err)
     alert('检索失败，请重试')
@@ -900,8 +891,8 @@ const handleSearch = async () => {
 
 const resetFilter = () => {
   results.value = { facts: [], nodes: [], edges: [] }
-  objectFirstRows.value = []
-  rootType.value = 'Object'
+  allObjectFirstRows.value = []
+  rootTypes.value = ['Object', 'Term']
 }
 
 const highlightInGraph = (fact) => {
@@ -1713,20 +1704,17 @@ onMounted(async () => {
   border-left: 1px solid #e0e0e0;
 }
 
-.root-type-pills {
+.root-type-checks {
   display: flex;
-  gap: 4px;
+  gap: 8px;
 }
 
-.root-type-pills .depth-pill {
-  width: auto;
-  min-width: 50px;
-  height: 26px;
-  padding: 0 10px;
-  border-radius: 13px;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
+.root-type-check {
+  font-size: 12px;
+}
+
+.root-type-check input {
+  accent-color: #409eff;
 }
 
 .depth-pills {
