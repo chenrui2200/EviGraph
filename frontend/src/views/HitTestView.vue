@@ -628,12 +628,12 @@ const submitSupplement = async () => {
 
 // Graph Filtering
 const filteredGraphData = computed(() => {
-  // Object-first 模式：基于 DFS 遍历路径过滤
-  if (allObjectFirstRows.value.length > 0) {
+  // Object-first 模式：基于 DFS 遍历路径过滤（与显示结果一一对应）
+  if (filteredObjectFirstRows.value.length > 0) {
     if (!filterGraph.value) return fullGraphData.value
     const resultNodeIds = new Set()
     const resultEdgeIds = new Set()
-    allObjectFirstRows.value.forEach(row => {
+    filteredObjectFirstRows.value.forEach(row => {
       // Object 节点
       if (row.object_node?.uuid) resultNodeIds.add(row.object_node.uuid)
       // DFS 遍历路径节点

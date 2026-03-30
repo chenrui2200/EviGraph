@@ -553,9 +553,12 @@ class LLMDocParser:
                             "source_id": entity.properties.get("id", ""),
                             "key": entity.name,
                             "value": entity.description,
+                            "clause_id": clause.clause_id,
                             "source": clause.source,
                             "page": clause.page,
-                            "bbox": clause.bbox
+                            "bbox": clause.bbox,
+                            "page_width": clause.page_width,
+                            "page_height": clause.page_height
                         }
                     })
 

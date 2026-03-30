@@ -2135,6 +2135,31 @@ class Neo4jStorage(GraphStorage):
         entity_seed = f"{graph_id}:{entity_type}:{entity_name}".encode('utf-8')
         entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
 
+        # 提取 PDF 定位信息（Term 需要）
+        pdf_source = metadata.get('source')
+        pdf_page = metadata.get('page')
+        pdf_bbox = metadata.get('bbox')
+        pdf_page_width = metadata.get('page_width')
+        pdf_page_height = metadata.get('page_height')
+
+        # Term: 带上 PDF 属性
+        extra_props = ""
+        extra_params = {}
+        if entity_type == "Term":
+            extra_props = """,
+                e.pdf_source = $pdf_source,
+                e.pdf_page = $pdf_page,
+                e.pdf_bbox = $pdf_bbox,
+                e.pdf_page_width = $pdf_page_width,
+                e.pdf_page_height = $pdf_page_height"""
+            extra_params = {
+                "pdf_source": pdf_source,
+                "pdf_page": pdf_page,
+                "pdf_bbox": pdf_bbox,
+                "pdf_page_width": pdf_page_width,
+                "pdf_page_height": pdf_page_height,
+            }
+
         tx.run(
             f"""
             MERGE (e:Entity:`{entity_type}` {{graph_id: $gid, name_lower: $name_lower}})
@@ -2143,7 +2168,7 @@ class Neo4jStorage(GraphStorage):
                 e.name = $name,
                 e.summary = $summary,
                 e.embedding = $embedding,
-                e.created_at = datetime()
+                e.created_at = datetime(){extra_props}
             ON MATCH SET
                 e.embedding = $embedding,
                 e.summary = CASE WHEN e.summary = '' OR e.summary IS NULL THEN $summary ELSE e.summary END
@@ -2153,7 +2178,8 @@ class Neo4jStorage(GraphStorage):
             uuid=entity_uuid,
             name=entity_name,
             summary=summary,
-            embedding=embedding
+            embedding=embedding,
+            **extra_params
         )
 
         # 链接Episode -> Entity
@@ -2167,6 +2193,23 @@ class Neo4jStorage(GraphStorage):
             e_uuid=entity_uuid,
             gid=graph_id
         )
+
+        # Term: 建立 DEFINES -> Clause 的关系
+        if entity_type == "Term":
+            clause_id = metadata.get('clause_id', '')
+            if clause_id:
+                clause_name = f"条款{clause_id}"
+                clause_seed = f"{graph_id}:{clause_name}".encode('utf-8')
+                clause_uuid = str(uuid.UUID(hashlib.md5(clause_seed).hexdigest()))
+                tx.run(
+                    """
+                    MATCH (t:Entity:Term {uuid: $term_uuid}), (c:Entity {uuid: $clause_uuid})
+                    MERGE (t)-[r:DEFINES]->(c)
+                    ON CREATE SET r.created_at = datetime()
+                    """,
+                    term_uuid=entity_uuid,
+                    clause_uuid=clause_uuid
+                )
 
     def _parse_semantic_from_content(self, content: str, clause_id: str, requirement: str = 'mandatory') -> List[Dict]:
         """

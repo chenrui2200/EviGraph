@@ -451,6 +451,7 @@ class GraphBuilderService:
                         # 从 clause metadata 复制 source, page, bbox 等信息
                         meta = clause.get('metadata', {})
                         source_metadata.update({
+                            "clause_id": clause.get('clause_id'),
                             "source": meta.get('source'),
                             "page": meta.get('page'),
                             "bbox": meta.get('bbox'),
