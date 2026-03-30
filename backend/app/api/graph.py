@@ -953,18 +953,23 @@ def generate_ontology():
 
         # Save files to disk immediately (cannot do this in background thread as request context will be gone)
         saved_files = []
+        file_save_errors = []
         for file in uploaded_files:
             if file and file.filename and allowed_file(file.filename):
-                file_info = ProjectManager.save_file_to_project(
-                    project.project_id,
-                    file,
-                    file.filename
-                )
-                saved_files.append(file_info)
-                project.files.append({
-                    "filename": file_info["original_filename"],
-                    "size": file_info["size"]
-                })
+                try:
+                    file_info = ProjectManager.save_file_to_project(
+                        project.project_id,
+                        file,
+                        file.filename
+                    )
+                    saved_files.append(file_info)
+                    project.files.append({
+                        "filename": file_info["original_filename"],
+                        "size": file_info["size"]
+                    })
+                except Exception as file_err:
+                    logger.warning(f"Failed to save file {file.filename}: {file_err}")
+                    file_save_errors.append(f"{file.filename}: {file_err}")
 
         if not saved_files:
             ProjectManager.delete_project(project.project_id)
@@ -1187,6 +1192,13 @@ def generate_ontology():
 
     except Exception as e:
         logger.error(f"API Error: {str(e)}\n{traceback.format_exc()}")
+        # 清理已创建的项目目录，避免留下空文件夹
+        if 'project' in dir() and project and project.project_id:
+            try:
+                ProjectManager.delete_project(project.project_id)
+                logger.info(f"Cleaned up empty project directory: {project.project_id}")
+            except Exception as del_err:
+                logger.warning(f"Failed to clean up project directory {project.project_id}: {del_err}")
         return jsonify({
             "success": False,
             "error": str(e),

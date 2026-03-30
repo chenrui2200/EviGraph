@@ -223,6 +223,9 @@
                         <span class="depth-tag" v-if="fact.traversal_depth !== undefined">
                           深度{{ fact.traversal_depth }}
                         </span>
+                        <span class="bbox-tag" v-if="fact.bbox && fact.bbox.length === 4">
+                          [{{ fact.bbox.map(v => v.toFixed(0)).join(',') }}]
+                        </span>
                         <button
                           v-if="fact.source && fact.source !== 'Local Search' && fact.source !== 'Graph' && fact.source !== 'Knowledge Graph' && fact.source !== 'Graph Path Extension' && fact.source !== 'Graph Expansion'"
                           class="locate-btn"
@@ -286,6 +289,9 @@
                     <span class="source-tag">
                       📄 {{ fact.source }}
                       <span v-if="fact.page">(P{{ fact.page }})</span>
+                    </span>
+                    <span class="bbox-tag" v-if="fact.bbox && fact.bbox.length === 4">
+                      [{{ fact.bbox.map(v => v.toFixed(0)).join(',') }}]
                     </span>
                     <button
                       v-if="fact.source && fact.source !== 'Local Search' && fact.source !== 'Graph' && fact.source !== 'Knowledge Graph' && fact.source !== 'Graph Path Extension' && fact.source !== 'Graph Expansion'"
@@ -2034,6 +2040,16 @@ onMounted(async () => {
   padding: 1px 6px;
   border-radius: 4px;
   border: 1px solid #e0e0e0;
+}
+
+.bbox-tag {
+  font-size: 11px;
+  color: #909399;
+  background: #f5f7fa;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid #e0e0e0;
+  font-family: monospace;
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
