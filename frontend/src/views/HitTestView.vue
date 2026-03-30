@@ -191,7 +191,7 @@
                           深度{{ fact.traversal_depth }}
                         </span>
                         <button
-                          v-if="fact.source && fact.source !== 'Local Search' && fact.source !== 'Graph'"
+                          v-if="fact.source && fact.source !== 'Local Search' && fact.source !== 'Graph' && fact.source !== 'Knowledge Graph' && fact.source !== 'Graph Path Extension' && fact.source !== 'Graph Expansion'"
                           class="locate-btn"
                           @click.stop="viewDocument(fact)"
                         >
@@ -255,7 +255,7 @@
                       <span v-if="fact.page">(P{{ fact.page }})</span>
                     </span>
                     <button
-                      v-if="fact.source && fact.source !== 'Local Search' && fact.source !== 'Graph'"
+                      v-if="fact.source && fact.source !== 'Local Search' && fact.source !== 'Graph' && fact.source !== 'Knowledge Graph' && fact.source !== 'Graph Path Extension' && fact.source !== 'Graph Expansion'"
                       class="locate-btn"
                       @click.stop="viewDocument(fact)"
                     >
@@ -394,6 +394,9 @@ const isSupplementMode = ref(false)
 const supplementing = ref(false)
 const selectedRegions = ref([]) // [{page, bbox: [x0,y0,x1,y1], screenRect: {left, top, width, height}}]
 const highlightedObjectId = ref(null) // Object-first 模式下高亮的 Object UUID
+
+// 图谱内部回退 source 值，不具备有效 PDF 路径
+const invalidSources = ['Graph', 'Local Search', 'Knowledge Graph', 'Graph Path Extension', 'Graph Expansion']
 const totalDocPages = ref(0)
 const fullPdfBuffer = ref(null)
 const jumpPage = ref(1)
@@ -737,7 +740,7 @@ const selectObjectRow = (row) => {
   }
   // 如果 Object 有 PDF 定位，打开文档查看器
   const pdfInfo = row.object_node?.pdf_info
-  if (pdfInfo?.source) {
+  if (pdfInfo?.source && !invalidSources.includes(pdfInfo.source)) {
     viewDocument({
       uuid: nodeId,
       source: pdfInfo.source,
@@ -747,13 +750,6 @@ const selectObjectRow = (row) => {
       page_height: pdfInfo.page_height,
       graph_id: graphId.value || projectId
     })
-  }
-}
-
-const highlightFactInGraph = (fact) => {
-  const nodeId = fact.source_node_uuid || fact.uuid
-  if (nodeId) {
-    highlightedNodeId.value = nodeId
   }
 }
 
@@ -770,7 +766,7 @@ const selectFactFromRow = (row, fact, rowIdx, fIdx) => {
       graphPanelRef.value.focusNode(nodeId)
     }
   }
-  if (fact.source && fact.source !== 'Unknown') {
+  if (fact.source && !invalidSources.includes(fact.source) && fact.source !== 'Unknown') {
     viewDocument(fact)
   }
 }
@@ -875,8 +871,8 @@ const handleSearch = async () => {
       })
     ])
 
-    const termRows = (termRes.success ? termRes.data.rows || [] : []).map(r => ({ ...r, root_type: 'Term' }))
-    const objectRows = (objectRes.success ? objectRes.data.rows || [] : []).map(r => ({ ...r, root_type: 'Object' }))
+    const termRows = (termRes.success ? termRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= 50).map(r => ({ ...r, root_type: 'Term' }))
+    const objectRows = (objectRes.success ? objectRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= 50).map(r => ({ ...r, root_type: 'Object' }))
 
     // 合并: Term 排前，Object 排后
     allObjectFirstRows.value = [...termRows, ...objectRows]
@@ -919,7 +915,7 @@ const selectFact = (fact, idx) => {
         graphPanelRef.value.focusNode(nodeId)
       }
       // If fact has PDF location info, open document viewer
-      if (fact.source && fact.source !== 'Unknown') {
+      if (fact.source && !invalidSources.includes(fact.source) && fact.source !== 'Unknown') {
         viewDocument(fact)
       }
     }
