@@ -138,7 +138,6 @@
 
       <ProjectList />
       <AiAppList />
-      <HistoryDatabase />
     </div>
   </div>
 </template>
@@ -148,7 +147,6 @@ import { ref, computed, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import ProjectList from '../components/ProjectList.vue'
 import AiAppList from '../components/AiAppList.vue'
-import HistoryDatabase from '../components/HistoryDatabase.vue'
 import { getHealth } from '../api/graph'
 
 const mono = 'JetBrains Mono, monospace'

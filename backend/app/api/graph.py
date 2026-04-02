@@ -886,20 +886,50 @@ def get_project_document(project_id: str, filename: str):
             break
 
     if not target_file_path:
-        # Debug: list what we DID find to help diagnose
-        all_files = []
+        # Fallback: if filename is garbled (e.g. from MinerU returning corrupted Chinese filenames),
+        # try to find the first PDF file in the directory
+        logger.warning(f"File lookup failed for '{search_name}'. Trying fallback: finding first PDF file...")
         for root, dirs, files in os.walk(base_dir):
             for f in files:
-                all_files.append(f)
+                f_lower = f.lower().strip()
+                if f_lower.endswith('.pdf') or f == 'pdf':
+                    target_file_path = os.path.join(root, f)
+                    target_dir = root
+                    found_filename = f
+                    logger.info(f"Fallback found PDF by extension/heuristic: {f}")
+                    break
+            if target_file_path:
+                break
 
-        logger.warning(f"File lookup failed. Files present in project: {all_files}")
+        # Last resort: try magic bytes (PDF files start with %PDF)
+        if not target_file_path:
+            all_files = []
+            for root, dirs, files in os.walk(base_dir):
+                for f in files:
+                    fpath = os.path.join(root, f)
+                    try:
+                        with open(fpath, 'rb') as fh:
+                            header = fh.read(5)
+                            if header == b'%PDF-':
+                                target_file_path = fpath
+                                target_dir = root
+                                found_filename = f
+                                logger.info(f"Fallback found PDF by magic bytes: {f}")
+                                break
+                    except Exception:
+                        pass
+                    all_files.append(f)
+                if target_file_path:
+                    break
 
-        return jsonify({
-            "success": False,
-            "error": f"Document not found: {filename}. Searched {base_dir}. Found files: {all_files[:10]}...",
-            "searched_id": project_id,
-            "mapped_id": actual_folder_id
-        }), 404
+        if not target_file_path:
+            logger.warning(f"File lookup failed. Files present in project: {all_files}")
+            return jsonify({
+                "success": False,
+                "error": f"Document not found: {filename}. Searched {base_dir}. Found files: {all_files[:10]}...",
+                "searched_id": project_id,
+                "mapped_id": actual_folder_id
+            }), 404
 
     logger.info(f"Serving document: {found_filename} from {target_dir}")
 
@@ -965,34 +995,52 @@ def _backfill_page_info(project_id: str, intelligent_chunks_data: Dict, logger) 
                         'page_height': chunk.get('page_height'),
                         'source': source
                     }
-                break  # 只取第一个条款编号作为代表
 
     if not clause_page_map:
-        logger.debug(f"[{project_id}] 回填 page: chunks.json 中无条款编号，跳过")
+        logger.warning(f"[{project_id}] 回填 page: chunks.json 中无条款编号（正则匹配失败），跳过")
         return
+
+    logger.info(f"[{project_id}] 回填 page: 从 chunks.json 匹配到 {len(clause_page_map)} 个条款编号 "
+                 f"(页码范围 {min(clause_page_map.values())}-{max(clause_page_map.values())})")
 
     # 回填到 clauses
     filled_count = 0
+    skipped_already_filled = 0
+    skipped_not_in_map = 0
     for clause in intelligent_chunks_data.get('clauses', []):
         clause_id = clause.get('clause_id', '')
-        if clause_id and clause.get('page') is None and clause_id in clause_page_map:
-            page_info = clause_page_map[clause_id]
+        if clause_id and clause_id in clause_page_map:
+            if clause.get('metadata', {}).get('page') is not None:
+                skipped_already_filled += 1
+                continue
             bbox_info = clause_bbox_map[clause_id]
-            clause['page'] = page_info
-            clause['bbox'] = bbox_info.get('bbox')
+            page_val = clause_page_map[clause_id]
+            source_val = bbox_info.get('source')
+            bbox_val = bbox_info.get('bbox')
+            page_width_val = bbox_info.get('page_width')
+            page_height_val = bbox_info.get('page_height')
+
+            # 同时写入顶层字段（ClauseSegment.page/source 读取）和 metadata（_extract_semantic_elements 读取）
             clause['metadata'] = clause.get('metadata', {})
-            clause['metadata']['page_idx'] = bbox_info['page_idx']
-            clause['metadata']['page_width'] = bbox_info.get('page_width')
-            clause['metadata']['page_height'] = bbox_info.get('page_height')
-            clause['metadata']['source'] = bbox_info.get('source')
+            clause['page'] = page_val
+            clause['source'] = source_val
+            clause['metadata']['page'] = page_val
+            clause['metadata']['bbox'] = bbox_val
+            clause['metadata']['source'] = source_val
+            clause['metadata']['page_width'] = page_width_val
+            clause['metadata']['page_height'] = page_height_val
             filled_count += 1
+            logger.debug(f"[{project_id}] 回填: clause={clause_id} → page={page_val}, source={source_val}, bbox={bbox_val}")
+        else:
+            skipped_not_in_map += 1
+
+    logger.info(f"[{project_id}] 回填 page 统计: 填充 {filled_count}, 已填充跳过 {skipped_already_filled}, "
+                 f"chunks中无匹配跳过 {skipped_not_in_map} / {len(intelligent_chunks_data.get('clauses', []))} 个条款")
 
     if filled_count > 0:
         # 保存回填后的数据
         ProjectManager.save_intelligent_chunks(project_id, intelligent_chunks_data)
-        logger.info(f"[{project_id}] 回填 page: 成功填充 {filled_count}/{len(intelligent_chunks_data.get('clauses', []))} 个条款的 page 信息")
-    else:
-        logger.debug(f"[{project_id}] 回填 page: 无需填充（clauses 已包含 page 或未匹配到条款编号）")
+        logger.info(f"[{project_id}] 回填 page: 成功保存 {filled_count} 个条款的 page 信息到 intelligent_chunks.json")
 
 
 # ============== Interface 1: Upload Files and Generate Ontology ==============

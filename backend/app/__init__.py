@@ -54,12 +54,6 @@ def create_app(config_class=Config):
         # Store None so endpoints can return 503 gracefully
         app.extensions['neo4j_storage'] = None
 
-    # Register simulation process cleanup function (ensure all simulation processes terminate on server shutdown)
-    from .services.simulation_runner import SimulationRunner
-    SimulationRunner.register_cleanup()
-    if should_log_startup:
-        logger.info("Simulation process cleanup function registered")
-
     # Request logging middleware
     @app.before_request
     def log_request():
@@ -75,10 +69,8 @@ def create_app(config_class=Config):
         return response
 
     # Register blueprints
-    from .api import graph_bp, simulation_bp, report_bp, ai_app_bp
+    from .api import graph_bp, ai_app_bp
     app.register_blueprint(graph_bp, url_prefix='/api/graph')
-    app.register_blueprint(simulation_bp, url_prefix='/api/simulation')
-    app.register_blueprint(report_bp, url_prefix='/api/report')
     app.register_blueprint(ai_app_bp, url_prefix='/api/ai-app')
 
     # Health check
