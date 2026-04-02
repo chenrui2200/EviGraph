@@ -86,30 +86,149 @@
                 </span>
               </div>
 
-              <div v-if="results.facts.length > 0" class="facts-preview">
-                <div class="facts-header">
-                  召回阶段: 发现 {{ results.facts.length }} 条相关事实
+              <!-- 检索配置 (与 hit-test 对齐) -->
+              <div class="search-options">
+                <!-- 根节点类型 -->
+                <div class="search-option-row">
+                  <span class="option-label">根节点类型</span>
+                  <div class="root-type-checks">
+                    <label class="checkbox-label root-type-check">
+                      <input type="checkbox" value="Object" v-model="workflowData.rootTypes" />
+                      <span>Object</span>
+                    </label>
+                    <label class="checkbox-label root-type-check">
+                      <input type="checkbox" value="Term" v-model="workflowData.rootTypes" />
+                      <span>Term</span>
+                    </label>
+                  </div>
                 </div>
-                <div v-if="results.rerank_results.length > 0" class="retrieval-done-hint-mini">
-                  ✅ 初步检索完成
+
+                <!-- DFS 深度 -->
+                <div class="search-option-row">
+                  <span class="option-label">深度</span>
+                  <div class="depth-pills">
+                    <button
+                      v-for="d in [1,2,3,4,5]"
+                      :key="d"
+                      class="depth-pill"
+                      :class="{ active: workflowData.maxDepth === d }"
+                      @click="workflowData.maxDepth = d"
+                    >{{ d }}</button>
+                  </div>
                 </div>
-                <div class="facts-scroll-area">
-                  <div v-for="(fact, idx) in results.facts" :key="idx" class="fact-card">
-                    <div class="fact-text">{{ fact.text }}</div>
-                    <div class="fact-footer">
-                      <span class="fact-source-tag" v-if="fact.source !== 'Unknown'">
-                        📄 {{ fact.source }} <template v-if="fact.page">(P{{ fact.page }})</template>
+
+                <!-- 相似度阈值 (复用 rerankThreshold) -->
+                <div class="search-option-row sim-row">
+                  <span class="option-label">相似度阈值</span>
+                  <div class="sim-slider-wrap">
+                    <input
+                      type="range"
+                      v-model.number="workflowData.rerankThreshold"
+                      min="0"
+                      max="100"
+                      step="5"
+                      class="sim-slider"
+                    />
+                    <span class="sim-value" :class="simValueClass">{{ workflowData.rerankThreshold }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 检索分析摘要 (hit-test 风格) -->
+              <div v-if="results.rows.length > 0" class="results-summary-card">
+                <div class="summary-title">💡 检索分析</div>
+                <div class="summary-content">
+                  本次检索命中了 <strong>{{ filteredRows.length }}</strong> 个根节点
+                  <span v-if="results.rows.length > filteredRows.length">
+                    （共 {{ results.rows.length }} 个，已过滤 {{ results.rows.length - filteredRows.length }} 个低于阈值的结果）
+                  </span>
+                  <span v-if="filteredRows.length > 0">
+                    （Term: {{ filteredRows.filter(r => r.object_node?.labels?.includes('Term')).length }},
+                    Object: {{ filteredRows.filter(r => r.object_node?.labels?.includes('Object')).length }}），
+                    共 <strong>{{ filteredRows.reduce((s, r) => s + (r.facts?.length || 0), 0) }}</strong> 条关联事实。
+                  </span>
+                  <template v-if="results.searchTimings.object_s || results.searchTimings.term_s">
+                    <br/>耗时：{{ (results.searchTimings.object_s || 0).toFixed(2) }}s + {{ (results.searchTimings.term_s || 0).toFixed(2) }}s
+                  </template>
+                </div>
+              </div>
+
+              <!-- DFS 检索结果 (hit-test 风格 ObjectFirstRow 展示) -->
+              <div v-if="filteredRows.length > 0" class="object-rows-list">
+                <div
+                  v-for="(row, rowIdx) in filteredRows"
+                  :key="rowIdx"
+                  class="object-row-card"
+                >
+                  <!-- Root 节点标题 -->
+                  <div class="object-row-header">
+                    <div class="object-name">
+                      <span class="object-badge" :class="{ term: row.object_node?.labels?.includes('Term') }">
+                        {{ row.object_node?.labels?.find(l => l === 'Term' || l === 'Object') || 'Object' }}
                       </span>
+                      <strong>{{ row.object_node?.name || 'Unknown' }}</strong>
+                    </div>
+                    <div class="object-score">
+                      <span class="score-tag">{{ (row.relevance_score || 0).toFixed(1) }}</span>
                       <button
-                        v-if="fact.source !== 'Unknown' && fact.source !== 'Graph Knowledge' && fact.source !== 'Local Search'"
-                        class="view-doc-btn"
-                        @click="viewDocument(fact)"
+                        v-if="row.object_node?.pdf_info?.source"
+                        class="locate-btn"
+                        @click="viewDocument({ uuid: row.object_node.uuid, source: row.object_node.pdf_info.source, page: row.object_node.pdf_info.page || 1, bbox: row.object_node.pdf_info.bbox, page_width: row.object_node.pdf_info.page_width, page_height: row.object_node.pdf_info.page_height, graph_id: row.object_node.graph_id })"
                       >
                         定位文档
                       </button>
                     </div>
                   </div>
+
+                  <!-- Object 摘要 -->
+                  <div v-if="row.object_node?.summary" class="object-summary">
+                    {{ row.object_node.summary }}
+                  </div>
+
+                  <!-- DFS 遍历路径 -->
+                  <div v-if="row.traversal_paths?.length > 1" class="traversal-path">
+                    <div class="path-header">🔱 DFS 遍历路径 (深度 {{ row.traversal_paths.length - 1 }})</div>
+                    <div class="path-nodes">
+                      <template v-for="(pNode, nIdx) in row.traversal_paths" :key="nIdx">
+                        <span class="path-node" :class="`depth-${pNode.depth}`">
+                          {{ pNode.name || pNode.uuid?.slice(0, 8) }}
+                        </span>
+                        <span v-if="nIdx < row.traversal_paths.length - 1" class="path-arrow">→</span>
+                      </template>
+                    </div>
+                  </div>
+
+                  <!-- 关联事实列表 -->
+                  <div class="object-facts">
+                    <div class="facts-header">📋 关联事实 ({{ row.facts?.length || 0 }})</div>
+                    <div
+                      v-for="(fact, fIdx) in row.facts"
+                      :key="fIdx"
+                      class="fact-item"
+                    >
+                      <div class="fact-text">{{ fact.text }}</div>
+                      <div class="fact-meta">
+                        <span class="source-tag">
+                          📄 {{ fact.source || 'Unknown' }}
+                          <span v-if="fact.page">(P{{ fact.page }})</span>
+                        </span>
+                        <span class="depth-tag" v-if="fact.traversal_depth !== undefined">深度{{ fact.traversal_depth }}</span>
+                        <button
+                          v-if="fact.source && fact.source !== 'Local Search' && fact.source !== 'Graph' && fact.source !== 'Knowledge Graph' && fact.source !== 'Graph Path Extension'"
+                          class="locate-btn"
+                          @click="viewDocument(fact)"
+                        >
+                          定位文档
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
+              </div>
+
+              <!-- 无结果提示 -->
+              <div v-else-if="results.facts.length > 0 && node.status === 'completed'" class="no-results-hint">
+                未检索到符合条件的结果
               </div>
             </div>
 
@@ -787,17 +906,27 @@ const workflowData = ref({
   query: '',
   selectedGraphIds: [],
   temperature: 0.7,
-  rerankThreshold: 60
+  rerankThreshold: 50,   // 相似度阈值，与 hit-test 对齐
+  maxDepth: 3,            // DFS 最大深度（与 hit-test 对齐）
+  rootTypes: ['Object', 'Term'],  // 根节点类型（与 hit-test 对齐）
 })
 
 const results = ref({
   facts: [],
+  rows: [],      // ObjectFirstRow structure from DFS flow
+  searchTimings: { object_s: 0, term_s: 0, total_s: 0 },  // 与 hit-test 对齐
   answer: '',
   rerank_results: [],
   prompts: {
     system: '',
     user: ''
   }
+})
+
+// 根据相似度阈值过滤后的 rows（与 hit-test 对齐）
+const filteredRows = computed(() => {
+  const threshold = workflowData.value.rerankThreshold
+  return results.value.rows.filter(r => (r.relevance_score || 0) >= threshold)
 })
 
 // 根据阈值过滤后的有效知识出处（包含原始索引用于 canvas ref 映射）
@@ -918,6 +1047,8 @@ const getProjectName = (graphId) => {
 const resetWorkflow = () => {
   results.value = {
     facts: [],
+    rows: [],
+    searchTimings: { object_s: 0, term_s: 0, total_s: 0 },
     answer: '',
     rerank_results: [],
     prompts: { system: '', user: '' }
@@ -940,6 +1071,12 @@ const getThresholdClass = (val) => {
   return 'high'
 }
 
+// 相似度阈值颜色（中=橙，高=绿），与 hit-test 对齐
+const simValueClass = computed(() => {
+  if (workflowData.value.rerankThreshold >= 75) return 'high'
+  return 'mid'
+})
+
 const runWorkflow = async () => {
   if (!workflowData.value.query.trim()) {
     alert('请输入问题')
@@ -961,7 +1098,9 @@ const runWorkflow = async () => {
         query: workflowData.value.query,
         graph_ids: workflowData.value.selectedGraphIds,
         temperature: workflowData.value.temperature,
-        rerank_threshold: workflowData.value.rerankThreshold
+        rerank_threshold: workflowData.value.rerankThreshold,
+        max_depth: workflowData.value.maxDepth,
+        root_types: workflowData.value.rootTypes,
       })
     })
 
@@ -989,7 +1128,11 @@ const runWorkflow = async () => {
             const node = nodes.value.find(n => n.id === 'n2')
             node.status = 'completed'
             node.duration = data.duration
-            results.value.facts = data.facts
+            results.value.facts = data.facts || []
+            results.value.rows = data.rows || []  // ObjectFirstRow rows from DFS flow
+            if (data.timings) {
+              results.value.searchTimings = data.timings
+            }
           } else if (type === 'rerank_complete') {
             const node = nodes.value.find(n => n.id === 'n_rerank')
             node.status = 'completed'
@@ -1595,7 +1738,7 @@ onUnmounted(() => {
 
 .node-content {
   padding: 15px;
-  min-height: 100px;
+  min-height: 200px;
 }
 
 .input-content textarea {
@@ -2441,6 +2584,295 @@ onUnmounted(() => {
 .project-meta {
   font-size: 11px;
   color: #999;
+}
+
+/* ===== hit-test 对齐样式 ===== */
+
+/* 检索配置区域 */
+.search-options {
+  padding: 8px 12px;
+  border-top: 1px dashed #e8e8e8;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.search-option-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.option-label {
+  font-size: 11px;
+  color: #606266;
+  font-weight: 600;
+  min-width: 60px;
+}
+
+.root-type-checks {
+  display: flex;
+  gap: 8px;
+}
+
+.root-type-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.root-type-check input {
+  cursor: pointer;
+}
+
+/* 深度选择 */
+.depth-pills {
+  display: flex;
+  gap: 4px;
+}
+
+.depth-pill {
+  padding: 2px 10px;
+  border: 1px solid #dcdfe6;
+  border-radius: 12px;
+  background: #fff;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+  color: #606266;
+}
+
+.depth-pill.active {
+  background: #409eff;
+  color: #fff;
+  border-color: #409eff;
+}
+
+/* 相似度阈值滑块 */
+.sim-slider-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.sim-slider {
+  flex: 1;
+  height: 4px;
+  cursor: pointer;
+  accent-color: #409eff;
+}
+
+.sim-value {
+  font-size: 12px;
+  font-weight: 700;
+  min-width: 28px;
+  text-align: center;
+}
+
+.sim-value.mid { color: #e6a23c; }
+.sim-value.high { color: #67c23a; }
+
+/* 检索分析摘要卡片 */
+.results-summary-card {
+  margin: 8px 12px;
+  padding: 10px 12px;
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 8px;
+}
+
+.summary-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #d48806;
+  margin-bottom: 6px;
+}
+
+.summary-content {
+  font-size: 12px;
+  color: #5c3d00;
+  line-height: 1.6;
+}
+
+/* ObjectFirstRow DFS 结果列表 */
+.object-rows-list {
+  padding: 0 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 350px;
+  overflow-y: auto;
+}
+
+.object-row-card {
+  background: #fff;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  padding: 10px;
+  transition: border-color 0.2s;
+}
+
+.object-row-card:hover {
+  border-color: #409eff;
+}
+
+.object-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.object-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.object-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  background: #e6f7ff;
+  color: #0969da;
+}
+
+.object-badge.term {
+  background: #fff0f6;
+  color: #cf3385;
+}
+
+.object-score {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.score-tag {
+  background: #ecf5ff;
+  color: #409eff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.object-summary {
+  font-size: 11px;
+  color: #909399;
+  margin-bottom: 6px;
+  line-height: 1.4;
+  padding-left: 4px;
+}
+
+/* DFS 遍历路径 */
+.traversal-path {
+  background: #f8f9fa;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+
+.path-header {
+  font-size: 10px;
+  font-weight: 700;
+  color: #606266;
+  margin-bottom: 4px;
+}
+
+.path-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.path-node {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.path-node.depth-0 { background: #dbeafe; color: #1d4ed8; }
+.path-node.depth-1 { background: #dcfce7; color: #15803d; }
+.path-node.depth-2 { background: #fef3c7; color: #b45309; }
+.path-node.depth-3 { background: #fce7f3; color: #be185d; }
+
+.path-arrow {
+  color: #c0c4cc;
+  font-size: 10px;
+}
+
+/* 关联事实列表 */
+.object-facts {
+  border-top: 1px dashed #f0f0f0;
+  padding-top: 6px;
+}
+
+.facts-header {
+  font-size: 11px;
+  font-weight: 700;
+  color: #409eff;
+  margin-bottom: 4px;
+}
+
+.fact-item {
+  padding: 6px 0;
+  border-bottom: 1px solid #f5f5f5;
+}
+
+.fact-item:last-child {
+  border-bottom: none;
+}
+
+.depth-tag {
+  background: #f0f0f0;
+  color: #909399;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+
+.no-results-hint {
+  text-align: center;
+  color: #999;
+  font-size: 12px;
+  padding: 12px;
+}
+
+.locate-btn {
+  padding: 2px 8px;
+  background: #f0f7ff;
+  color: #409eff;
+  border: 1px solid #c6e2ff;
+  border-radius: 4px;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.locate-btn:hover {
+  background: #409eff;
+  color: #fff;
+}
+
+.source-tag {
+  font-size: 11px;
+  color: #909399;
+}
+
+.retrieval-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-height: 700px;
+  overflow-y: auto;
 }
 
 .modal-footer {

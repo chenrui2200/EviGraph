@@ -3055,9 +3055,18 @@ def ai_qa():
     query = data.get('query')
     graph_ids = data.get('graph_ids', [])
     try:
-        rerank_threshold = int(data.get('rerank_threshold', 60))
+        rerank_threshold = int(data.get('rerank_threshold', 50))
     except (ValueError, TypeError):
-        rerank_threshold = 60
+        rerank_threshold = 50
+
+    try:
+        max_depth = int(data.get('max_depth', 3))
+    except (ValueError, TypeError):
+        max_depth = 3
+
+    root_types = data.get('root_types', ['Object', 'Term'])
+    if isinstance(root_types, str):
+        root_types = [root_types]
 
     if not query:
         return jsonify({"success": False, "error": "Please provide query"}), 400
@@ -3079,24 +3088,38 @@ def ai_qa():
             yield f"data: {json.dumps({'type': 'retrieval_start'})}\n\n"
             retrieval_start = time.time()
 
-            # Perform retrieval
-            # 使用 scope='both' 搜索 edges 和 nodes，确保能找到相关事实
-            search_result = tools.search_with_agentic_flow(graph_ids=graph_ids, query=query, limit=20, scope='both')
+            # Perform retrieval using DFS flow (aligned with hit-test logic)
+            dfs_result = tools.search_with_dfs_flow(
+                graph_ids=graph_ids, query=query, limit=20, max_depth=max_depth, root_types=root_types
+            )
             ret_dur = round(time.time() - retrieval_start, 2)
+
+            # Flatten ObjectFirstSearchResult into facts + rows for frontend compatibility
+            all_facts = []
+            for row in dfs_result.rows:
+                all_facts.extend(row.facts)
+
+            # Add rows with traversal path info to the response
+            rows_data = [row.to_dict() for row in dfs_result.rows]
 
             # 2. Retrieval Complete
             msg_ret = {
                 'type': 'retrieval_complete',
                 'data': {
-                    'facts': search_result.facts,
-                    'duration': ret_dur
+                    'facts': all_facts,
+                    'rows': rows_data,
+                    'duration': ret_dur,
+                    'timings': {
+                        'object_s': ret_dur,
+                        'term_s': 0,
+                        'total_s': ret_dur
+                    }
                 }
             }
             yield f"data: {json.dumps(msg_ret, ensure_ascii=False)}\n\n"
 
             # 3. Rerank & Filtering
             # Filter facts based on threshold
-            all_facts = search_result.facts
             filtered_facts = [f for f in all_facts if f.get('relevance_score', 0) >= rerank_threshold]
 
             # If nothing passes threshold, keep top 1 as safety
@@ -3106,7 +3129,7 @@ def ai_qa():
             msg_rerank = {
                 'type': 'rerank_complete',
                 'data': {
-                    'results': search_result.rerank_details,
+                    'results': [],  # rerank_details no longer applicable with DFS flow
                     'duration': 'incl.',
                     'filtered_count': len(filtered_facts),
                     'total_count': len(all_facts)
@@ -3118,18 +3141,28 @@ def ai_qa():
             yield f"data: {json.dumps({'type': 'llm_start'})}\n\n"
             llm_start = time.time()
 
-            # Use FILTERED facts for the prompt
-            from ..services.graph_tools import SearchResult
-            # Temporary SearchResult object to use its to_text method
-            temp_result = SearchResult(
-                facts=filtered_facts,
-                edges=[],
-                nodes=[],
+            # Build facts text from ObjectFirstRows (with traversal path context)
+            from ..services.graph_tools import ObjectFirstRow, ObjectFirstSearchResult
+            temp_result = ObjectFirstSearchResult(
                 query=query,
-                total_count=len(filtered_facts)
+                rows=dfs_result.rows,
+                total_objects=dfs_result.total_objects,
+                total_facts=dfs_result.total_facts,
             )
-
-            facts_text = temp_result.to_text()
+            # Build text from rows with filtered facts
+            filtered_row_texts = []
+            for row in dfs_result.rows:
+                row_facts = [f for f in row.facts if f in filtered_facts or f.get('relevance_score', 0) >= rerank_threshold]
+                if row_facts:
+                    filtered_row = ObjectFirstRow(
+                        object_node=row.object_node,
+                        traversal_paths=row.traversal_paths,
+                        traversal_edges=row.traversal_edges,
+                        facts=row_facts,
+                        relevance_score=row.relevance_score,
+                    )
+                    filtered_row_texts.append(filtered_row.to_text())
+            facts_text = "\n\n".join(filtered_row_texts) if filtered_row_texts else "未找到高于阈值的相关事实。"
             system_prompt = "你是一个专业的工程标准知识助手。你的任务是基于提供的多跳检索到的【知识参考详情】深度回答用户问题。\n\n回答要求：\n1. 请先在 <thought> 标签内分析所有检索到的条文关联，确引用的完整性。\n2. 给出最终结论，必须引用具体的条款编号（如：根据 7.6.49 条规定...）。\n3. 如果知识涉及多个关联条款，请理清它们的逻辑先后关系。\n4. 若信息不足，请如实告知缺失的具体标准名称或编号。"
             user_prompt = f"### 多跳检索结果汇总 (Context from Knowledge Graph):\n{facts_text}\n\n### 用户当前问题 (User Query):\n{query}\n\n请进行深度推理并回答："
 

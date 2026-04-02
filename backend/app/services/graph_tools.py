@@ -725,6 +725,142 @@ Your response:"""
             rerank_details=rerank_details
         )
 
+    def search_with_dfs_flow(
+        self,
+        graph_ids: List[str],
+        query: str,
+        limit: int = 10,
+        max_depth: int = 3,
+        root_types: List[str] = None,
+    ) -> ObjectFirstSearchResult:
+        """
+        DFS-based retrieval flow aligned with hit-test query logic.
+
+        Retrieves in two stages (Object-first + Term-first), performs iterative DFS
+        traversal from each root node, collects facts with PDF metadata, then
+        applies LLM filtering and reranking.
+
+        Flow (aligned with hit-test search_object_first):
+        1. Search root nodes (Object + Term) in each graph using hybrid search
+        2. DFS traversal from each root node (collecting facts + traversal paths)
+        3. LLM filter: keep only facts relevant to the query
+        4. LLM rerank: score and sort facts
+        5. Batch PDF info enrichment for root nodes
+        6. Return structured ObjectFirstSearchResult
+
+        Args:
+            graph_ids: List of graph IDs to search
+            query: Search query
+            limit: Maximum number of result rows to return
+            max_depth: Maximum DFS traversal depth
+
+        Returns:
+            ObjectFirstSearchResult with rows grouped by root node
+        """
+        logger.info(f"Starting search_with_dfs_flow for query: {query[:50]}..., "
+                    f"graphs={len(graph_ids)}, max_depth={max_depth}, root_types={root_types}")
+
+        if root_types is None:
+            root_types = ["Object", "Term"]
+
+        all_rows: List[ObjectFirstRow] = []
+        seen_fact_texts: set = set()
+
+        # Search each graph
+        for graph_id in graph_ids:
+            # --- Object root search ---
+            if "Object" in root_types:
+                object_roots = self.storage.search_object_nodes(
+                    graph_id=graph_id,
+                    query=query,
+                    limit=limit,
+                )
+
+                for obj_node in object_roots:
+                    obj_uuid = obj_node.get("uuid", "")
+                    if not obj_uuid:
+                        continue
+                    row = self._dfs_from_object(
+                        graph_id=graph_id,
+                        object_uuid=obj_uuid,
+                        object_data=obj_node,
+                        max_depth=max_depth,
+                        seen_fact_texts=seen_fact_texts,
+                    )
+                    all_rows.append(row)
+
+            # --- Term root search ---
+            if "Term" in root_types:
+                term_roots = self.storage.search_term_nodes(
+                    graph_id=graph_id,
+                    query=query,
+                    limit=limit,
+                )
+
+                for term_node in term_roots:
+                    term_uuid = term_node.get("uuid", "")
+                    if not term_uuid:
+                        continue
+                    row = self._dfs_from_object(
+                        graph_id=graph_id,
+                        object_uuid=term_uuid,
+                        object_data=term_node,
+                        max_depth=max_depth,
+                        seen_fact_texts=seen_fact_texts,
+                    )
+                    all_rows.append(row)
+
+        if not all_rows:
+            return ObjectFirstSearchResult(
+                query=query,
+                rows=[],
+                total_objects=0,
+                total_facts=0,
+            )
+
+        # --- LLM rerank rows ---
+        scored_rows = self._rerank_object_rows(query, all_rows)
+        final_rows = scored_rows[:limit]
+
+        # --- Batch PDF info for top rows ---
+        if final_rows:
+            root_uuids = [row.object_node.get("uuid") for row in final_rows]
+            root_uuids = [uid for uid in root_uuids if uid]
+            if root_uuids:
+                batch_pdf_info = self._batch_get_node_pdf_info(root_uuids)
+                for row in final_rows:
+                    root_uuid = row.object_node.get("uuid")
+                    if root_uuid and root_uuid in batch_pdf_info:
+                        row.object_node["pdf_info"] = batch_pdf_info[root_uuid]
+
+        # --- LLM rerank facts within rows (align with ai-qa relevance_score) ---
+        all_facts_from_rows: List[Dict[str, Any]] = []
+        for row in final_rows:
+            all_facts_from_rows.extend(row.facts)
+
+        if all_facts_from_rows:
+            scored_facts = self.rerank_facts(query, all_facts_from_rows)
+            # Redistribute scored facts back to rows
+            scored_texts = {f.get('text', ''): f for f in scored_facts}
+            for row in final_rows:
+                for i, fact in enumerate(row.facts):
+                    key = fact.get('text', '')
+                    if key in scored_texts:
+                        row.facts[i].update({
+                            'relevance_score': scored_texts[key].get('relevance_score', 0),
+                            'relevance_reasoning': scored_texts[key].get('relevance_reasoning', ''),
+                        })
+
+        total_facts = sum(len(row.facts) for row in final_rows)
+        logger.info(f"search_with_dfs_flow complete: {len(final_rows)} rows, {total_facts} facts")
+
+        return ObjectFirstSearchResult(
+            query=query,
+            rows=final_rows,
+            total_objects=len(final_rows),
+            total_facts=total_facts,
+        )
+
     # ========== Basic Tools ==========
 
     def search_graph(
@@ -1468,6 +1604,7 @@ Your response:"""
             "labels": object_data.get("labels", []),
             "summary": object_data.get("summary", ""),
             "pdf_info": {},  # Will be filled by search_object_first via batch call
+            "graph_id": graph_id,  # Include graph_id for PDF viewing in frontend
         }
 
         return ObjectFirstRow(
