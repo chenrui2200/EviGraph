@@ -183,9 +183,17 @@
               <div v-else class="qa-result-container">
                 <!-- 1. Knowledge Sources with "Screenshots" -->
                 <div class="result-section">
-                  <div class="section-header">📚 检索依据原文</div>
-                  <div class="source-evidence-list">
-                    <div v-for="(fact, idx) in results.facts" :key="idx" class="evidence-item">
+                  <div class="section-header">
+                    📚 检索依据原文
+                    <span v-if="results.facts.length > filteredFacts.length" class="filter-summary">
+                      (已过滤 {{ results.facts.length - filteredFacts.length }} 条无效，剩余 {{ filteredFacts.length }} 条)
+                    </span>
+                  </div>
+                  <div v-if="filteredFacts.length === 0" class="no-evidence-hint">
+                    无高于 {{ workflowData.rerankThreshold }} 分的有效知识出处
+                  </div>
+                  <div v-else class="source-evidence-list">
+                    <div v-for="(fact, idx) in filteredFacts" :key="fact._originalIndex" class="evidence-item">
                       <div class="evidence-meta">
                         <span class="source-tag">来源 {{ idx + 1 }}: {{ fact.source }} <template v-if="fact.page">(P{{ fact.page }})</template></span>
                         <span v-if="fact.relevance_score" class="evidence-score-badge" :style="{ background: getThresholdColor(fact.relevance_score) }">
@@ -194,7 +202,7 @@
                       </div>
                       <!-- The "Screenshot" Canvas -->
                       <div class="evidence-screenshot-box">
-                        <canvas :ref="el => setEvidenceRef(el, idx, 'node')" class="evidence-canvas"></canvas>
+                        <canvas :ref="el => setEvidenceRef(el, fact._originalIndex, 'node')" class="evidence-canvas"></canvas>
                         <div v-if="!fact.bbox" class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
                       </div>
                     </div>
@@ -351,9 +359,17 @@
         <div class="modal-body full-result-body">
           <!-- 1. Source Evidence Section -->
           <div class="full-section">
-            <div class="full-section-title">📚 检索知识出处 (Knowledge Evidence)</div>
-            <div class="full-evidence-grid">
-              <div v-for="(fact, idx) in results.facts" :key="idx" class="full-evidence-card">
+            <div class="full-section-title">
+              📚 检索知识出处 (Knowledge Evidence)
+              <span v-if="results.facts.length > filteredFacts.length" class="filter-summary">
+                (已过滤 {{ results.facts.length - filteredFacts.length }} 条无效，剩余 {{ filteredFacts.length }} 条)
+              </span>
+            </div>
+            <div v-if="filteredFacts.length === 0" class="no-evidence-hint full-no-evidence">
+              无高于 {{ workflowData.rerankThreshold }} 分的有效知识出处
+            </div>
+            <div v-else class="full-evidence-grid">
+              <div v-for="(fact, idx) in filteredFacts" :key="fact._originalIndex" class="full-evidence-card">
                 <div class="evidence-header">
                   <span class="evidence-idx">#{{ idx + 1 }}</span>
                   <span class="evidence-source">{{ fact.source }} <template v-if="fact.page">(第 {{ fact.page }} 页)</template></span>
@@ -362,7 +378,7 @@
                   </span>
                 </div>
                 <div class="full-evidence-screenshot">
-                  <canvas :ref="el => setEvidenceRef(el, idx, 'modal')" class="full-evidence-canvas"></canvas>
+                  <canvas :ref="el => setEvidenceRef(el, fact._originalIndex, 'modal')" class="full-evidence-canvas"></canvas>
                   <div v-if="!fact.bbox" class="full-no-bbox">
                     <p class="fact-text-fallback">{{ fact.text }}</p>
                   </div>
@@ -444,7 +460,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { getProjectList, aiQa, updateProject } from '../api/graph'
 import { saveApp, getApp, publishApp, executeAppApi } from '../api/ai_app'
@@ -521,14 +537,9 @@ const parsedResult = computed(() => {
   return { thought, conclusion }
 })
 
-// Evidence Canvas management
-const evidenceCanvasRefs = ref({ node: {}, modal: {} })
-const setEvidenceRef = (el, idx, type = 'node') => {
-  if (el) evidenceCanvasRefs.value[type][idx] = el
-}
-
 const renderEvidenceScreenshots = async (type = 'node') => {
-  const factsWithBbox = results.value.facts.filter(f => f.bbox && f.bbox.length === 4 && f.graph_id && f.source)
+  const targetFacts = filteredFacts.value
+  const factsWithBbox = targetFacts.filter(f => f.bbox && f.bbox.length === 4 && f.graph_id && f.source)
 
   if (factsWithBbox.length === 0) return
 
@@ -538,9 +549,9 @@ const renderEvidenceScreenshots = async (type = 'node') => {
   // Cache for PDF documents
   const pdfDocCache = {}
 
-  for (const fact of results.value.facts) {
-    const idx = results.value.facts.indexOf(fact)
-    const canvas = evidenceCanvasRefs.value[type][idx]
+  for (const fact of targetFacts) {
+    const originalIndex = fact._originalIndex
+    const canvas = evidenceCanvasRefs.value[type][originalIndex]
     if (!canvas || !fact.bbox || !fact.graph_id) continue
 
     try {
@@ -603,7 +614,7 @@ const renderEvidenceScreenshots = async (type = 'node') => {
       context.strokeRect(hX, hY, hW, hH)
 
     } catch (err) {
-      console.error(`Failed to render screenshot for fact ${idx}:`, err)
+      console.error(`Failed to render screenshot for fact ${originalIndex}:`, err)
     }
   }
 }
@@ -653,16 +664,24 @@ const initPdfJs = async () => {
   })
 }
 
-const renderPdfPage = async (blob, pageNum) => {
+const renderPdfPage = async (pdfSource, pageNum) => {
   if (!pdfjsLib.value || !pdfCanvas.value) return
 
   pdfLoading.value = true
   try {
-    const arrayBuffer = await blob.arrayBuffer()
-    const loadingTask = pdfjsLib.value.getDocument({ data: arrayBuffer })
-    const pdf = await loadingTask.promise
-    const page = await pdf.getPage(pageNum)
+    let pdf
+    if (typeof pdfSource === 'string') {
+      // URL string
+      const loadingTask = pdfjsLib.value.getDocument(pdfSource)
+      pdf = await loadingTask.promise
+    } else {
+      // Blob
+      const arrayBuffer = await pdfSource.arrayBuffer()
+      const loadingTask = pdfjsLib.value.getDocument({ data: arrayBuffer })
+      pdf = await loadingTask.promise
+    }
 
+    const page = await pdf.getPage(pageNum)
     const canvas = pdfCanvas.value
     const context = canvas.getContext('2d')
 
@@ -674,12 +693,11 @@ const renderPdfPage = async (blob, pageNum) => {
     canvas.height = viewport.height
     canvas.width = viewport.width
 
-    const renderContext = {
-      canvasContext: context,
-      viewport: viewport
-    }
+    // Sync page dimensions for SVG highlight overlay
+    currentDoc.value.pageWidth = unscaledViewport.width
+    currentDoc.value.pageHeight = unscaledViewport.height
 
-    await page.render(renderContext).promise
+    await page.render({ canvasContext: context, viewport }).promise
   } catch (err) {
     console.error('PDF render error:', err)
   } finally {
@@ -698,34 +716,23 @@ const viewDocument = async (fact) => {
   const pageHeight = fact.page_height || 0
 
   try {
-    if (currentDoc.value.url && currentDoc.value.url.startsWith('blob:')) {
-      URL.revokeObjectURL(currentDoc.value.url)
-    }
-
-    showDocViewer.value = false
-    const apiUrl = `${window.location.origin}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}`
-
-    const response = await fetch(apiUrl)
-    if (!response.ok) throw new Error('Failed to fetch document')
-    const blob = await response.blob()
-
-    const blobUrl = URL.createObjectURL(blob)
+    const apiUrl = `${window.location.origin}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}?t=${Date.now()}`
 
     if (!pdfjsLib.value) await initPdfJs()
 
-    nextTick(async () => {
-      currentDoc.value = {
-        filename,
-        url: blobUrl,
-        page,
-        bbox,
-        pageWidth,
-        pageHeight
-      }
-      showDocViewer.value = true
+    currentDoc.value = {
+      filename,
+      url: apiUrl,
+      page,
+      bbox,
+      pageWidth,
+      pageHeight
+    }
+    showDocViewer.value = true
 
+    nextTick(() => {
       setTimeout(() => {
-        renderPdfPage(blob, page)
+        renderPdfPage(apiUrl, page)
       }, 300)
     })
   } catch (err) {
@@ -792,6 +799,30 @@ const results = ref({
     user: ''
   }
 })
+
+// 根据阈值过滤后的有效知识出处（包含原始索引用于 canvas ref 映射）
+const filteredFacts = computed(() => {
+  const threshold = workflowData.value.rerankThreshold
+  return results.value.facts
+    .map((fact, index) => ({ ...fact, _originalIndex: index }))
+    .filter(f => f.relevance_score >= threshold)
+})
+
+// 阈值变化时自动重渲染 canvas
+watch(filteredFacts, () => {
+  if (results.value.answer) {
+    nextTick(() => {
+      renderEvidenceScreenshots('node')
+    })
+  }
+}, { deep: true })
+
+// Evidence Canvas management
+const evidenceCanvasRefs = ref({ node: {}, modal: {} })
+// canvas refs 使用原始 fact 索引作为 key，确保阈值变化时 ref 稳定
+const setEvidenceRef = (el, factIndex, type = 'node') => {
+  if (el) evidenceCanvasRefs.value[type][factIndex] = el
+}
 
 const showPromptModal = ref(false)
 
@@ -1898,6 +1929,28 @@ onUnmounted(() => {
   padding: 10px;
   background: #fff;
   width: 100%;
+}
+
+.no-evidence-hint {
+  font-size: 12px;
+  color: #e6a23c;
+  text-align: center;
+  padding: 20px;
+  background: #fdf6ec;
+  border-radius: 6px;
+  margin: 10px 0;
+}
+
+.full-no-evidence {
+  padding: 40px;
+  font-size: 14px;
+}
+
+.filter-summary {
+  font-size: 11px;
+  color: #909399;
+  margin-left: 8px;
+  font-weight: normal;
 }
 
 .thought-content {
