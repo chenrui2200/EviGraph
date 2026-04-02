@@ -539,9 +539,9 @@ const parsedResult = computed(() => {
 
 const renderEvidenceScreenshots = async (type = 'node') => {
   const targetFacts = filteredFacts.value
-  const factsWithBbox = targetFacts.filter(f => f.bbox && f.bbox.length === 4 && f.graph_id && f.source)
+  const validFacts = targetFacts.filter(f => f.bbox && f.bbox.length === 4 && f.graph_id && f.source)
 
-  if (factsWithBbox.length === 0) return
+  if (validFacts.length === 0) return
 
   // Ensure PDF.js is ready
   if (!pdfjsLib.value) await initPdfJs()
@@ -549,10 +549,10 @@ const renderEvidenceScreenshots = async (type = 'node') => {
   // Cache for PDF documents
   const pdfDocCache = {}
 
-  for (const fact of targetFacts) {
+  for (const fact of validFacts) {
     const originalIndex = fact._originalIndex
     const canvas = evidenceCanvasRefs.value[type][originalIndex]
-    if (!canvas || !fact.bbox || !fact.graph_id) continue
+    if (!canvas) continue
 
     try {
       const cacheKey = `${fact.graph_id}:${fact.source}`

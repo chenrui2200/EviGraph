@@ -69,9 +69,10 @@ def create_app(config_class=Config):
         return response
 
     # Register blueprints
-    from .api import graph_bp, ai_app_bp
+    from .api import graph_bp, ai_app_bp, report_bp
     app.register_blueprint(graph_bp, url_prefix='/api/graph')
     app.register_blueprint(ai_app_bp, url_prefix='/api/ai-app')
+    app.register_blueprint(report_bp, url_prefix='/api/report')
 
     # Health check
     @app.route('/health')
@@ -117,6 +118,16 @@ def create_app(config_class=Config):
 
     if should_log_startup:
         logger.info("MiroFish-Offline Backend startup complete")
+
+    # Startup: auto-cleanup old completed tasks (7 days old)
+    try:
+        from .models.task import TaskManager
+        tm = TaskManager()
+        removed = tm.cleanup_old_tasks(max_age_hours=168)  # 7 days
+        if removed > 0 and should_log_startup:
+            logger.info(f"Startup task cleanup: removed {removed} old completed tasks")
+    except Exception as e:
+        logger.warning(f"Startup task cleanup skipped: {e}")
 
     return app
 

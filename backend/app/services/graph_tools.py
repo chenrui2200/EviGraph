@@ -845,29 +845,34 @@ Your response:"""
                 if isinstance(node, dict):
                     node_uuid = node.get('uuid', '')
 
-                    # Get PDF location info for this node
+                    # 优先从 node 自身属性读取 PDF 定位信息（Entity 创建时已存储）
+                    # 回退到 get_node_episodes 查询
                     pdf_info = {
-                        "source": None,
-                        "page": None,
-                        "bbox": None,
-                        "page_width": None,
-                        "page_height": None,
+                        "source": node.get("pdf_source") or node.get("source"),
+                        "page": node.get("pdf_page") or node.get("page"),
+                        "bbox": node.get("pdf_bbox"),
+                        "page_width": node.get("pdf_page_width"),
+                        "page_height": node.get("pdf_page_height"),
                         "episode_text": None
                     }
-                    try:
-                        node_eps = self.storage.get_node_episodes(node_uuid, limit=1)
-                        if node_eps:
-                            meta = node_eps[0].get("metadata", {})
-                            pdf_info.update({
-                                "source": meta.get("source"),
-                                "page": meta.get("page"),
-                                "bbox": meta.get("bbox"),
-                                "page_width": meta.get("page_width"),
-                                "page_height": meta.get("page_height"),
-                                "episode_text": node_eps[0].get("text"),
-                            })
-                    except:
-                        pass
+
+                    # 如果 node 自身没有 bbox，尝试从关联的 episode 获取
+                    if not pdf_info["bbox"]:
+                        try:
+                            node_eps = self.storage.get_node_episodes(node_uuid, limit=1)
+                            if node_eps:
+                                meta = node_eps[0].get("metadata", {})
+                                nested_meta = meta.get("metadata", {})
+                                pdf_info.update({
+                                    "source": pdf_info["source"] or meta.get("source") or nested_meta.get("source"),
+                                    "page": pdf_info["page"] or meta.get("page") or nested_meta.get("page"),
+                                    "bbox": pdf_info["bbox"] or meta.get("bbox") or nested_meta.get("bbox"),
+                                    "page_width": pdf_info["page_width"] or meta.get("page_width") or nested_meta.get("page_width"),
+                                    "page_height": pdf_info["page_height"] or meta.get("page_height") or nested_meta.get("page_height"),
+                                    "episode_text": node_eps[0].get("text"),
+                                })
+                        except:
+                            pass
 
                     nodes.append({
                         "uuid": node_uuid,
@@ -878,7 +883,6 @@ Your response:"""
                     })
                     summary = node.get('summary', '')
                     if summary:
-                        # Reuse pdf_info for node summary fact (avoid redundant query)
                         facts.append({
                             "uuid": node_uuid,
                             "text": f"Entity Knowledge: {node.get('name', '')} - {summary}",
@@ -905,12 +909,13 @@ Your response:"""
                                             rel_eps = self.storage.get_episodes([ep_ids[0]])
                                             if rel_eps:
                                                 meta = rel_eps[0].get("metadata", {})
+                                                nested_meta = meta.get("metadata", {})
                                                 rel_source_info.update({
-                                                    "source": meta.get("source", "Graph Path Extension"),
-                                                    "page": meta.get("page"),
-                                                    "bbox": meta.get("bbox"),
-                                                    "page_width": meta.get("page_width"),
-                                                    "page_height": meta.get("page_height")
+                                                    "source": meta.get("source") or nested_meta.get("source") or "Graph Path Extension",
+                                                    "page": meta.get("page") or nested_meta.get("page"),
+                                                    "bbox": meta.get("bbox") or nested_meta.get("bbox"),
+                                                    "page_width": meta.get("page_width") or nested_meta.get("page_width"),
+                                                    "page_height": meta.get("page_height") or nested_meta.get("page_height")
                                                 })
                                         except:
                                             pass
