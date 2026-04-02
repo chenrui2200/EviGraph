@@ -117,35 +117,33 @@
                   </div>
                 </div>
 
-                <!-- 相似度阈值 (复用 rerankThreshold) -->
+                <!-- 相似度阈值：DFS 检索后预过滤，减少 LLM reranking 数量 -->
                 <div class="search-option-row sim-row">
                   <span class="option-label">相似度阈值</span>
                   <div class="sim-slider-wrap">
                     <input
                       type="range"
-                      v-model.number="workflowData.rerankThreshold"
+                      v-model.number="workflowData.similarityThreshold"
                       min="0"
                       max="100"
                       step="5"
                       class="sim-slider"
                     />
-                    <span class="sim-value" :class="simValueClass">{{ workflowData.rerankThreshold }}</span>
+                    <span class="sim-value" :class="simValueClass">{{ workflowData.similarityThreshold }}</span>
                   </div>
                 </div>
+
               </div>
 
               <!-- 检索分析摘要 (hit-test 风格) -->
               <div v-if="results.rows.length > 0" class="results-summary-card">
                 <div class="summary-title">💡 检索分析</div>
                 <div class="summary-content">
-                  本次检索命中了 <strong>{{ filteredRows.length }}</strong> 个根节点
-                  <span v-if="results.rows.length > filteredRows.length">
-                    （共 {{ results.rows.length }} 个，已过滤 {{ results.rows.length - filteredRows.length }} 个低于阈值的结果）
-                  </span>
-                  <span v-if="filteredRows.length > 0">
-                    （Term: {{ filteredRows.filter(r => r.object_node?.labels?.includes('Term')).length }},
-                    Object: {{ filteredRows.filter(r => r.object_node?.labels?.includes('Object')).length }}），
-                    共 <strong>{{ filteredRows.reduce((s, r) => s + (r.facts?.length || 0), 0) }}</strong> 条关联事实。
+                  本次检索命中了 <strong>{{ results.rows.length }}</strong> 个根节点
+                  <span v-if="results.rows.length > 0">
+                    （Term: {{ results.rows.filter(r => r.object_node?.labels?.includes('Term')).length }},
+                    Object: {{ results.rows.filter(r => r.object_node?.labels?.includes('Object')).length }}），
+                    共 <strong>{{ results.rows.reduce((s, r) => s + (r.facts?.length || 0), 0) }}</strong> 条关联事实。
                   </span>
                   <template v-if="results.searchTimings.object_s || results.searchTimings.term_s">
                     <br/>耗时：{{ (results.searchTimings.object_s || 0).toFixed(2) }}s + {{ (results.searchTimings.term_s || 0).toFixed(2) }}s
@@ -154,9 +152,9 @@
               </div>
 
               <!-- DFS 检索结果 (hit-test 风格 ObjectFirstRow 展示) -->
-              <div v-if="filteredRows.length > 0" class="object-rows-list">
+              <div v-if="results.rows.length > 0" class="object-rows-list">
                 <div
-                  v-for="(row, rowIdx) in filteredRows"
+                  v-for="(row, rowIdx) in results.rows"
                   :key="rowIdx"
                   class="object-row-card"
                 >
@@ -237,12 +235,12 @@
               <div class="rerank-config">
                 <div class="threshold-label">
                   <span>🎯 知识过滤阈值:</span>
-                  <span class="threshold-value" :class="getThresholdClass(workflowData.rerankThreshold)">{{ workflowData.rerankThreshold }}分</span>
+                  <span class="threshold-value" :class="getThresholdClass(workflowData.filterThreshold)">{{ workflowData.filterThreshold }}分</span>
                 </div>
                 <div class="thermometer-container">
-                  <input type="range" v-model="workflowData.rerankThreshold" min="0" max="100" step="5" class="thermometer-input" />
+                  <input type="range" v-model="workflowData.filterThreshold" min="50" max="100" step="5" class="thermometer-input" />
                   <div class="thermometer-track">
-                    <div class="thermometer-fill" :style="{ width: workflowData.rerankThreshold + '%', background: getThresholdColor(workflowData.rerankThreshold) }"></div>
+                    <div class="thermometer-fill" :style="{ width: workflowData.filterThreshold + '%', background: getThresholdColor(workflowData.filterThreshold) }"></div>
                   </div>
                 </div>
                 <p class="config-hint">仅将高于此分数的检索事实发送给大模型推理</p>
@@ -304,15 +302,12 @@
                 <div class="result-section">
                   <div class="section-header">
                     📚 检索依据原文
-                    <span v-if="results.facts.length > filteredFacts.length" class="filter-summary">
-                      (已过滤 {{ results.facts.length - filteredFacts.length }} 条无效，剩余 {{ filteredFacts.length }} 条)
-                    </span>
                   </div>
-                  <div v-if="filteredFacts.length === 0" class="no-evidence-hint">
-                    无高于 {{ workflowData.rerankThreshold }} 分的有效知识出处
+                  <div v-if="results.facts.length === 0" class="no-evidence-hint">
+                    暂无有效知识出处
                   </div>
                   <div v-else class="source-evidence-list">
-                    <div v-for="(fact, idx) in filteredFacts" :key="fact._originalIndex" class="evidence-item">
+                    <div v-for="(fact, idx) in results.facts" :key="idx" class="evidence-item">
                       <div class="evidence-meta">
                         <span class="source-tag">来源 {{ idx + 1 }}: {{ fact.source }} <template v-if="fact.page">(P{{ fact.page }})</template></span>
                         <span v-if="fact.relevance_score" class="evidence-score-badge" :style="{ background: getThresholdColor(fact.relevance_score) }">
@@ -321,7 +316,7 @@
                       </div>
                       <!-- The "Screenshot" Canvas -->
                       <div class="evidence-screenshot-box">
-                        <canvas :ref="el => setEvidenceRef(el, fact._originalIndex, 'node')" class="evidence-canvas"></canvas>
+                        <canvas :ref="el => setEvidenceRef(el, idx, 'node')" class="evidence-canvas"></canvas>
                         <div v-if="!fact.bbox" class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
                       </div>
                     </div>
@@ -480,15 +475,12 @@
           <div class="full-section">
             <div class="full-section-title">
               📚 检索知识出处 (Knowledge Evidence)
-              <span v-if="results.facts.length > filteredFacts.length" class="filter-summary">
-                (已过滤 {{ results.facts.length - filteredFacts.length }} 条无效，剩余 {{ filteredFacts.length }} 条)
-              </span>
             </div>
-            <div v-if="filteredFacts.length === 0" class="no-evidence-hint full-no-evidence">
-              无高于 {{ workflowData.rerankThreshold }} 分的有效知识出处
+            <div v-if="results.facts.length === 0" class="no-evidence-hint full-no-evidence">
+              暂无有效知识出处
             </div>
             <div v-else class="full-evidence-grid">
-              <div v-for="(fact, idx) in filteredFacts" :key="fact._originalIndex" class="full-evidence-card">
+              <div v-for="(fact, idx) in results.facts" :key="idx" class="full-evidence-card">
                 <div class="evidence-header">
                   <span class="evidence-idx">#{{ idx + 1 }}</span>
                   <span class="evidence-source">{{ fact.source }} <template v-if="fact.page">(第 {{ fact.page }} 页)</template></span>
@@ -497,7 +489,7 @@
                   </span>
                 </div>
                 <div class="full-evidence-screenshot">
-                  <canvas :ref="el => setEvidenceRef(el, fact._originalIndex, 'modal')" class="full-evidence-canvas"></canvas>
+                  <canvas :ref="el => setEvidenceRef(el, idx, 'modal')" class="full-evidence-canvas"></canvas>
                   <div v-if="!fact.bbox" class="full-no-bbox">
                     <p class="fact-text-fallback">{{ fact.text }}</p>
                   </div>
@@ -657,8 +649,14 @@ const parsedResult = computed(() => {
 })
 
 const renderEvidenceScreenshots = async (type = 'node') => {
-  const targetFacts = filteredFacts.value
-  const validFacts = targetFacts.filter(f => f.bbox && f.bbox.length === 4 && f.graph_id && f.source)
+  const targetFacts = results.value.facts
+  // 保留索引以便匹配 canvas ref
+  const validFacts = targetFacts.reduce((acc, f, idx) => {
+    if (f.bbox && f.bbox.length === 4 && f.graph_id && f.source) {
+      acc.push({ ...f, _renderIdx: idx })
+    }
+    return acc
+  }, [])
 
   if (validFacts.length === 0) return
 
@@ -669,8 +667,8 @@ const renderEvidenceScreenshots = async (type = 'node') => {
   const pdfDocCache = {}
 
   for (const fact of validFacts) {
-    const originalIndex = fact._originalIndex
-    const canvas = evidenceCanvasRefs.value[type][originalIndex]
+    const renderIdx = fact._renderIdx
+    const canvas = evidenceCanvasRefs.value[type][renderIdx]
     if (!canvas) continue
 
     try {
@@ -733,7 +731,7 @@ const renderEvidenceScreenshots = async (type = 'node') => {
       context.strokeRect(hX, hY, hW, hH)
 
     } catch (err) {
-      console.error(`Failed to render screenshot for fact ${originalIndex}:`, err)
+      console.error(`Failed to render screenshot for fact ${renderIdx}:`, err)
     }
   }
 }
@@ -906,8 +904,9 @@ const workflowData = ref({
   query: '',
   selectedGraphIds: [],
   temperature: 0.7,
-  rerankThreshold: 50,   // 相似度阈值，与 hit-test 对齐
-  maxDepth: 3,            // DFS 最大深度（与 hit-test 对齐）
+  similarityThreshold: 0,     // 相似度阈值：DFS 检索后预过滤，减少 LLM reranking 数量
+  filterThreshold: 75,        // 推理阈值：reranking 后过滤，≥此分数才送 LLM 推理
+  maxDepth: 3,               // DFS 最大深度（与 hit-test 对齐）
   rootTypes: ['Object', 'Term'],  // 根节点类型（与 hit-test 对齐）
 })
 
@@ -915,6 +914,8 @@ const results = ref({
   facts: [],
   rows: [],      // ObjectFirstRow structure from DFS flow
   searchTimings: { object_s: 0, term_s: 0, total_s: 0 },  // 与 hit-test 对齐
+  similarityThreshold: 0,   // 相似度阈值（retrieval 用）
+  filterThreshold: 0,       // 推理阈值（rerank 用）
   answer: '',
   rerank_results: [],
   prompts: {
@@ -923,28 +924,7 @@ const results = ref({
   }
 })
 
-// 根据相似度阈值过滤后的 rows（与 hit-test 对齐）
-const filteredRows = computed(() => {
-  const threshold = workflowData.value.rerankThreshold
-  return results.value.rows.filter(r => (r.relevance_score || 0) >= threshold)
-})
-
-// 根据阈值过滤后的有效知识出处（包含原始索引用于 canvas ref 映射）
-const filteredFacts = computed(() => {
-  const threshold = workflowData.value.rerankThreshold
-  return results.value.facts
-    .map((fact, index) => ({ ...fact, _originalIndex: index }))
-    .filter(f => f.relevance_score >= threshold)
-})
-
-// 阈值变化时自动重渲染 canvas
-watch(filteredFacts, () => {
-  if (results.value.answer) {
-    nextTick(() => {
-      renderEvidenceScreenshots('node')
-    })
-  }
-}, { deep: true })
+// Evidence Canvas management
 
 // Evidence Canvas management
 const evidenceCanvasRefs = ref({ node: {}, modal: {} })
@@ -1073,7 +1053,7 @@ const getThresholdClass = (val) => {
 
 // 相似度阈值颜色（中=橙，高=绿），与 hit-test 对齐
 const simValueClass = computed(() => {
-  if (workflowData.value.rerankThreshold >= 75) return 'high'
+  if (workflowData.value.filterThreshold >= 75) return 'high'
   return 'mid'
 })
 
@@ -1098,7 +1078,8 @@ const runWorkflow = async () => {
         query: workflowData.value.query,
         graph_ids: workflowData.value.selectedGraphIds,
         temperature: workflowData.value.temperature,
-        rerank_threshold: workflowData.value.rerankThreshold,
+        similarity_threshold: workflowData.value.similarityThreshold,
+        filter_threshold: workflowData.value.filterThreshold,
         max_depth: workflowData.value.maxDepth,
         root_types: workflowData.value.rootTypes,
       })
@@ -1133,11 +1114,13 @@ const runWorkflow = async () => {
             if (data.timings) {
               results.value.searchTimings = data.timings
             }
+            // 保存阈值信息供展示用
+            results.value.similarityThreshold = data.similarity_threshold
+            results.value.filterThreshold = data.filter_threshold
           } else if (type === 'rerank_complete') {
             const node = nodes.value.find(n => n.id === 'n_rerank')
             node.status = 'completed'
             node.duration = data.duration
-            results.value.rerank_results = data.results
           } else if (type === 'prompts_ready') {
             results.value.prompts = data
           } else if (type === 'llm_start') {

@@ -3055,9 +3055,14 @@ def ai_qa():
     query = data.get('query')
     graph_ids = data.get('graph_ids', [])
     try:
-        rerank_threshold = int(data.get('rerank_threshold', 50))
+        similarity_threshold = int(data.get('similarity_threshold', 0))
     except (ValueError, TypeError):
-        rerank_threshold = 50
+        similarity_threshold = 0
+
+    try:
+        filter_threshold = int(data.get('filter_threshold', 75))
+    except (ValueError, TypeError):
+        filter_threshold = 75
 
     try:
         max_depth = int(data.get('max_depth', 3))
@@ -3084,17 +3089,18 @@ def ai_qa():
             from ..utils.llm_client import LLMClient
             llm = LLMClient()
 
-            # 1. Start Optimization & Retrieval
+            # 1. DFS Retrieval + LLM reranking + threshold filtering (all in one step)
             yield f"data: {json.dumps({'type': 'retrieval_start'})}\n\n"
             retrieval_start = time.time()
 
-            # Perform retrieval using DFS flow (aligned with hit-test logic)
             dfs_result = tools.search_with_dfs_flow(
-                graph_ids=graph_ids, query=query, limit=20, max_depth=max_depth, root_types=root_types
+                graph_ids=graph_ids, query=query, limit=20, max_depth=max_depth,
+                root_types=root_types, similarity_threshold=similarity_threshold,
+                filter_threshold=filter_threshold
             )
             ret_dur = round(time.time() - retrieval_start, 2)
 
-            # Flatten ObjectFirstSearchResult into facts + rows for frontend compatibility
+            # Flatten all facts from rows (already filtered and scored)
             all_facts = []
             for row in dfs_result.rows:
                 all_facts.extend(row.facts)
@@ -3102,7 +3108,7 @@ def ai_qa():
             # Add rows with traversal path info to the response
             rows_data = [row.to_dict() for row in dfs_result.rows]
 
-            # 2. Retrieval Complete
+            # 1.1 Retrieval Complete (已按 similarity_threshold 和 filter_threshold 过滤)
             msg_ret = {
                 'type': 'retrieval_complete',
                 'data': {
@@ -3113,52 +3119,36 @@ def ai_qa():
                         'object_s': ret_dur,
                         'term_s': 0,
                         'total_s': ret_dur
-                    }
+                    },
+                    'similarity_threshold': similarity_threshold,
+                    'filter_threshold': filter_threshold,
                 }
             }
             yield f"data: {json.dumps(msg_ret, ensure_ascii=False)}\n\n"
 
-            # 3. Rerank & Filtering
-            # Filter facts based on threshold
-            filtered_facts = [f for f in all_facts if f.get('relevance_score', 0) >= rerank_threshold]
-
-            # If nothing passes threshold, keep top 1 as safety
-            if not filtered_facts and all_facts:
-                filtered_facts = all_facts[:1]
-
+            # 1.2 Rerank Complete (informational)
             msg_rerank = {
                 'type': 'rerank_complete',
                 'data': {
-                    'results': [],  # rerank_details no longer applicable with DFS flow
-                    'duration': 'incl.',
-                    'filtered_count': len(filtered_facts),
-                    'total_count': len(all_facts)
+                    'duration': f"{ret_dur}s",
                 }
             }
             yield f"data: {json.dumps(msg_rerank, ensure_ascii=False)}\n\n"
 
-            # 4. LLM Generation Start
+            # 2. LLM Generation Start
             yield f"data: {json.dumps({'type': 'llm_start'})}\n\n"
             llm_start = time.time()
 
-            # Build facts text from ObjectFirstRows (with traversal path context)
-            from ..services.graph_tools import ObjectFirstRow, ObjectFirstSearchResult
-            temp_result = ObjectFirstSearchResult(
-                query=query,
-                rows=dfs_result.rows,
-                total_objects=dfs_result.total_objects,
-                total_facts=dfs_result.total_facts,
-            )
-            # Build text from rows with filtered facts
+            # Build facts text from ObjectFirstRows (already filtered)
+            from ..services.graph_tools import ObjectFirstRow
             filtered_row_texts = []
             for row in dfs_result.rows:
-                row_facts = [f for f in row.facts if f in filtered_facts or f.get('relevance_score', 0) >= rerank_threshold]
-                if row_facts:
+                if row.facts:
                     filtered_row = ObjectFirstRow(
                         object_node=row.object_node,
                         traversal_paths=row.traversal_paths,
                         traversal_edges=row.traversal_edges,
-                        facts=row_facts,
+                        facts=row.facts,
                         relevance_score=row.relevance_score,
                     )
                     filtered_row_texts.append(filtered_row.to_text())

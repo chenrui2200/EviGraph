@@ -119,6 +119,7 @@ class GraphStorage(ABC):
         graph_id: str,
         query: str,
         limit: int = 10,
+        min_score: float = None,
     ) -> List[Dict[str, Any]]:
         """
         Search Object nodes specifically using hybrid scoring.
@@ -128,6 +129,7 @@ class GraphStorage(ABC):
             graph_id: Graph to search in
             query: Search query text
             limit: Max results
+            min_score: Minimum vector similarity score (0-1). Only applies to vector search.
 
         Returns:
             List of Object node dicts with 'score' field.
@@ -139,6 +141,7 @@ class GraphStorage(ABC):
         graph_id: str,
         query: str,
         limit: int = 10,
+        min_score: float = None,
     ) -> List[Dict[str, Any]]:
         """
         Search Term nodes specifically using hybrid scoring.

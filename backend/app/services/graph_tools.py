@@ -732,33 +732,27 @@ Your response:"""
         limit: int = 10,
         max_depth: int = 3,
         root_types: List[str] = None,
+        similarity_threshold: int = 0,
+        filter_threshold: int = 0,
     ) -> ObjectFirstSearchResult:
         """
         DFS-based retrieval flow aligned with hit-test query logic.
 
-        Retrieves in two stages (Object-first + Term-first), performs iterative DFS
-        traversal from each root node, collects facts with PDF metadata, then
-        applies LLM filtering and reranking.
-
-        Flow (aligned with hit-test search_object_first):
-        1. Search root nodes (Object + Term) in each graph using hybrid search
-        2. DFS traversal from each root node (collecting facts + traversal paths)
-        3. LLM filter: keep only facts relevant to the query
-        4. LLM rerank: score and sort facts
-        5. Batch PDF info enrichment for root nodes
-        6. Return structured ObjectFirstSearchResult
+        Two-stage threshold filtering:
+        1. similarity_threshold: Pre-filter facts by hybrid search similarity score before LLM reranking
+        2. filter_threshold: Post-rerank filter, only facts >= this score go to LLM reasoning
 
         Args:
             graph_ids: List of graph IDs to search
             query: Search query
             limit: Maximum number of result rows to return
             max_depth: Maximum DFS traversal depth
-
-        Returns:
-            ObjectFirstSearchResult with rows grouped by root node
+            similarity_threshold: Minimum hybrid search similarity score (0-100). Pre-filter before LLM reranking.
+            filter_threshold: Minimum relevance score after LLM reranking. Filtered before LLM reasoning.
         """
         logger.info(f"Starting search_with_dfs_flow for query: {query[:50]}..., "
-                    f"graphs={len(graph_ids)}, max_depth={max_depth}, root_types={root_types}")
+                    f"graphs={len(graph_ids)}, max_depth={max_depth}, root_types={root_types}, "
+                    f"sim_thresh={similarity_threshold}, filter_thresh={filter_threshold}")
 
         if root_types is None:
             root_types = ["Object", "Term"]
@@ -780,12 +774,15 @@ Your response:"""
                     obj_uuid = obj_node.get("uuid", "")
                     if not obj_uuid:
                         continue
+                    # Hybrid search score (0-1) converted to 0-100 scale for similarity_threshold
+                    root_score = (obj_node.get("score", 0)) * 100
                     row = self._dfs_from_object(
                         graph_id=graph_id,
                         object_uuid=obj_uuid,
                         object_data=obj_node,
                         max_depth=max_depth,
                         seen_fact_texts=seen_fact_texts,
+                        root_score=root_score,
                     )
                     all_rows.append(row)
 
@@ -801,12 +798,14 @@ Your response:"""
                     term_uuid = term_node.get("uuid", "")
                     if not term_uuid:
                         continue
+                    root_score = (term_node.get("score", 0)) * 100
                     row = self._dfs_from_object(
                         graph_id=graph_id,
                         object_uuid=term_uuid,
                         object_data=term_node,
                         max_depth=max_depth,
                         seen_fact_texts=seen_fact_texts,
+                        root_score=root_score,
                     )
                     all_rows.append(row)
 
@@ -817,6 +816,14 @@ Your response:"""
                 total_objects=0,
                 total_facts=0,
             )
+
+        # --- Stage 1: Similarity threshold pre-filtering (immediately after DFS) ---
+        # Filter facts before row reranking to reduce LLM reranking overhead
+        if similarity_threshold > 0 and all_rows:
+            for row in all_rows:
+                row.facts = [f for f in row.facts if f.get("similarity_score", 0) >= similarity_threshold]
+            all_rows = [r for r in all_rows if r.facts]
+            logger.info(f"After similarity threshold filter ({similarity_threshold}): {len(all_rows)} rows")
 
         # --- LLM rerank rows ---
         scored_rows = self._rerank_object_rows(query, all_rows)
@@ -833,23 +840,33 @@ Your response:"""
                     if root_uuid and root_uuid in batch_pdf_info:
                         row.object_node["pdf_info"] = batch_pdf_info[root_uuid]
 
-        # --- LLM rerank facts within rows (align with ai-qa relevance_score) ---
-        all_facts_from_rows: List[Dict[str, Any]] = []
-        for row in final_rows:
-            all_facts_from_rows.extend(row.facts)
-
-        if all_facts_from_rows:
-            scored_facts = self.rerank_facts(query, all_facts_from_rows)
-            # Redistribute scored facts back to rows
-            scored_texts = {f.get('text', ''): f for f in scored_facts}
+        # --- Stage 2: LLM fact reranking + filter_threshold post-filtering ---
+        if final_rows:
+            all_facts = []
             for row in final_rows:
-                for i, fact in enumerate(row.facts):
-                    key = fact.get('text', '')
-                    if key in scored_texts:
-                        row.facts[i].update({
-                            'relevance_score': scored_texts[key].get('relevance_score', 0),
-                            'relevance_reasoning': scored_texts[key].get('relevance_reasoning', ''),
-                        })
+                for fact in row.facts:
+                    fact["_row_idx"] = final_rows.index(row)
+                all_facts.extend(row.facts)
+
+            if all_facts:
+                logger.info(f"Performing LLM Reranking for {len(all_facts)} facts...")
+                scored_facts = self.rerank_facts(query, all_facts)
+                # Distribute relevance scores back to rows
+                for fact in scored_facts:
+                    row_idx = fact.pop("_row_idx", None)
+                    if row_idx is not None and 0 <= row_idx < len(final_rows):
+                        for i, f in enumerate(final_rows[row_idx].facts):
+                            if f.get("text", "") == fact.get("text", ""):
+                                final_rows[row_idx].facts[i]["relevance_score"] = fact.get("relevance_score", 0)
+                                final_rows[row_idx].facts[i]["relevance_reasoning"] = fact.get("relevance_reasoning", "")
+                                break
+
+                # Filter out facts below filter_threshold
+                if filter_threshold > 0:
+                    for row in final_rows:
+                        row.facts = [f for f in row.facts if f.get("relevance_score", 0) >= filter_threshold]
+                    final_rows = [r for r in final_rows if r.facts]
+                    logger.info(f"After filter_threshold ({filter_threshold}): {len(final_rows)} rows remaining")
 
         total_facts = sum(len(row.facts) for row in final_rows)
         logger.info(f"search_with_dfs_flow complete: {len(final_rows)} rows, {total_facts} facts")
@@ -1380,6 +1397,7 @@ Your response:"""
         object_data: Dict[str, Any],
         max_depth: int,
         seen_fact_texts: set,
+        root_score: float = 0.0,
     ) -> ObjectFirstRow:
         """
         从一个 Object 节点执行优化的迭代 DFS 遍历，收集所有关联节点和边。
@@ -1403,6 +1421,7 @@ Your response:"""
             object_data: Object 节点数据
             max_depth: 最大深度
             seen_fact_texts: 全局已见事实文本（去重用）
+            root_score: 根节点 hybrid search 相似度分数 (0-1)，注入到 facts 中供预过滤用
 
         Returns:
             ObjectFirstRow
@@ -1516,6 +1535,7 @@ Your response:"""
                             "target_node_uuid": tgt_uuid,
                             "relation_name": edge_name,
                             "traversal_depth": depth,
+                            "similarity_score": root_score,  # Hybrid search score from root node
                         })
 
                 # Push neighbor onto stack for next iteration
@@ -1595,6 +1615,7 @@ Your response:"""
                         "target_node_uuid": tgt_uuid,
                         "relation_name": edge_name,
                         "traversal_depth": n_depth - 1,
+                        "similarity_score": root_score,
                     })
 
         # Build Object node detail (with PDF info added later by caller via batch)

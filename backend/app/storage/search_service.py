@@ -102,6 +102,7 @@ _VECTOR_SEARCH_OBJECT_NODES = """
 CALL db.index.vector.queryNodes('entity_embedding', $limit, $query_vector)
 YIELD node, score
 WHERE node.graph_id = $graph_id AND 'Object' IN labels(node)
+  AND ($min_score IS NULL OR score >= $min_score)
 RETURN node AS n, score
 ORDER BY score DESC
 LIMIT $limit
@@ -112,6 +113,7 @@ _FULLTEXT_SEARCH_OBJECT_NODES = """
 CALL db.index.fulltext.queryNodes('entity_fulltext', $query_text)
 YIELD node, score
 WHERE node.graph_id = $graph_id AND 'Object' IN labels(node)
+  AND ($min_score IS NULL OR score >= $min_score)
 RETURN node AS n, score
 ORDER BY score DESC
 LIMIT $limit
@@ -135,6 +137,7 @@ _VECTOR_SEARCH_TERM_NODES = """
 CALL db.index.vector.queryNodes('entity_embedding', $limit, $query_vector)
 YIELD node, score
 WHERE node.graph_id = $graph_id AND 'Term' IN labels(node)
+  AND ($min_score IS NULL OR score >= $min_score)
 RETURN node AS n, score
 ORDER BY score DESC
 LIMIT $limit
@@ -145,6 +148,7 @@ _FULLTEXT_SEARCH_TERM_NODES = """
 CALL db.index.fulltext.queryNodes('entity_fulltext', $query_text)
 YIELD node, score
 WHERE node.graph_id = $graph_id AND 'Term' IN labels(node)
+  AND ($min_score IS NULL OR score >= $min_score)
 RETURN node AS n, score
 ORDER BY score DESC
 LIMIT $limit
@@ -156,6 +160,7 @@ MATCH (n:Entity {graph_id: $graph_id})
 WHERE 'Term' IN labels(n)
   AND (toLower(n.name) CONTAINS toLower($keyword)
        OR toLower(n.summary) CONTAINS toLower($keyword))
+  AND ($min_score IS NULL OR 1.0 >= $min_score)
 RETURN n, 1.0 AS score
 ORDER BY score DESC
 LIMIT $limit
@@ -425,6 +430,7 @@ class SearchService:
         graph_id: str,
         query: str,
         limit: int = 10,
+        min_score: float = None,
     ) -> List[Dict[str, Any]]:
         """
         Search Object nodes specifically using hybrid scoring.
@@ -439,13 +445,13 @@ class SearchService:
         vector_results = []
         if _index_status.entity_embedding:
             vector_results = self._run_object_node_vector_search(
-                session, graph_id, query_vector, limit * 2
+                session, graph_id, query_vector, limit * 2, min_score
             )
         else:
             logger.debug("Skipping Object node vector search (index not available)")
 
         keyword_results = self._run_object_node_keyword_search(
-            session, graph_id, query, limit * 2
+            session, graph_id, query, limit * 2, min_score
         )
 
         merged = self._merge_results(
@@ -459,7 +465,7 @@ class SearchService:
         return merged
 
     def _run_object_node_vector_search(
-        self, session: Neo4jSession, graph_id: str, query_vector: List[float], limit: int
+        self, session: Neo4jSession, graph_id: str, query_vector: List[float], limit: int, min_score: float = None
     ) -> List[Dict[str, Any]]:
         """Run vector similarity search on Object entity embedding."""
         try:
@@ -468,6 +474,7 @@ class SearchService:
                 graph_id=graph_id,
                 query_vector=query_vector,
                 limit=limit,
+                min_score=min_score,
             )
             results = [
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
@@ -480,7 +487,7 @@ class SearchService:
             return []
 
     def _run_object_node_keyword_search(
-        self, session: Neo4jSession, graph_id: str, query: str, limit: int
+        self, session: Neo4jSession, graph_id: str, query: str, limit: int, min_score: float = None
     ) -> List[Dict[str, Any]]:
         """Run fulltext search on Object entity name + summary with CONTAINS fallback."""
         # Strategy 1: Fulltext index search (primary)
@@ -491,6 +498,7 @@ class SearchService:
                 graph_id=graph_id,
                 query_text=safe_query,
                 limit=limit,
+                min_score=min_score,
             )
             results = [
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
@@ -510,6 +518,7 @@ class SearchService:
                 graph_id=graph_id,
                 query_text=wildcard_query,
                 limit=limit,
+                min_score=min_score,
             )
             results = [
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
@@ -528,6 +537,7 @@ class SearchService:
                 graph_id=graph_id,
                 keyword=query.strip(),
                 limit=limit,
+                min_score=min_score,
             )
             results = [
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
@@ -546,6 +556,7 @@ class SearchService:
         graph_id: str,
         query: str,
         limit: int = 10,
+        min_score: float = None,
     ) -> List[Dict[str, Any]]:
         """
         Search Term nodes specifically using hybrid scoring (vector + keyword).
@@ -560,13 +571,13 @@ class SearchService:
         vector_results = []
         if _index_status.entity_embedding:
             vector_results = self._run_term_node_vector_search(
-                session, graph_id, query_vector, limit * 2
+                session, graph_id, query_vector, limit * 2, min_score
             )
         else:
             logger.debug("Skipping Term node vector search (index not available)")
 
         keyword_results = self._run_term_node_keyword_search(
-            session, graph_id, query, limit * 2
+            session, graph_id, query, limit * 2, min_score
         )
 
         merged = self._merge_results(
@@ -580,7 +591,7 @@ class SearchService:
         return merged
 
     def _run_term_node_vector_search(
-        self, session: Neo4jSession, graph_id: str, query_vector: List[float], limit: int
+        self, session: Neo4jSession, graph_id: str, query_vector: List[float], limit: int, min_score: float = None
     ) -> List[Dict[str, Any]]:
         """Run vector similarity search on Term entity embedding."""
         try:
@@ -589,6 +600,7 @@ class SearchService:
                 graph_id=graph_id,
                 query_vector=query_vector,
                 limit=limit,
+                min_score=min_score,
             )
             results = [
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
@@ -601,7 +613,7 @@ class SearchService:
             return []
 
     def _run_term_node_keyword_search(
-        self, session: Neo4jSession, graph_id: str, query: str, limit: int
+        self, session: Neo4jSession, graph_id: str, query: str, limit: int, min_score: float = None
     ) -> List[Dict[str, Any]]:
         """Run fulltext search on Term entity name + summary with CONTAINS fallback."""
         # Strategy 1: Fulltext index search (primary)
@@ -612,6 +624,7 @@ class SearchService:
                 graph_id=graph_id,
                 query_text=safe_query,
                 limit=limit,
+                min_score=min_score,
             )
             results = [
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
@@ -631,6 +644,7 @@ class SearchService:
                 graph_id=graph_id,
                 query_text=wildcard_query,
                 limit=limit,
+                min_score=min_score,
             )
             results = [
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
@@ -649,6 +663,7 @@ class SearchService:
                 graph_id=graph_id,
                 keyword=query.strip(),
                 limit=limit,
+                min_score=min_score,
             )
             results = [
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
