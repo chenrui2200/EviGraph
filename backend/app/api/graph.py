@@ -3159,14 +3159,14 @@ def ai_qa():
             system_prompt = "你是一个专业的工程标准知识助手。你的任务是基于提供的多跳检索到的【知识参考详情】深度回答用户问题。\n\n回答要求：\n1. 请先在 <thought> 标签内分析所有检索到的条文关联，确引用的完整性。\n2. 给出最终结论，必须引用具体的条款编号（如：根据 7.6.49 条规定...）。\n3. 如果知识涉及多个关联条款，请理清它们的逻辑先后关系。\n4. 若信息不足，请如实告知缺失的具体标准名称或编号。"
             user_prompt = f"### 多跳检索结果汇总 (Context from Knowledge Graph):\n{facts_text}\n\n### 用户当前问题 (User Query):\n{query}\n\n请进行深度推理并回答："
 
-            logger.info(f"[Stage 3] LLM 推理: input=facts:{len(filtered_facts_sorted)}, output=rows:{len(rows_with_filtered_facts)}")
+            logger.info(f"[Stage 3] LLM 推理: input=facts:{len(rerank_result.filtered_facts)}, output=rows:{len(rerank_result.rows_with_filtered_facts)}")
 
             msg_prompts = {
                 'type': 'prompts_ready',
                 'data': {
                     'system': system_prompt,
                     'user': user_prompt,
-                    'filtered_facts': filtered_facts_sorted,
+                    'filtered_facts': rerank_result.filtered_facts,
                 }
             }
             yield f"data: {json.dumps(msg_prompts, ensure_ascii=False)}\n\n"
