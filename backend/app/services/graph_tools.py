@@ -732,23 +732,19 @@ Your response:"""
         limit: int = 10,
         max_depth: int = 3,
         root_types: List[str] = None,
-        filter_threshold: int = 0,
     ) -> ObjectFirstSearchResult:
         """
         DFS-based retrieval flow aligned with hit-test query logic.
-        Threshold filtering is done on frontend by relevance_score (参考 HitTest).
-        filter_threshold: Post-rerank filter, only facts >= this score go to LLM reasoning.
+        similarity_threshold filtering is done on frontend by relevance_score (参考 HitTest).
+        Stage 2 LLM fact reranking + filter_threshold filtering are done in SSE stream.
 
         Args:
             graph_ids: List of graph IDs to search
             query: Search query
             limit: Maximum number of result rows to return
             max_depth: Maximum DFS traversal depth
-            filter_threshold: Minimum relevance score after LLM reranking. Filtered before LLM reasoning.
         """
-        logger.info(f"Starting search_with_dfs_flow for query: {query[:50]}..., "
-                    f"graphs={len(graph_ids)}, max_depth={max_depth}, root_types={root_types}, "
-                    f"filter_thresh={filter_threshold}")
+        logger.info(f"Starting search_with_dfs_flow: query={query[:30]}, graphs={len(graph_ids)}, max_depth={max_depth}, root_types={root_types}, limit={limit}")
 
         if root_types is None:
             root_types = ["Object", "Term"]
@@ -814,8 +810,6 @@ Your response:"""
             )
 
         # --- Stage 1: Similarity threshold pre-filtering ---
-        # 已移除：前端按 relevance_score 做阈值过滤（参考 HitTest），后端不再过滤 facts
-
         # --- LLM rerank rows ---
         scored_rows = self._rerank_object_rows(query, all_rows)
         final_rows = scored_rows[:limit]
@@ -831,37 +825,12 @@ Your response:"""
                     if root_uuid and root_uuid in batch_pdf_info:
                         row.object_node["pdf_info"] = batch_pdf_info[root_uuid]
 
-        # --- Stage 2: LLM fact reranking + filter_threshold post-filtering ---
-        if final_rows:
-            all_facts = []
-            for row in final_rows:
-                for fact in row.facts:
-                    fact["_row_idx"] = final_rows.index(row)
-                all_facts.extend(row.facts)
+        # Stage 2 LLM fact reranking is done in SSE stream (graph.py)
+        # filter_threshold 过滤也在 SSE 流中完成
 
-            if all_facts:
-                logger.info(f"Performing LLM Reranking for {len(all_facts)} facts...")
-                scored_facts = self.rerank_facts(query, all_facts)
-                # Distribute relevance scores back to rows
-                for fact in scored_facts:
-                    row_idx = fact.pop("_row_idx", None)
-                    if row_idx is not None and 0 <= row_idx < len(final_rows):
-                        for i, f in enumerate(final_rows[row_idx].facts):
-                            if f.get("text", "") == fact.get("text", ""):
-                                final_rows[row_idx].facts[i]["relevance_score"] = fact.get("relevance_score", 0)
-                                final_rows[row_idx].facts[i]["relevance_reasoning"] = fact.get("relevance_reasoning", "")
-                                break
-
-                # Filter out facts below filter_threshold
-                if filter_threshold > 0:
-                    for row in final_rows:
-                        row.facts = [f for f in row.facts if f.get("relevance_score", 0) >= filter_threshold]
-                    final_rows = [r for r in final_rows if r.facts]
-                    logger.info(f"After filter_threshold ({filter_threshold}): {len(final_rows)} rows remaining")
+        logger.info(f"search_with_dfs_flow complete: input=rows:{len(all_rows)}, output=rows:{len(final_rows)}, facts:{sum(len(r.facts) for r in final_rows)}")
 
         total_facts = sum(len(row.facts) for row in final_rows)
-        logger.info(f"search_with_dfs_flow complete: {len(final_rows)} rows, {total_facts} facts")
-
         return ObjectFirstSearchResult(
             query=query,
             rows=final_rows,

@@ -250,9 +250,14 @@
                 等待运行...
               </div>
               <div v-else class="rerank-results-list">
-                <div class="rerank-summary">LLM 已完成精排 (Top {{ results.facts.length }})</div>
+                <div class="rerank-summary">
+                  LLM 已完成精排，共 {{ results.facts.length }} 条
+                  <span v-if="workflowData.filterThreshold > 0">
+                    （高于{{ workflowData.filterThreshold }}分的有 {{ results.facts.filter(f => f.relevance_score >= workflowData.filterThreshold).length }} 条）
+                  </span>
+                </div>
                 <div class="rerank-scroll-area">
-                  <div v-for="(fact, idx) in results.facts" :key="idx" class="rerank-item-card" :class="{ 'high-score': fact.relevance_score > 80 }">
+                  <div v-for="(fact, idx) in results.facts" :key="idx" class="rerank-item-card" :class="{ 'high-score': fact.relevance_score >= workflowData.filterThreshold, 'below-threshold': fact.relevance_score < workflowData.filterThreshold }">
                     <div class="rerank-item-header">
                       <span class="rerank-score">{{ fact.relevance_score }}分</span>
                       <span class="rerank-index">Rank #{{ idx + 1 }}</span>
@@ -1109,23 +1114,31 @@ const runWorkflow = async () => {
             const node = nodes.value.find(n => n.id === 'n2')
             node.status = 'completed'
             node.duration = data.duration
-            results.value.facts = data.facts || []
-            // 前端阈值过滤 rows（参考 HitTest：按 relevance_score 过滤）
-            results.value.rows = (data.rows || []).filter(
-              r => (r.relevance_score || 0) >= workflowData.value.similarityThreshold
-            )
+            results.value.rows = data.rows || []
             if (data.timings) {
               results.value.searchTimings = data.timings
             }
-            results.value.filterThreshold = data.filter_threshold
-          } else if (type === 'rerank_complete') {
-            const node = nodes.value.find(n => n.id === 'n_rerank')
-            node.status = 'completed'
-            node.duration = data.duration
+          } else if (type === 'rerank_start') {
+            // Stage 2 开始：LLM 正在打分
+            const rerankNode = nodes.value.find(n => n.id === 'n_rerank')
+            rerankNode.status = 'running'
+          } else if (type === 'rerank_results') {
+            // Stage 2 完成：存储打分结果，按 filterThreshold 过滤后用于后续
+            const rerankNode = nodes.value.find(n => n.id === 'n_rerank')
+            rerankNode.status = 'completed'
+            rerankNode.duration = data.duration
+            // 保存所有打分 facts（供卡片展示）
+            results.value.facts = data.facts || []
+            results.value.rerank_results = data.facts || []
           } else if (type === 'prompts_ready') {
             results.value.prompts = data
+            // 保存过滤后的 facts（用于 Output 节点展示）
+            if (data.filtered_facts) {
+              results.value.facts = data.filtered_facts
+            }
           } else if (type === 'llm_start') {
-            nodes.value.find(n => n.id === 'n3').status = 'running'
+            const llmNode = nodes.value.find(n => n.id === 'n3')
+            if (llmNode) llmNode.status = 'running'
           } else if (type === 'llm_complete') {
             const node = nodes.value.find(n => n.id === 'n3')
             node.status = 'completed'
@@ -1895,6 +1908,11 @@ onUnmounted(() => {
 .rerank-item-card.high-score {
   border-left: 4px solid #67c23a;
   background: #f0f9eb;
+}
+.rerank-item-card.below-threshold {
+  opacity: 0.5;
+  border-left: 4px solid #909399;
+  background: #f4f4f5;
 }
 
 .rerank-item-header {
