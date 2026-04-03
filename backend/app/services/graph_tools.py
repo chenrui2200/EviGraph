@@ -213,19 +213,45 @@ class ObjectFirstRow:
     def to_text(self) -> str:
         """转换为文本格式，便于 LLM 理解"""
         obj_name = self.object_node.get("name", "Unknown")
+        summary = self.object_node.get("summary", "N/A")
         parts = [f"## Object: {obj_name}"]
-        parts.append(f"Summary: {self.object_node.get('summary', 'N/A')}")
+        parts.append(f"说明: {summary}")
         if self.traversal_paths:
-            parts.append("\n### Traversal Path (DFS)")
+            parts.append(f"关联路径 ({len(self.traversal_paths)} 个节点):")
             for p in self.traversal_paths:
                 indent = "  " * (p.depth + 1)
                 parts.append(f"{indent}- [{p.labels[0] if p.labels else 'Entity'}] {p.name}")
         if self.facts:
-            parts.append("\n### Related Facts")
+            # 统计出处分布
+            source_count: Dict[str, int] = {}
             for f in self.facts:
-                src = f.get("source", "Unknown")
-                pg = f.get("page", "")
-                parts.append(f"- {f.get('text', '')} [Source: {src}{f', Page {pg}' if pg else ''}]")
+                src = f.get("source", "Graph") or "Graph"
+                source_count[src] = source_count.get(src, 0) + 1
+            source_info = " | ".join([f"{k}({v}条)" for k, v in source_count.items()])
+            parts.append(f"共 {len(self.facts)} 条事实，出处: {source_info}")
+            for idx, f in enumerate(self.facts, 1):
+                src = f.get("source", "Graph") or "Graph"
+                pg = f.get("page")
+                rel = f.get("relation_name", "")
+                text = f.get("text", "")
+                orig = f.get("original_text", "")
+                # 优先使用 original_text（真实条款内容），否则去掉 text 中的关系前缀
+                if orig.strip():
+                    display_text = orig.strip()
+                else:
+                    # text 可能是 "[RELATION] 内容"，去掉前缀
+                    display_text = text
+                    for prefix in ["[DEFINES]", "[MANDATES]", "[RECOMMENDS]", "[PROHIBITS]",
+                                   "[OPERATES_ON]", "[HAS_CONDITION]", "[APPLIES_TO]",
+                                   "[IN_SITUATION]", "[MENTIONS]"]:
+                        if display_text.startswith(prefix):
+                            display_text = display_text[len(prefix):].strip()
+                            break
+                score = f.get("relevance_score")
+                score_str = f" (相关性{score}分)" if score is not None else ""
+                pg_str = f"，页码 {pg}" if pg else ""
+                rel_str = f"[{rel}] " if rel else ""
+                parts.append(f"  {idx}. {rel_str}{display_text}{score_str} (来源: {src}{pg_str})")
         return "\n".join(parts)
 
 
@@ -528,8 +554,14 @@ class GraphToolsService:
         fact_list_str = ""
         facts_to_process = facts[:30]
         for i, f in enumerate(facts_to_process):
-            text = f.get('text', '')
-            fact_list_str += f"[{i}] {text[:300]}\n"
+            # 优先使用 original_text（真实条款内容），否则用 text
+            raw_text = f.get('original_text', '').strip() or f.get('text', '')
+            relation = f.get('relation_name', '')
+            source = f.get('source', 'Graph')
+            page = f.get('page', '')
+            rel_str = f"[{relation}] " if relation else ""
+            pg_str = f" (来源: {source}, 页码: {page})" if page else (f" (来源: {source})" if source != 'Graph' else "")
+            fact_list_str += f"[{i}] {rel_str}{raw_text[:500]}{pg_str}\n"
 
         rerank_prompt = f"""你是一个专业的知识重排（Rerank）专家。请根据【用户问题】，对【候选事实列表】中的每一条记录进行相关性打分。
 
@@ -541,17 +573,16 @@ class GraphToolsService:
 
 ### 任务要求:
 1. 对每个事实，评估其对回答【用户问题】的直接贡献度和核心程度。
-2. 打分范围为 0-100（分值越高越相关）。
-3. 对于每个事实，提供简短的一句话理由。
-4. 返回结果必须是 JSON 格式，包含一个名为 "rerank_results" 的对象列表，每个对象包含:
-   - "index": 原始列表中的索引。
-   - "score": 相关性得分 (0-100)。
-   - "reason": 评分理由。
-
-### 输出格式示例:
+2. 打分范围为 0-100（分值越高越相关）：
+   - 90-100: 事实直接、完整地回答了用户问题
+   - 60-89: 事实提供了重要参考信息，但需要进一步推理
+   - 30-59: 事实有一定关联，但偏离核心问题
+   - 0-29: 事实与问题几乎无关
+3. 重点关注事实的条款内容（括号外的文本），区分关系类型（如 DEFINES/HAS_CONDITION/MANDATES 等）。
+4. 返回 JSON 格式：
 {{
   "rerank_results": [
-    {{"index": 0, "score": 95, "reason": "直接包含了多孔导管敷设的具体间距规定"}},
+    {{"index": 0, "score": 95, "reason": "直接引用了多孔导管敷设的具体间距规定"}},
     {{"index": 2, "score": 40, "reason": "提及了导管，但主要讨论材质而非敷设规定"}}
   ]
 }}
@@ -1540,23 +1571,26 @@ Your response:"""
                     seen_fact_texts.add(norm)
                     edge_uuid = edge.get("uuid", "")
                     ep_ids = edge.get("episode_ids", [])
-                    source_info = {"source": "Graph", "page": None, "bbox": None,
-                                   "page_width": None, "page_height": None}
-                    original_text = ""
-                    if ep_ids:
+                    # 优先取 neighbor_data（Clause 实体）的原文和 PDF 信息
+                    source = neighbor_data.get("pdf_source") or "Graph"
+                    page = neighbor_data.get("pdf_page")
+                    bbox = neighbor_data.get("pdf_bbox")
+                    page_width = neighbor_data.get("pdf_page_width")
+                    page_height = neighbor_data.get("pdf_page_height")
+                    original_text = neighbor_data.get("summary", "") or ""
+                    # 回退：查 episode
+                    if ep_ids and not original_text:
                         try:
                             eps = self.storage.get_episodes(
                                 [ep_ids[0]] if isinstance(ep_ids, list) else [ep_ids]
                             )
                             if eps:
                                 meta = eps[0].get("metadata", {})
-                                source_info.update({
-                                    "source": meta.get("source", "Graph"),
-                                    "page": meta.get("page"),
-                                    "bbox": meta.get("bbox"),
-                                    "page_width": meta.get("page_width"),
-                                    "page_height": meta.get("page_height"),
-                                })
+                                source = meta.get("source", "Graph")
+                                page = meta.get("page")
+                                bbox = meta.get("bbox")
+                                page_width = meta.get("page_width")
+                                page_height = meta.get("page_height")
                                 original_text = eps[0].get("text", "")
                         except Exception:
                             pass
@@ -1565,11 +1599,11 @@ Your response:"""
                         "uuid": edge_uuid,
                         "text": fact_to_add,
                         "original_text": original_text,
-                        "source": source_info["source"],
-                        "page": source_info["page"],
-                        "bbox": source_info["bbox"],
-                        "page_width": source_info.get("page_width"),
-                        "page_height": source_info.get("page_height"),
+                        "source": source,
+                        "page": page,
+                        "bbox": bbox,
+                        "page_width": page_width,
+                        "page_height": page_height,
                         "graph_id": graph_id,
                         "source_node_uuid": src_uuid,
                         "target_node_uuid": tgt_uuid,

@@ -2067,7 +2067,7 @@ class Neo4jStorage(GraphStorage):
             name_lower=clause_name.lower(),
             uuid=entity_uuid,
             name=clause_name,
-            summary=content[:500] if content else "",
+            summary=content if content else "",
             embedding=embedding,
             clause_id=clause_id,
             req_type=clause_requirement,
