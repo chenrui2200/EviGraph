@@ -732,27 +732,23 @@ Your response:"""
         limit: int = 10,
         max_depth: int = 3,
         root_types: List[str] = None,
-        similarity_threshold: int = 0,
         filter_threshold: int = 0,
     ) -> ObjectFirstSearchResult:
         """
         DFS-based retrieval flow aligned with hit-test query logic.
-
-        Two-stage threshold filtering:
-        1. similarity_threshold: Pre-filter facts by hybrid search similarity score before LLM reranking
-        2. filter_threshold: Post-rerank filter, only facts >= this score go to LLM reasoning
+        Threshold filtering is done on frontend by relevance_score (参考 HitTest).
+        filter_threshold: Post-rerank filter, only facts >= this score go to LLM reasoning.
 
         Args:
             graph_ids: List of graph IDs to search
             query: Search query
             limit: Maximum number of result rows to return
             max_depth: Maximum DFS traversal depth
-            similarity_threshold: Minimum hybrid search similarity score (0-100). Pre-filter before LLM reranking.
             filter_threshold: Minimum relevance score after LLM reranking. Filtered before LLM reasoning.
         """
         logger.info(f"Starting search_with_dfs_flow for query: {query[:50]}..., "
                     f"graphs={len(graph_ids)}, max_depth={max_depth}, root_types={root_types}, "
-                    f"sim_thresh={similarity_threshold}, filter_thresh={filter_threshold}")
+                    f"filter_thresh={filter_threshold}")
 
         if root_types is None:
             root_types = ["Object", "Term"]
@@ -817,13 +813,8 @@ Your response:"""
                 total_facts=0,
             )
 
-        # --- Stage 1: Similarity threshold pre-filtering (immediately after DFS) ---
-        # Filter facts before row reranking to reduce LLM reranking overhead
-        if similarity_threshold > 0 and all_rows:
-            for row in all_rows:
-                row.facts = [f for f in row.facts if f.get("similarity_score", 0) >= similarity_threshold]
-            all_rows = [r for r in all_rows if r.facts]
-            logger.info(f"After similarity threshold filter ({similarity_threshold}): {len(all_rows)} rows")
+        # --- Stage 1: Similarity threshold pre-filtering ---
+        # 已移除：前端按 relevance_score 做阈值过滤（参考 HitTest），后端不再过滤 facts
 
         # --- LLM rerank rows ---
         scored_rows = self._rerank_object_rows(query, all_rows)

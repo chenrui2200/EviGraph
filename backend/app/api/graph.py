@@ -3055,11 +3055,6 @@ def ai_qa():
     query = data.get('query')
     graph_ids = data.get('graph_ids', [])
     try:
-        similarity_threshold = int(data.get('similarity_threshold', 0))
-    except (ValueError, TypeError):
-        similarity_threshold = 0
-
-    try:
         filter_threshold = int(data.get('filter_threshold', 75))
     except (ValueError, TypeError):
         filter_threshold = 75
@@ -3095,8 +3090,7 @@ def ai_qa():
 
             dfs_result = tools.search_with_dfs_flow(
                 graph_ids=graph_ids, query=query, limit=20, max_depth=max_depth,
-                root_types=root_types, similarity_threshold=similarity_threshold,
-                filter_threshold=filter_threshold
+                root_types=root_types, filter_threshold=filter_threshold
             )
             ret_dur = round(time.time() - retrieval_start, 2)
 
@@ -3108,7 +3102,7 @@ def ai_qa():
             # Add rows with traversal path info to the response
             rows_data = [row.to_dict() for row in dfs_result.rows]
 
-            # 1.1 Retrieval Complete (已按 similarity_threshold 和 filter_threshold 过滤)
+            # 1.1 Retrieval Complete
             msg_ret = {
                 'type': 'retrieval_complete',
                 'data': {
@@ -3120,7 +3114,6 @@ def ai_qa():
                         'term_s': 0,
                         'total_s': ret_dur
                     },
-                    'similarity_threshold': similarity_threshold,
                     'filter_threshold': filter_threshold,
                 }
             }

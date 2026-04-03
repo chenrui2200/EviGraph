@@ -1110,12 +1110,13 @@ const runWorkflow = async () => {
             node.status = 'completed'
             node.duration = data.duration
             results.value.facts = data.facts || []
-            results.value.rows = data.rows || []  // ObjectFirstRow rows from DFS flow
+            // 前端阈值过滤 rows（参考 HitTest：按 relevance_score 过滤）
+            results.value.rows = (data.rows || []).filter(
+              r => (r.relevance_score || 0) >= workflowData.value.similarityThreshold
+            )
             if (data.timings) {
               results.value.searchTimings = data.timings
             }
-            // 保存阈值信息供展示用
-            results.value.similarityThreshold = data.similarity_threshold
             results.value.filterThreshold = data.filter_threshold
           } else if (type === 'rerank_complete') {
             const node = nodes.value.find(n => n.id === 'n_rerank')
