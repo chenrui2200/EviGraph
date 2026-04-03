@@ -1,5 +1,5 @@
 """
-MiroFish Backend - Flask Application Factory
+Knowledge EviGraph Backend - Flask Application Factory
 """
 
 import os
@@ -36,7 +36,7 @@ def create_app(config_class=Config):
 
     if should_log_startup:
         logger.info("=" * 50)
-        logger.info("MiroFish-Offline Backend starting...")
+        logger.info("Knowledge EviGraph Backend starting...")
         logger.info("=" * 50)
 
     # Enable CORS
@@ -100,7 +100,7 @@ def create_app(config_class=Config):
 
         return {
             'status': 'ok',
-            'service': 'MiroFish-Offline Backend',
+            'service': 'Knowledge EviGraph Backend',
             'dependencies': {
                 'neo4j': {
                     'status': neo4j_status,
@@ -117,7 +117,7 @@ def create_app(config_class=Config):
         }
 
     if should_log_startup:
-        logger.info("MiroFish-Offline Backend startup complete")
+        logger.info("Knowledge EviGraph Backend startup complete")
 
     # Startup: auto-cleanup old completed tasks (7 days old)
     try:

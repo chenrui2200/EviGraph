@@ -263,7 +263,7 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                         message="Creating Zep graph...",
                         progress=10
                     )
-                    graph_id = builder.create_graph(name=project.name or 'MiroFish Graph')
+                    graph_id = builder.create_graph(name=project.name or 'Knowledge EviGraph')
                     # Update project graph_id
                     project.graph_id = graph_id
                     ProjectManager.save_project(project)
@@ -2681,7 +2681,7 @@ def build_graph():
             }), 404
 
         # Get configuration
-        graph_name = data.get('graph_name', project.name or 'MiroFish Graph')
+        graph_name = data.get('graph_name', project.name or 'Knowledge EviGraph')
         chunk_size = data.get('chunk_size', project.chunk_size or Config.DEFAULT_CHUNK_SIZE)
         chunk_overlap = data.get('chunk_overlap', project.chunk_overlap or Config.DEFAULT_CHUNK_OVERLAP)
         use_semantic = data.get('semantic', False) # New: option for semantic chunking

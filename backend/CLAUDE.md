@@ -4,7 +4,7 @@
 - **2026-03-24**: 初始扫描，识别 API、服务与存储结构。
 
 ## 模块职责
-负责 MiroFish-Neo4j 的核心逻辑，包括：
+负责 Knowledge EviGraph 的核心逻辑，包括：
 - 文档解析与文本块切分 (`utils/file_parser.py`, `services/text_processor.py`)。
 - 自动化本体生成 (`services/ontology_generator.py`)。
 - 异步图谱构建任务 (`services/graph_builder.py`, `api/graph.py`)。

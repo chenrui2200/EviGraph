@@ -1,11 +1,11 @@
 [project]
-name = "mirofish-offline-backend"
+name = "knowledge-evigraph-backend"
 version = "0.2.0"
-description = "MiroFish-Offline - Offline-first fork running on Neo4j + Ollama"
+description = "Knowledge EviGraph - Local-first knowledge graph engine running on Neo4j + Ollama"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0" }
 authors = [
-    { name = "MiroFish Team" }
+    { name = "Knowledge EviGraph Team" }
 ]
 
 dependencies = [

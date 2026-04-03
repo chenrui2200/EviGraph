@@ -1,16 +1,16 @@
-# MiroFish-Neo4j 架构文档
+# Knowledge EviGraph 架构文档
 
 ## 变更记录 (Changelog)
 - **2026-03-24**: 初始化项目架构文档，识别后端 (Python/Flask) 与前端 (Vue 3/Vite) 模块。
 
 ## 项目愿景
-MiroFish-Neo4j 是一个基于 Neo4j 和大语言模型 (LLM) 的知识图谱构建与管理系统。它旨在实现本地优先的群体智能引擎，通过自动化本体生成、多步检索推理等技术，将非结构化文档转化为可查询、可推理的图谱知识库。
+Knowledge EviGraph 是一个基于 Neo4j 和大语言模型 (LLM) 的知识图谱构建与管理系统。它旨在实现本地优先的群体智能引擎，通过自动化本体生成、多步检索推理等技术，将非结构化文档转化为可查询、可推理的图谱知识库。
 
 ## 架构总览
 
 ```mermaid
 graph TD
-    Root["(根) MiroFish-Neo4j"] --> BE["backend (Flask)"]
+    Root["(根) Knowledge EviGraph"] --> BE["backend (Flask)"]
     Root --> FE["frontend (Vue 3)"]
 
     BE --> API["API 层 (Blueprint)"]

@@ -7,7 +7,7 @@ import os
 from dotenv import load_dotenv
 
 # Load .env file from project root
-# Path: MiroFish/.env (relative to backend/app/config.py)
+# Path: Knowledge EviGraph/.env (relative to backend/app/config.py)
 project_root_env = os.path.join(os.path.dirname(__file__), '../../.env')
 
 if os.path.exists(project_root_env):

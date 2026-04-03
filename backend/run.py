@@ -1,5 +1,5 @@
 """
-MiroFish Backend Entry Point
+Knowledge EviGraph Backend Entry Point
 """
 
 import os

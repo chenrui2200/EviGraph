@@ -1,5 +1,5 @@
 """
-MiroFish-Offline Storage Layer
+Knowledge EviGraph Storage Layer
 
 Local graph storage replacing Zep Cloud:
 - Neo4j CE for graph persistence
