@@ -256,6 +256,26 @@ class ObjectFirstRow:
 
 
 @dataclass
+class RerankResult:
+    """
+    检索流程结果（知识库检索 + LLM 重排 + 阈值过滤）。
+    供 SSE 流程和 API 流程共用。
+    """
+    scored_facts: List[Dict[str, Any]]  # 所有 facts 带 relevance_score（供前端展示）
+    filtered_facts: List[Dict[str, Any]]  # 过滤后 facts（供 LLM 推理）
+    rows_with_scored_facts: List[ObjectFirstRow]  # 带所有打分 facts 的 rows
+    rows_with_filtered_facts: List[ObjectFirstRow]  # 带过滤后 facts 的 rows（供 LLM prompt）
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "scored_facts": self.scored_facts,
+            "filtered_facts": self.filtered_facts,
+            "rows_scored": [r.to_dict() for r in self.rows_with_scored_facts],
+            "rows_filtered": [r.to_dict() for r in self.rows_with_filtered_facts],
+        }
+
+
+@dataclass
 class ObjectFirstSearchResult:
     """
     Object-first DFS 检索结果。
@@ -867,6 +887,94 @@ Your response:"""
             rows=final_rows,
             total_objects=len(final_rows),
             total_facts=total_facts,
+        )
+
+    def run_retrieval_flow(
+        self,
+        final_rows: List[ObjectFirstRow],
+        query: str,
+        similarity_threshold: int = 0,
+        filter_threshold: int = 0,
+    ) -> RerankResult:
+        """
+        执行检索流程的后两步：LLM 重排 + 阈值过滤。
+        供 SSE 流程（graph.py）和 API 流程（ai_app.py）共用。
+
+        Args:
+            final_rows: search_with_dfs_flow 返回的 rows（已做过相似度阈值过滤）
+            query: 用户查询
+            similarity_threshold: 相似度阈值（用于日志）
+            filter_threshold: 相关性阈值（低于此分数的 facts 被过滤）
+
+        Returns:
+            RerankResult: 包含所有打分 facts 和过滤后 facts
+        """
+        logger.info(f"run_retrieval_flow: rows={len(final_rows)}, sim_thresh={similarity_threshold}, filter_thresh={filter_threshold}")
+
+        # 收集所有 facts 并附上行索引
+        all_facts = []
+        for row_idx, row in enumerate(final_rows):
+            for fact in row.facts:
+                f_with_idx = dict(fact)
+                f_with_idx['_row_idx'] = row_idx
+                all_facts.append(f_with_idx)
+
+        # Stage 2: LLM 重排
+        scored_facts = []
+        rows_with_scored = []
+        if all_facts:
+            logger.info(f"[Stage 2] LLM 重排: input=facts:{len(all_facts)}")
+            scored_facts = self.rerank_facts(query, all_facts)
+            scored_facts_sorted = sorted(scored_facts, key=lambda f: f.get('relevance_score', 0), reverse=True)
+            logger.info(f"[Stage 2] LLM 重排: output=facts:{len(scored_facts_sorted)}")
+
+            # 将打分 facts 挂回 rows（全部打分结果）
+            rows_with_scored = []
+            for row_idx, original_row in enumerate(final_rows):
+                row_facts = [
+                    {k: v for k, v in f.items() if k != '_row_idx'}
+                    for f in scored_facts_sorted
+                    if f.get('_row_idx') == row_idx
+                ]
+                rows_with_scored.append(ObjectFirstRow(
+                    object_node=original_row.object_node,
+                    traversal_paths=original_row.traversal_paths,
+                    traversal_edges=original_row.traversal_edges,
+                    facts=row_facts,
+                    relevance_score=original_row.relevance_score,
+                ))
+        else:
+            scored_facts_sorted = []
+
+        # Stage 3: filter_threshold 过滤
+        if filter_threshold > 0:
+            filtered_facts = [f for f in scored_facts_sorted if (f.get('relevance_score', 0) or 0) >= filter_threshold]
+        else:
+            filtered_facts = scored_facts_sorted
+        logger.info(f"[Stage 3] 阈值过滤: input=facts:{len(scored_facts_sorted)}, output=facts:{len(filtered_facts)}")
+
+        # 将过滤后 facts 挂回 rows
+        rows_with_filtered = []
+        for row_idx, original_row in enumerate(final_rows):
+            row_facts = [
+                {k: v for k, v in f.items() if k != '_row_idx'}
+                for f in filtered_facts
+                if f.get('_row_idx') == row_idx
+            ]
+            if row_facts:
+                rows_with_filtered.append(ObjectFirstRow(
+                    object_node=original_row.object_node,
+                    traversal_paths=original_row.traversal_paths,
+                    traversal_edges=original_row.traversal_edges,
+                    facts=row_facts,
+                    relevance_score=original_row.relevance_score,
+                ))
+
+        return RerankResult(
+            scored_facts=scored_facts_sorted,
+            filtered_facts=filtered_facts,
+            rows_with_scored_facts=rows_with_scored,
+            rows_with_filtered_facts=rows_with_filtered,
         )
 
     # ========== Basic Tools ==========
@@ -1491,9 +1599,14 @@ Your response:"""
                     if norm and norm not in seen_fact_texts:
                         seen_fact_texts.add(norm)
                         ep_ids = edge.get("episode_ids", [])
-                        source_info = {"source": "Graph", "page": None, "bbox": None,
-                                       "page_width": None, "page_height": None}
+                        # 优先取当前节点（edge 源节点）的 PDF 信息
+                        source = node_data.get("pdf_source") if node_data else None
+                        page = node_data.get("pdf_page") if node_data else None
+                        bbox = node_data.get("pdf_bbox") if node_data else None
+                        page_width = node_data.get("pdf_page_width") if node_data else None
+                        page_height = node_data.get("pdf_page_height") if node_data else None
                         original_text = ""
+                        # 查 episode 获取更多信息
                         if ep_ids:
                             try:
                                 eps = self.storage.get_episodes(
@@ -1501,26 +1614,41 @@ Your response:"""
                                 )
                                 if eps:
                                     meta = eps[0].get("metadata", {})
-                                    source_info.update({
-                                        "source": meta.get("source", "Graph"),
-                                        "page": meta.get("page"),
-                                        "bbox": meta.get("bbox"),
-                                        "page_width": meta.get("page_width"),
-                                        "page_height": meta.get("page_height"),
-                                    })
-                                    original_text = eps[0].get("text", "")
+                                    if not original_text:
+                                        original_text = eps[0].get("text", "")
+                                    if not source or source == "Graph":
+                                        source = meta.get("source", "Graph")
+                                    if not page:
+                                        page = meta.get("page")
+                                    if not bbox:
+                                        bbox = meta.get("bbox")
+                                    if not page_width:
+                                        page_width = meta.get("page_width")
+                                    if not page_height:
+                                        page_height = meta.get("page_height")
                             except Exception:
                                 pass
+                        # 最后 fallback 到 root node（object_data）的 PDF 信息
+                        if (not source or source == "Graph") and object_data:
+                            source = object_data.get("pdf_source") or "Graph"
+                        if not page and object_data:
+                            page = object_data.get("pdf_page")
+                        if not bbox and object_data:
+                            bbox = object_data.get("pdf_bbox")
+                        if not page_width and object_data:
+                            page_width = object_data.get("pdf_page_width")
+                        if not page_height and object_data:
+                            page_height = object_data.get("pdf_page_height")
 
                         facts.append({
                             "uuid": edge_uuid,
                             "text": fact_to_add,
                             "original_text": original_text,
-                            "source": source_info["source"],
-                            "page": source_info["page"],
-                            "bbox": source_info["bbox"],
-                            "page_width": source_info.get("page_width"),
-                            "page_height": source_info.get("page_height"),
+                            "source": source,
+                            "page": page,
+                            "bbox": bbox,
+                            "page_width": page_width,
+                            "page_height": page_height,
                             "graph_id": graph_id,
                             "source_node_uuid": src_uuid,
                             "target_node_uuid": tgt_uuid,
@@ -1578,20 +1706,26 @@ Your response:"""
                     page_width = neighbor_data.get("pdf_page_width")
                     page_height = neighbor_data.get("pdf_page_height")
                     original_text = neighbor_data.get("summary", "") or ""
-                    # 回退：查 episode
-                    if ep_ids and not original_text:
+                    # 回退：查 episode（当原文或 bbox 缺失时）
+                    if ep_ids and (not original_text or not bbox):
                         try:
                             eps = self.storage.get_episodes(
                                 [ep_ids[0]] if isinstance(ep_ids, list) else [ep_ids]
                             )
                             if eps:
                                 meta = eps[0].get("metadata", {})
-                                source = meta.get("source", "Graph")
-                                page = meta.get("page")
-                                bbox = meta.get("bbox")
-                                page_width = meta.get("page_width")
-                                page_height = meta.get("page_height")
-                                original_text = eps[0].get("text", "")
+                                if not original_text:
+                                    original_text = eps[0].get("text", "")
+                                if not source or source == "Graph":
+                                    source = meta.get("source", "Graph")
+                                if not page:
+                                    page = meta.get("page")
+                                if not bbox:
+                                    bbox = meta.get("bbox")
+                                if not page_width:
+                                    page_width = meta.get("page_width")
+                                if not page_height:
+                                    page_height = meta.get("page_height")
                         except Exception:
                             pass
 

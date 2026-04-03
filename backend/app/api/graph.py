@@ -18,7 +18,7 @@ from . import graph_bp
 from ..config import Config
 from ..services.ontology_generator import OntologyGenerator
 from ..services.graph_builder import GraphBuilderService
-from ..services.graph_tools import GraphToolsService, ObjectFirstRow, ObjectPathNode, ObjectPathEdge
+from ..services.graph_tools import GraphToolsService
 from ..services.text_processor import TextProcessor
 from ..services.llm_driven_chunker import clause_to_dict, element_to_dict
 from ..utils.file_parser import FileParser, TextChunk
@@ -3128,29 +3128,22 @@ def ai_qa():
             yield f"data: {json.dumps({'type': 'rerank_start'})}\n\n"
             rerank_start = time.time()
 
-            # 为 all_facts 附上 _row_idx（记录来源行索引），供 rerank 返回后重建行结构
-            rerank_input_facts = []
-            for row_idx, row in enumerate(dfs_result.rows):
-                for fact in row.facts:
-                    f_with_idx = dict(fact)
-                    f_with_idx['_row_idx'] = row_idx
-                    rerank_input_facts.append(f_with_idx)
+            # 调用共享方法（返回 RerankResult）
+            rerank_result = tools.run_retrieval_flow(
+                final_rows=dfs_result.rows,
+                query=query,
+                similarity_threshold=similarity_threshold,
+                filter_threshold=filter_threshold,
+            )
+            rerank_dur = round(time.time() - rerank_start, 2)
 
-            scored_facts = []
-            if rerank_input_facts:
-                logger.info(f"[Stage 2] LLM 重排: input=facts:{len(rerank_input_facts)}, rows:{len(dfs_result.rows)}")
-                scored_facts = tools.rerank_facts(query, rerank_input_facts)
-                rerank_dur = round(time.time() - rerank_start, 2)
-                logger.info(f"[Stage 2] LLM 重排: output=facts:{len(scored_facts)}, duration={rerank_dur}s")
-
-                # 按分数降序排列
-                scored_facts_sorted = sorted(scored_facts, key=lambda f: f.get('relevance_score', 0), reverse=True)
-
+            # SSE 发送所有打分 facts（供前端展示）
+            if rerank_result.scored_facts:
                 msg_rerank = {
                     'type': 'rerank_results',
                     'data': {
-                        'facts': scored_facts_sorted,
-                        'total': len(scored_facts_sorted),
+                        'facts': rerank_result.scored_facts,
+                        'total': len(rerank_result.scored_facts),
                         'duration': f"{rerank_dur}s",
                     }
                 }
@@ -3160,35 +3153,9 @@ def ai_qa():
             yield f"data: {json.dumps({'type': 'llm_start'})}\n\n"
             llm_start = time.time()
 
-            # 按 filter_threshold 过滤 facts
-            if filter_threshold > 0:
-                filtered_facts = [f for f in scored_facts if (f.get('relevance_score', 0) or 0) >= filter_threshold]
-            else:
-                filtered_facts = scored_facts
-            logger.info(f"[Stage 3] 阈值过滤: filter_threshold={filter_threshold}, input=facts:{len(scored_facts)}, output=facts:{len(filtered_facts)}")
-
-            # 按分数降序排列
-            filtered_facts_sorted = sorted(filtered_facts, key=lambda f: f.get('relevance_score', 0), reverse=True)
-
-            # 按 _row_idx 将 filtered facts 挂回对应行（使用原始 dfs_result.rows 以保留 traversal_paths）
-            rows_with_filtered_facts = []
-            for row_idx, original_row in enumerate(dfs_result.rows):
-                row_facts = [
-                    {k: v for k, v in f.items() if k != '_row_idx'}
-                    for f in filtered_facts_sorted
-                    if f.get('_row_idx') == row_idx
-                ]
-                if row_facts:
-                    rows_with_filtered_facts.append(ObjectFirstRow(
-                        object_node=original_row.object_node,
-                        traversal_paths=original_row.traversal_paths,
-                        traversal_edges=original_row.traversal_edges,
-                        facts=row_facts,
-                        relevance_score=original_row.relevance_score,
-                    ))
-
-            # 构建 LLM prompt
-            facts_text = "\n\n".join(r.to_text() for r in rows_with_filtered_facts) if rows_with_filtered_facts else "未找到高于阈值的相关事实。"
+            # 构建 LLM prompt（使用过滤后的 rows）
+            rows_for_llm = rerank_result.rows_with_filtered_facts
+            facts_text = "\n\n".join(r.to_text() for r in rows_for_llm) if rows_for_llm else "未找到高于阈值的相关事实。"
             system_prompt = "你是一个专业的工程标准知识助手。你的任务是基于提供的多跳检索到的【知识参考详情】深度回答用户问题。\n\n回答要求：\n1. 请先在 <thought> 标签内分析所有检索到的条文关联，确引用的完整性。\n2. 给出最终结论，必须引用具体的条款编号（如：根据 7.6.49 条规定...）。\n3. 如果知识涉及多个关联条款，请理清它们的逻辑先后关系。\n4. 若信息不足，请如实告知缺失的具体标准名称或编号。"
             user_prompt = f"### 多跳检索结果汇总 (Context from Knowledge Graph):\n{facts_text}\n\n### 用户当前问题 (User Query):\n{query}\n\n请进行深度推理并回答："
 
@@ -3210,7 +3177,7 @@ def ai_qa():
             ], temperature=data.get('temperature', 0.7))
 
             llm_dur = round(time.time() - llm_start, 2)
-            logger.info(f"[Stage 3] LLM 推理完成: input=facts:{len(filtered_facts_sorted)}, output=rows:{len(rows_with_filtered_facts)}, duration={llm_dur}s")
+            logger.info(f"[Stage 3] LLM 推理完成: input=facts:{len(rerank_result.filtered_facts)}, output=rows:{len(rerank_result.rows_with_filtered_facts)}, duration={llm_dur}s")
 
             msg_final = {
                 'type': 'llm_complete',
