@@ -2330,8 +2330,13 @@ def get_chunk_analysis(project_id: str):
                 "element_count": len(chapter_elements)
             }
 
-    # 按章节号排序
-    sorted_chapters = sorted(chapter_tree.items(), key=lambda x: x[0])
+    # 按章节号排序（数字章节按数值排，appendix/other 等非数字章节排在末尾）
+    def _chapter_sort_key(item):
+        key = item[0]
+        if str(key).isdigit():
+            return (0, int(key))
+        return (1, str(key))
+    sorted_chapters = sorted(chapter_tree.items(), key=_chapter_sort_key)
 
     # 条文统计
     requirement_stats = {"mandatory": 0, "recommended": 0, "prohibited": 0}
@@ -2516,9 +2521,9 @@ def _get_clause_pdf_location(
         pass
 
     # 回退：基于章节估算 PDF 位置
-    if parent_chapter and chapters:
+    if parent_chapter and chapters and str(parent_chapter).isdigit():
         # 按章节平均分配 PDF 页码（假设每个章节约 20 页）
-        est_page = max(1, (parent_chapter - 1) * 20 + 1)
+        est_page = max(1, (int(parent_chapter) - 1) * 20 + 1)
         for ch in chapters:
             if ch.get('chapter_number') == parent_chapter:
                 return {

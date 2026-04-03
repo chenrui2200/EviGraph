@@ -124,7 +124,7 @@
                     <input
                       type="range"
                       v-model.number="workflowData.similarityThreshold"
-                      min="0"
+                      min="50"
                       max="100"
                       step="5"
                       class="sim-slider"
@@ -909,7 +909,7 @@ const workflowData = ref({
   query: '',
   selectedGraphIds: [],
   temperature: 0.7,
-  similarityThreshold: 0,     // 相似度阈值：DFS 检索后预过滤，减少 LLM reranking 数量
+  similarityThreshold: 50,   // 相似度阈值：DFS 检索后预过滤，减少 LLM reranking 数量
   filterThreshold: 75,        // 推理阈值：reranking 后过滤，≥此分数才送 LLM 推理
   maxDepth: 3,               // DFS 最大深度（与 hit-test 对齐）
   rootTypes: ['Object', 'Term'],  // 根节点类型（与 hit-test 对齐）
