@@ -1102,12 +1102,21 @@ function startProgressPolling() {
   if (pollInterval) clearInterval(pollInterval)
   pollInterval = setInterval(async () => {
     try {
+      // 优先使用 getChunkProgress 的章节级精度进度（智能分块阶段）
+      const progRes = await getChunkProgress(currentProjectId.value)
+      if (progRes.success && progRes.data) {
+        const prog = progRes.data
+        progressPercent.value = Math.round((prog.progress_ratio || 0) * 100)
+        if (prog.completed_clauses_count !== undefined) {
+          realtimeLogs.value.push(`📊 已完成 ${prog.completed_clauses_count} 条文`)
+        }
+      }
+
+      // getTaskStatus 仅用于状态判断（completed/failed），不覆盖进度值
       if (taskId.value) {
         const res = await getTaskStatus(taskId.value)
         if (res.success) {
           const task = res.data
-          progressPercent.value = task.progress || 0
-
           if (task.status === 'completed') {
             analysisStatus.value = 'graph_chunked'
             clearInterval(pollInterval)
@@ -1118,15 +1127,6 @@ function startProgressPolling() {
             clearInterval(pollInterval)
             realtimeLogs.value.push(`❌ 分析失败: ${task.error}`)
           }
-        }
-      }
-
-      const progRes = await getChunkProgress(currentProjectId.value)
-      if (progRes.success && progRes.data) {
-        const prog = progRes.data
-        progressPercent.value = Math.round((prog.progress_ratio || 0) * 100)
-        if (prog.completed_clauses_count !== undefined) {
-          realtimeLogs.value.push(`📊 已完成 ${prog.completed_clauses_count} 条文`)
         }
       }
 

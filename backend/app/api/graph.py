@@ -626,76 +626,102 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
                 project_id=project_id
             )
 
-            # 保存分块结果
-            chunks_result = {
-                "sections": [
-                    {
-                        "chapter_number": s.chapter_number,
-                        "title": s.title,
-                        "content": s.content
-                    }
-                    for s in result.sections
-                ],
-                "clauses": [
-                    {
-                        "clause_id": c.clause_id,
-                        "clause_title": c.clause_title,
-                        "content": c.content,
-                        "requirement_type": c.requirement_type.value,
-                        "conditions": c.conditions,
-                        "actions": c.actions,
-                        "components": c.components,
-                        "objects": c.objects,
-                        "parent_chapter": c.parent_chapter,
-                        "metadata": c.metadata
-                    }
-                    for c in result.clauses
-                ],
-                "elements": [
-                    {
-                        "element_type": e.element_type.value,
-                        "key": e.key,
-                        "value": str(e.value) if e.value else "",
-                        "unit": e.unit,
-                        "condition": e.condition,
-                        "abbreviation": e.abbreviation,
-                        "definition": e.definition,
-                        "keywords": e.keywords,
-                        "source_clause_id": e.source_id,
-                        "metadata": e.metadata
-                    }
-                    for e in result.elements
-                ]
-            }
-
-            # 保存到项目
-            ProjectManager.save_intelligent_chunks(project_id, chunks_result)
-
-            # 删除检查点
-            ProjectManager.delete_chunk_checkpoint_v2(project_id)
-            ProjectManager.delete_chunk_checkpoint(project_id)
-
-            # 更新项目状态
-            project = ProjectManager.get_project(project_id)
-            project.status = ProjectStatus.GRAPH_CHUNKED
-            ProjectManager.save_project(project)
-
-            # 完成任务
-            summary = f"✅ 标注分析完成: {len(result.sections)} 章节, {len(result.clauses)} 条文, {len(result.elements)} 要素"
-            build_logger.info(f"[{recovery_task_id}] {summary}")
-
-            task_manager.update_task(
-                recovery_task_id,
-                status=TaskStatus.COMPLETED,
-                progress=100,
-                message=summary,
-                log=summary,
-                result={
-                    "sections": len(result.sections),
-                    "clauses": len(result.clauses),
-                    "elements": len(result.elements)
+            # 保存分块结果（尝试序列化，失败时用检查点兜底）
+            save_success = False
+            try:
+                chunks_result = {
+                    "source": "llm",
+                    "sections": [
+                        {
+                            "chapter_number": s.chapter_number,
+                            "title": s.title,
+                            "content": s.content
+                        }
+                        for s in result.sections
+                    ],
+                    "clauses": [
+                        {
+                            "clause_id": c.clause_id,
+                            "clause_title": c.clause_title,
+                            "content": c.content,
+                            "requirement_type": c.requirement_type.value,
+                            "conditions": c.conditions,
+                            "actions": c.actions,
+                            "components": c.components,
+                            "objects": c.objects,
+                            "parent_chapter": c.parent_chapter,
+                            "metadata": c.metadata
+                        }
+                        for c in result.clauses
+                    ],
+                    "elements": [
+                        {
+                            "element_type": e.element_type.value,
+                            "key": e.key,
+                            "value": str(e.value) if e.value else "",
+                            "unit": e.unit,
+                            "condition": e.condition,
+                            "abbreviation": e.abbreviation,
+                            "definition": e.definition,
+                            "keywords": e.keywords,
+                            "source_clause_id": e.source_id,
+                            "metadata": e.metadata
+                        }
+                        for e in result.elements
+                    ]
                 }
-            )
+                ProjectManager.save_intelligent_chunks(project_id, chunks_result)
+                build_logger.info(f"[{recovery_task_id}] ✅ intelligent_chunks.json 保存成功")
+                save_success = True
+            except Exception as save_err:
+                build_logger.error(f"[{recovery_task_id}] 序列化 intelligent_chunks.json 失败: {save_err}，尝试检查点兜底...")
+                try:
+                    fallback_checkpoint = ProjectManager.get_chunk_checkpoint_v2(project_id)
+                    if fallback_checkpoint:
+                        chunks_result = {
+                            "source": "llm_checkpoint_fallback",
+                            "sections": [
+                                {"chapter_number": cp.chapter_number, "title": cp.title, "content": ""}
+                                for cp in fallback_checkpoint.chapter_plan
+                                if cp.status.value in ("completed", "processing")
+                            ],
+                            "clauses": fallback_checkpoint.completed_clauses or [],
+                            "elements": fallback_checkpoint.completed_elements or [],
+                        }
+                        ProjectManager.save_intelligent_chunks(project_id, chunks_result)
+                        build_logger.info(f"[{recovery_task_id}] ✅ 检查点兜底保存成功")
+                        save_success = True
+                    else:
+                        build_logger.error(f"[{recovery_task_id}] 无法兜底：检查点数据也不存在")
+                except Exception as fb_err:
+                    build_logger.error(f"[{recovery_task_id}] 检查点兜底也失败: {fb_err}")
+
+            if save_success:
+                # 删除检查点
+                ProjectManager.delete_chunk_checkpoint_v2(project_id)
+                ProjectManager.delete_chunk_checkpoint(project_id)
+
+                # 更新项目状态
+                project = ProjectManager.get_project(project_id)
+                project.status = ProjectStatus.GRAPH_CHUNKED
+                ProjectManager.save_project(project)
+
+                # 完成任务
+                summary = f"✅ 标注分析完成: {len(result.sections)} 章节, {len(result.clauses)} 条文, {len(result.elements)} 要素"
+                build_logger.info(f"[{recovery_task_id}] {summary}")
+
+                task_manager.update_task(
+                    recovery_task_id,
+                    status=TaskStatus.COMPLETED,
+                    progress=100,
+                    message=summary,
+                    log=summary,
+                    result={
+                        "sections": len(result.sections),
+                        "clauses": len(result.clauses),
+                        "elements": len(result.elements)
+                    }
+                )
 
         except LLMChunkerError as e:
             build_logger.error(f"[{recovery_task_id}] LLM 分块失败: {e}")
@@ -2592,63 +2618,112 @@ def intelligent_chunk():
                     project_id=project_id
                 )
 
-                # 保存分块结果
-                chunks_result = {
-                    "source": "llm",  # LLM 语义分析（基于 MinerU chunks）
-                    "sections": [
-                        {
-                            "chapter_number": s.chapter_number,
-                            "title": s.title,
-                            "content": s.content
-                        }
-                        for s in result.sections
-                    ],
-                    # 使用 clause_to_dict 完整序列化（含 triplets、terms、clause_items 等核心语义字段）
-                    # 同时按 clause_id 去重，保留第一条（内容最完整）
-                    "clauses": (lambda seen_ids: [
-                        c for c in (
-                            clause_to_dict(c) for c in result.clauses
-                        ) if c["clause_id"] not in seen_ids and not seen_ids.add(c["clause_id"])
-                    ])(set()),
-                    # 使用 element_to_dict 完整序列化
-                    # 同时按 key + source_id 去重
-                    "elements": (lambda seen_keys: [
-                        e for e in (
-                            element_to_dict(e) for e in result.elements
-                        ) if (e.get("key") or "") + "|" + (e.get("source_id") or "") not in seen_keys
-                        and not seen_keys.add((e.get("key") or "") + "|" + (e.get("source_id") or ""))
-                    ])(set())
-                }
-
-                # 保存到项目
-                ProjectManager.save_intelligent_chunks(project_id, chunks_result)
-
-                # 删除增强版检查点（任务完成）
-                ProjectManager.delete_chunk_checkpoint_v2(project_id)
-
-                # 更新项目状态
-                project = ProjectManager.get_project(project_id)
-                project.status = ProjectStatus.GRAPH_CHUNKED
-                ProjectManager.save_project(project)
-
-                # 完成任务
-                summary = (f"✅ 标注分析完成: {len(result.sections)} 章节, "
-                           f"{len(chunks_result['clauses'])} 条文（去重后）, "
-                           f"{len(chunks_result['elements'])} 要素（去重后）")
-                chunker_logger.info(f"[{task_id}] {summary}")
-
-                task_mgr.update_task(
-                    task_id,
-                    status=TaskStatus.COMPLETED,
-                    progress=100,
-                    message=summary,
-                    log=summary,
-                    result={
-                        "sections": len(result.sections),
-                        "clauses": len(result.clauses),
-                        "elements": len(result.elements)
+                # 保存分块结果（尝试序列化，失败时用检查点兜底）
+                chunks_result = None
+                save_success = False
+                try:
+                    chunks_result = {
+                        "source": "llm",  # LLM 语义分析（基于 MinerU chunks）
+                        "sections": [
+                            {
+                                "chapter_number": s.chapter_number,
+                                "title": s.title,
+                                "content": s.content
+                            }
+                            for s in result.sections
+                        ],
+                        # 使用 clause_to_dict 完整序列化（含 triplets、terms、clause_items 等核心语义字段）
+                        # 同时按 clause_id 去重，保留第一条（内容最完整）
+                        "clauses": (lambda seen_ids: [
+                            c for c in (
+                                clause_to_dict(c) for c in result.clauses
+                            ) if c["clause_id"] not in seen_ids and not seen_ids.add(c["clause_id"])
+                        ])(set()),
+                        # 使用 element_to_dict 完整序列化
+                        # 同时按 key + source_id 去重
+                        "elements": (lambda seen_keys: [
+                            e for e in (
+                                element_to_dict(e) for e in result.elements
+                            ) if (e.get("key") or "") + "|" + (e.get("source_id") or "") not in seen_keys
+                            and not seen_keys.add((e.get("key") or "") + "|" + (e.get("source_id") or ""))
+                        ])(set())
                     }
-                )
+                    ProjectManager.save_intelligent_chunks(project_id, chunks_result)
+                    chunker_logger.info(f"[{task_id}] ✅ intelligent_chunks.json 保存成功: "
+                                        f"{len(chunks_result['sections'])} 章节, "
+                                        f"{len(chunks_result['clauses'])} 条文, "
+                                        f"{len(chunks_result['elements'])} 要素")
+                    save_success = True
+                except Exception as save_err:
+                    chunker_logger.error(f"[{task_id}] 序列化 intelligent_chunks.json 失败: {save_err}，尝试从检查点兜底...")
+                    # 兜底方案：从检查点数据直接构建（确保已完成的工作不丢失）
+                    try:
+                        fallback_checkpoint = ProjectManager.get_chunk_checkpoint_v2(project_id)
+                        if fallback_checkpoint:
+                            chunks_result = {
+                                "source": "llm_checkpoint_fallback",
+                                "sections": [
+                                    {"chapter_number": cp.chapter_number, "title": cp.title, "content": ""}
+                                    for cp in fallback_checkpoint.chapter_plan
+                                    if cp.status.value in ("completed", "processing")
+                                ],
+                                "clauses": fallback_checkpoint.completed_clauses or [],
+                                "elements": fallback_checkpoint.completed_elements or [],
+                            }
+                            ProjectManager.save_intelligent_chunks(project_id, chunks_result)
+                            chunker_logger.info(f"[{task_id}] ✅ 检查点兜底保存成功: "
+                                                f"{len(chunks_result['sections'])} 章节, "
+                                                f"{len(chunks_result['clauses'])} 条文, "
+                                                f"{len(chunks_result['elements'])} 要素")
+                            save_success = True
+                        else:
+                            chunker_logger.error(f"[{task_id}] 无法兜底：检查点数据也不存在")
+                    except Exception as fallback_err:
+                        chunker_logger.error(f"[{task_id}] 检查点兜底也失败: {fallback_err}")
+
+                if save_success and chunks_result:
+                    # 删除增强版检查点（任务完成）
+                    ProjectManager.delete_chunk_checkpoint_v2(project_id)
+
+                    # 更新项目状态
+                    project = ProjectManager.get_project(project_id)
+                    project.status = ProjectStatus.GRAPH_CHUNKED
+                    ProjectManager.save_project(project)
+
+                    # 完成任务
+                    summary = (f"✅ 标注分析完成: {len(result.sections)} 章节, "
+                               f"{len(chunks_result['clauses'])} 条文（去重后）, "
+                               f"{len(chunks_result['elements'])} 要素（去重后）")
+                    chunker_logger.info(f"[{task_id}] {summary}")
+
+                    task_mgr.update_task(
+                        task_id,
+                        status=TaskStatus.COMPLETED,
+                        progress=100,
+                        message=summary,
+                        log=summary,
+                        result={
+                            "sections": len(result.sections),
+                            "clauses": len(result.clauses),
+                            "elements": len(result.elements)
+                        }
+                    )
+                else:
+                    # 序列化完全失败，但 LLM 分析本身已完成
+                    chunker_logger.warning(f"[{task_id}] intelligent_chunks.json 保存失败，但 LLM 分析已完成，记录结果")
+                    task_mgr.update_task(
+                        task_id,
+                        status=TaskStatus.COMPLETED,
+                        progress=100,
+                        message=f"LLM 分析完成但文件保存失败: {len(result.sections)} 章节, "
+                                f"{len(result.clauses)} 条文, {len(result.elements)} 要素",
+                        result={
+                            "sections": len(result.sections),
+                            "clauses": len(result.clauses),
+                            "elements": len(result.elements),
+                            "save_failed": True
+                        }
+                    )
 
             except LLMChunkerError as e:
                 chunker_logger.error(f"[{task_id}] LLM 分块失败: {e}")
