@@ -147,6 +147,9 @@
             <span class="legend-item">
               <span class="legend-dot" style="border-color:#9333ea;background:#f3e8ff"></span> 图片
             </span>
+            <span class="legend-item">
+              <span class="legend-dot" style="border-color:#ca8a04;background:#fef9c3"></span> 公式
+            </span>
             <span v-if="mineruSummary" class="legend-count">
               {{ mineruChunks.length }} 块
             </span>
@@ -166,10 +169,10 @@
                 <span class="badge">{{ mineruChunks.length }} 块</span>
               </span>
             </div>
-            <button class="close-mineru-btn" @click="toggleMineruMode">×</button>
             <button class="re-annotate-btn" @click="handleReAnnotate" :disabled="reAnnotating">
               {{ reAnnotating ? '标注中...' : '重新标注' }}
             </button>
+            <button class="close-mineru-btn" @click="toggleMineruMode">×</button>
           </div>
 
           <!-- 布局统计 -->
@@ -1048,6 +1051,7 @@ function startTaskSSE() {
           // re-annotate 任务完成时刷新 MinerU 结果
           if (waitingForReAnnotate.value) {
             waitingForReAnnotate.value = false
+            reAnnotating.value = false
             if (payload.status === 'completed') {
               await loadMineruResults()
               realtimeLogs.value.push(`✅ 重新标注完成`)

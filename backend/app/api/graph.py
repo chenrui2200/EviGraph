@@ -1919,7 +1919,7 @@ def _extract_table_text_from_pdf(
     bbox: list
 ) -> str:
     """
-    用 PyMuPDF 从 PDF 指定页面区域提取表格文字。
+    用 Tesseract OCR 从 PDF 指定区域提取表格文字。
 
     Args:
         pdf_path: PDF 文件路径
@@ -1927,22 +1927,66 @@ def _extract_table_text_from_pdf(
         bbox: [x0, y0, x1, y1] PDF 坐标系
 
     Returns:
-        提取的文字（去首尾空白），失败时返回空字符串
+        OCR 提取的文字，失败时返回空字符串
     """
     try:
         import fitz
+        import tempfile
+        import os
+        import subprocess
+    except ImportError:
+        return ''
+
+    try:
+        tesseract_exe = 'C:/Program Files/Tesseract-OCR/tesseract.exe'
+        if not os.path.exists(tesseract_exe):
+            return ''
+
         doc = fitz.open(pdf_path)
         if page_idx < 0 or page_idx >= len(doc):
             doc.close()
             return ''
-        page = doc[page_idx]
         if not bbox or len(bbox) < 4:
             doc.close()
             return ''
-        clip = fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
-        text = page.get_text('text', clip=clip).strip()
+
+        x0, y0_pdf, x1, y1_pdf = bbox
+        page_h = doc[page_idx].rect.height
+
+        # PDF y 坐标从底部起，PyMuPDF clip 用 top-left 坐标
+        clip = fitz.Rect(x0, page_h - y1_pdf, x1, page_h - y0_pdf)
+        if clip.width <= 0 or clip.height <= 0:
+            doc.close()
+            return ''
+
+        # 4x 渲染提升 OCR 精度
+        pix = doc[page_idx].get_pixmap(matrix=fitz.Matrix(4.0, 4.0), clip=clip)
         doc.close()
-        return text
+
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+            img_path = f.name
+        try:
+            pix.save(img_path)
+
+            tessdata_dir = 'C:/Users/ChenRui/AppData/Local/Temp'
+            cmd = [
+                tesseract_exe, img_path, 'stdout',
+                '--tessdata-dir', tessdata_dir,
+                '-l', 'chi_sim',
+                '--psm', '6'
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, timeout=30
+            )
+            text = result.stdout.decode('utf-8', errors='replace').strip()
+            lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
+            return '\n'.join(lines)
+        finally:
+            try:
+                os.unlink(img_path)
+            except Exception:
+                pass
+
     except Exception:
         return ''
 
