@@ -902,7 +902,8 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 
         result = HierarchicalChunkResult()
 
-        # 合并文本
+        # 先合并同条款的相邻 chunks，再拼接为全文
+        text_chunks = self.merge_adjacent_chunks(text_chunks)
         full_text = self._merge_text_chunks(text_chunks)
         source_info = self._get_source_info(text_chunks)
 
@@ -1352,6 +1353,61 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
     # 辅助方法
     # =========================================================================
 
+    def merge_adjacent_chunks(self, text_chunks: List[TextChunk]) -> List[TextChunk]:
+        """
+        将属于同一条款的相邻 chunks 合并成一个 TextChunk。
+
+        MinerU 按 PDF 视觉块边界切分，同一个条款（如 7.2.1）的条文编号和款/项
+        内容可能被切到不同 chunk 中。此方法在拼接前将同页、连续、不含新条款编号
+        的 chunks 合并，使 LLM 拿到完整的条款文本。
+
+        合并规则：
+        1. 同一 page_idx（同一页）
+        2. 后续 chunk 内容不以独立条款编号（X.Y.Z）开头
+        3. 最多连续合并 5 个 chunk（防止整页合并）
+        """
+        import re
+        # 匹配独立条款编号开头，如 "7.2.1"、"5.1.3"、"第4.2.5条"
+        CLAUSE_ID_PATTERN = re.compile(
+            r'^\d+(\.\d+)+\s*[章节条]?\s*[^\d\s]'
+        )
+
+        if not text_chunks:
+            return text_chunks
+
+        merged: List[TextChunk] = []
+        i = 0
+        while i < len(text_chunks):
+            current = text_chunks[i]
+            merged_chunks: List[TextChunk] = [current]
+            page_idx = current.metadata.get('page_idx', 0)
+
+            # 向前看最多 5 个相邻 chunk
+            j = i + 1
+            consecutive_merges = 0
+            while (
+                j < len(text_chunks)
+                and consecutive_merges < 5
+                and text_chunks[j].metadata.get('page_idx', 0) == page_idx
+            ):
+                next_text = text_chunks[j].text.strip()
+                # 如果下一个 chunk 以独立条款编号开头，说明遇到新条款，停止合并
+                if CLAUSE_ID_PATTERN.match(next_text):
+                    break
+                merged_chunks.append(text_chunks[j])
+                j += 1
+                consecutive_merges += 1
+
+            # 合并文本，保留第一个 chunk 的 metadata
+            combined_text = "\n".join(tc.text for tc in merged_chunks)
+            merged.append(TextChunk(text=combined_text, metadata=current.metadata))
+            i = j
+
+        self.logger.info(
+            f"[合并相邻chunks] 原始 {len(text_chunks)} 个 → 合并后 {len(merged)} 个"
+        )
+        return merged
+
     def _merge_text_chunks(self, text_chunks: List[TextChunk]) -> str:
         """合并文本块"""
         texts = []
@@ -1588,4 +1644,5 @@ def chunk_texts_llm(
         HierarchicalChunkResult
     """
     chunker = LLMDrivenChunker(progress_callback=progress_callback)
+    text_chunks = chunker.merge_adjacent_chunks(text_chunks)
     return chunker.chunk(text_chunks, progress_callback)

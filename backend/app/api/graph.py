@@ -2561,14 +2561,12 @@ def intelligent_chunk():
 
                 def progress_callback(progress, message, checkpoint_info=None):
                     """进度回调，支持检查点信息"""
-                    chunker_logger.info(message)
                     # 更新任务进度
                     task_mgr.update_task(
                         task_id,
                         status=TaskStatus.PROCESSING,
                         progress=int(progress * 100),
                         message=message,
-                        log=message,
                         progress_detail=checkpoint_info or {}
                     )
 
