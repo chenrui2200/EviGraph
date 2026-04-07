@@ -243,6 +243,22 @@
         </div>
 
         <!-- 统计摘要 -->
+        <div class="analysis-panel-header">
+          <div class="analysis-panel-title">
+            <span>🧠 智能分析</span>
+            <span v-if="analysisData?.summary" class="analysis-summary-badges">
+              <span class="badge">{{ analysisData.summary.total_sections }} 章节</span>
+              <span class="badge">{{ analysisData.summary.total_clauses }} 条文</span>
+              <span class="badge">{{ analysisData.summary.total_elements }} 要素</span>
+            </span>
+            <span v-else class="analysis-summary-badges">
+              <span class="badge" style="background:rgba(255,255,255,0.15)">等待分析...</span>
+            </span>
+          </div>
+          <button class="re-analyse-btn" @click="handleResetChunking" :disabled="starting">
+            🔄 重新分析
+          </button>
+        </div>
         <div class="summary-cards" v-if="analysisData">
           <div class="summary-card">
             <div class="summary-num">{{ analysisData.summary.total_sections }}</div>
@@ -291,9 +307,6 @@
           <div class="tree-header">
             <span>章节树</span>
             <div class="tree-actions">
-              <button class="reset-chunks-btn" @click="handleResetChunking" :disabled="starting">
-                🔄 重新分析
-              </button>
               <button class="expand-all-btn" @click="toggleAllChapters">
                 {{ allExpanded ? '全部收起' : '全部展开' }}
               </button>
@@ -1545,6 +1558,22 @@ header.ca-header {
 .recommended-fill { background: #d97706; }
 .prohibited-fill { background: #6b7280; }
 .req-count { font-size: 10px; color: #6b7280; min-width: 20px; }
+
+/* 智能分析面板表头 */
+.analysis-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: linear-gradient(135deg, #0d9488 0%, #0369a1 100%);
+  color: white;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+.analysis-panel-title { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 600; }
+.analysis-summary-badges { display: flex; gap: 6px; }
+.re-analyse-btn { background: rgba(255,255,255,0.2); border: none; color: white; padding: 4px 12px; border-radius: 12px; cursor: pointer; font-size: 12px; font-weight: 500; }
+.re-analyse-btn:hover { background: rgba(255,255,255,0.35); }
+.re-analyse-btn:disabled { background: rgba(255,255,255,0.1); cursor: not-allowed; }
 
 /* MinerU 面板 */
 .mineru-panel {
