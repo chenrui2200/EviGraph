@@ -167,6 +167,9 @@
               </span>
             </div>
             <button class="close-mineru-btn" @click="toggleMineruMode">×</button>
+            <button class="re-annotate-btn" @click="handleReAnnotate" :disabled="reAnnotating">
+              {{ reAnnotating ? '标注中...' : '重新标注' }}
+            </button>
           </div>
 
           <!-- 布局统计 -->
@@ -474,7 +477,8 @@ import {
   updateClauseEntity,
   getTaskStatus,
   getMineruChunks,
-  getTaskEventsURL
+  getTaskEventsURL,
+  reAnnotateMineru
 } from '../api/graph'
 import StepNavigator from '../components/StepNavigator.vue'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
@@ -520,6 +524,7 @@ const logDrawerOpen = ref(true)
 const realtimeLogs = ref([])
 const showStartButton = ref(false)
 const starting = ref(false)
+const reAnnotating = ref(false)
 const progressPercent = ref(0)
 const hasAutoExpanded = ref(false)
 let pollInterval = null
@@ -942,6 +947,29 @@ async function handleStartChunking() {
     showStartButton.value = true
   } finally {
     starting.value = false
+  }
+}
+
+async function handleReAnnotate() {
+  if (reAnnotating.value) return
+  if (!confirm('确认重新标注？将从 mineru_parsed.json 重新生成 chunks.json。')) return
+
+  reAnnotating.value = true
+  realtimeLogs.value.push('🔄 开始重新标注...')
+
+  try {
+    const res = await reAnnotateMineru(currentProjectId.value)
+    if (res.success) {
+      realtimeLogs.value.push(`✅ 重新标注完成，共 ${res.data.total_chunks} 个文本块`)
+      // 重新加载 MinerU chunks
+      await loadMineruResults()
+    } else {
+      realtimeLogs.value.push(`❌ 重新标注失败: ${res.error}`)
+    }
+  } catch (err) {
+    realtimeLogs.value.push(`❌ 异常: ${err.message}`)
+  } finally {
+    reAnnotating.value = false
   }
 }
 
@@ -1512,6 +1540,9 @@ header.ca-header {
 .badge { padding: 2px 8px; border-radius: 10px; font-size: 10px; background: rgba(255,255,255,0.25); font-weight: 500; }
 .close-mineru-btn { background: rgba(255,255,255,0.2); border: none; color: white; width: 22px; height: 22px; border-radius: 50%; cursor: pointer; font-size: 16px; line-height: 1; display: flex; align-items: center; justify-content: center; }
 .close-mineru-btn:hover { background: rgba(255,255,255,0.35); }
+.re-annotate-btn { background: #4f46e5; border: none; color: white; padding: 4px 12px; border-radius: 12px; cursor: pointer; font-size: 12px; font-weight: 500; }
+.re-annotate-btn:hover { background: #4338ca; }
+.re-annotate-btn:disabled { background: #a5b4fc; cursor: not-allowed; }
 
 .mineru-layout-info { padding: 10px 16px; background: #f9fafb; }
 .layout-info-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; }

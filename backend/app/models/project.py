@@ -497,6 +497,32 @@ class ProjectManager:
             return json.load(f)
 
     # =========================================================================
+    # MinerU 原始解析结果
+    # =========================================================================
+
+    @classmethod
+    def _get_mineru_parsed_path(cls, project_id: str) -> str:
+        """Get path for raw MinerU parsed result"""
+        project_dir = cls._get_project_dir(project_id)
+        return os.path.join(project_dir, 'mineru_parsed.json')
+
+    @classmethod
+    def save_mineru_parsed(cls, project_id: str, data: Dict[str, Any]) -> None:
+        """Save raw MinerU API response for debugging/tracing"""
+        path = cls._get_mineru_parsed_path(project_id)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def get_mineru_parsed(cls, project_id: str) -> Optional[Dict[str, Any]]:
+        """Get raw MinerU parsed result"""
+        path = cls._get_mineru_parsed_path(project_id)
+        if not os.path.exists(path):
+            return None
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    # =========================================================================
     # 检查点机制 - 用于断点恢复
     # =========================================================================
 

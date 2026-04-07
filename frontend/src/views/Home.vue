@@ -89,7 +89,7 @@
                 @drop.prevent="handleDrop"
                 @click="triggerFileInput"
               >
-                <input ref="fileInput" type="file" multiple accept=".pdf,.md,.txt" @change="handleFileSelect" style="display: none" :disabled="loading" />
+                <input ref="fileInput" type="file" accept=".pdf,.md,.txt" @change="handleFileSelect" style="display: none" :disabled="loading" />
                 <div v-if="files.length === 0" :style="s.uploadPlaceholder">
                   <div :style="s.uploadIcon">↑</div>
                   <div :style="s.uploadTitle">将文件拖放到此处</div>
@@ -258,7 +258,10 @@ const handleDrop = (e) => { isDragOver.value = false; addFiles(Array.from(e.data
 const addFiles = (newFiles) => {
   const allowed = ['.pdf', '.md', '.txt']
   const valid = newFiles.filter(f => allowed.some(ext => f.name.toLowerCase().endsWith(ext)))
-  files.value = [...files.value, ...valid]
+  // 只保留第一个有效文件
+  if (valid.length > 0) {
+    files.value = [valid[0]]
+  }
 }
 
 const removeFile = (index) => { files.value.splice(index, 1) }

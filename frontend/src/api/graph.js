@@ -296,3 +296,16 @@ export function getMineruChunks(projectId) {
     method: 'get'
   })
 }
+
+/**
+ * 从 mineru_parsed.json 重新生成 chunks.json
+ * @param {String} projectId - 项目ID
+ * @returns {Promise}
+ */
+export function reAnnotateMineru(projectId) {
+  return service({
+    url: '/api/graph/pdf/re-annotate',
+    method: 'post',
+    data: { project_id: projectId }
+  })
+}

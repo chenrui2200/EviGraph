@@ -11,7 +11,7 @@ import shutil
 import traceback
 import threading
 import requests
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 from flask import request, jsonify, current_app, send_from_directory
 
 from . import graph_bp
@@ -1203,64 +1203,113 @@ def generate_ontology():
                     mineru_data = mineru_response.json()
                     build_logger.info(f"[{task_id}] ✅ MinerU API 成功: {orig_name}")
 
+                    # 保存原始 MinerU 解析结果
+                    mineru_parsed = ProjectManager.get_mineru_parsed(project.project_id) or {"files": {}}
+                    mineru_parsed["files"][orig_name] = mineru_data
+                    ProjectManager.save_mineru_parsed(project.project_id, mineru_parsed)
+
                     # 解析 MinerU 返回
                     pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
-
-                    # 从 pdf_info_list 精确构建 chunks（跟着 lines 走）
-                    # 构建 page_size 映射
                     page_sizes_map: dict[int, list] = {}
                     for page_info in pdf_info_list:
-                        page_idx = page_info.get('page_idx', 0)
-                        page_sizes_map[page_idx] = page_info.get('page_size')
+                        page_sizes_map[page_info.get('page_idx', 0)] = page_info.get('page_size', [595, 842])
 
-                    # 把 lines 里的 spans.content 拼在一起
-                    line_metadata = []
+                    # ---- 1. 用 preproc_blocks 构建正文/标题 chunks ----
                     for page_info in pdf_info_list:
                         page_idx = page_info.get('page_idx', 0)
-                        # page_w, page_h = page_sizes_map.get(page_idx)
-                        para_blocks = page_info.get('para_blocks', [])
-
-                        for para_block in para_blocks:
-                            block_type = para_block.get('type')
-                            lines = para_block.get('lines', [])
-                            line_bbox = para_block.get('bbox')
-
-                            if not lines:
+                        page_w, page_h = page_sizes_map.get(page_idx, [595, 842])
+                        for block in page_info.get('preproc_blocks', []):
+                            bt = block.get('type', 'text')
+                            if bt not in ('title', 'text'):
                                 continue
+                            bbox = block.get('bbox', [])
+                            lines_text = '\n'.join(
+                                ''.join(s.get('content', '') for s in line.get('spans', []))
+                                for line in block.get('lines', [])
+                            ).strip()
+                            if not lines_text:
+                                continue
+                            cat = {'title': 0, 'text': 1}.get(bt, 1)
+                            all_chunks.append({
+                                "chunk_id": f"chunk_{idx}_{len(all_chunks)}",
+                                "page_idx": page_idx,
+                                "type": bt,
+                                "content": lines_text,
+                                "bbox_pdf": bbox,
+                                "bbox_viewport": bbox,
+                                "page_width": page_w,
+                                "page_height": page_h,
+                                "category_id": cat,
+                                "block_type": bt,
+                                "source": orig_name
+                            })
 
-                            line_content = ""
-                            for line in lines:
-                                #line_bbox = line.get('bbox')
-                                span_content = "".join(span.get('content', '') for span in line.get('spans', []))
-                                line_content += '\n' + span_content
+                    # ---- 2. 用 preproc_blocks 构建表格 chunks（有 bbox）----
+                    # content[] 的 table 有 caption + img_path，preproc_blocks 的 table 有 bbox
+                    # 通过 page_idx + img_path 建立对应关系
+                    table_blocks_map: dict[tuple, list] = {}
+                    for page_info in pdf_info_list:
+                        page_idx = page_info.get('page_idx', 0)
+                        for block in page_info.get('preproc_blocks', []):
+                            if block.get('type') != 'table':
+                                continue
+                            # 收集该表格的所有 img_path（可能多个 image span）
+                            img_paths = []
+                            for sub in block.get('blocks', []):
+                                for line in sub.get('lines', []):
+                                    for span in line.get('spans', []):
+                                        if span.get('image_path'):
+                                            img_paths.append(span['image_path'])
+                            if img_paths:
+                                table_blocks_map[(page_idx, tuple(img_paths))] = block.get('bbox', [])
+                            else:
+                                table_blocks_map[(page_idx, ())] = block.get('bbox', [])
 
-                            if line_content.strip():
-                                line_metadata.append((line_content, line_bbox, page_idx, block_type))
+                    # 用 content[] 的 table 配合 preproc_blocks 的 bbox 构建表格 chunks
+                    for item in mineru_data.get('content', []):
+                        if item.get('type') != 'table':
+                            continue
+                        page_idx = item.get('page_idx', 0)
+                        page_w, page_h = page_sizes_map.get(page_idx, [595, 842])
+                        img_path = item.get('img_path', '') or ''
+                        # img_path 格式如 "images/xxx.jpg"，取文件名部分匹配
+                        img_key = img_path.split('/')[-1].split('.')[0]
+                        caption = item.get('table_caption', '') or ''
+                        content = f"[表格] {caption}" if caption else "[表格]"
 
+                        # 在 table_blocks_map 中查找匹配的 bbox
+                        bbox = []
+                        for (pi, paths), b in table_blocks_map.items():
+                            if pi == page_idx and any(img_key in p for p in paths):
+                                bbox = b
+                                break
+                        # 没找到精确匹配则尝试按 page_idx 顺序找第一个
+                        if not bbox:
+                            for (pi, paths), b in table_blocks_map.items():
+                                if pi == page_idx:
+                                    bbox = b
+                                    break
 
-                    # 使用 line_metadata 构建 all_chunks
-                    for line_content, line_bbox, page_idx, block_type in line_metadata:
-                        page_w, page_h = page_sizes_map.get(page_idx)
                         all_chunks.append({
                             "chunk_id": f"chunk_{idx}_{len(all_chunks)}",
                             "page_idx": page_idx,
-                            "type": "text",
-                            "content": line_content,
-                            "bbox_pdf": line_bbox,
-                            "bbox_viewport": line_bbox,
+                            "type": "table",
+                            "content": content,
+                            "bbox_pdf": bbox,
+                            "bbox_viewport": bbox,
                             "page_width": page_w,
                             "page_height": page_h,
-                            "category_id": 1,
-                            "block_type": block_type,
-                            "source": orig_name
+                            "category_id": 2,
+                            "block_type": "table",
+                            "source": orig_name,
+                            "table_caption": caption,
+                            "table_img_path": img_path
                         })
-                    
-                    build_logger.info(f"[{task_id}] 文件 {orig_name} 提取 {len(line_metadata)} 行文本")
 
-
-
-
-                    msg = f"[{task_id}] ✅ 已提取 {len(all_chunks)} 个块"
+                    text_count = len([c for c in all_chunks if c['category_id'] in (0, 1)])
+                    table_count = len([c for c in all_chunks if c['category_id'] == 2])
+                    build_logger.info(f"[{task_id}] 文件 {orig_name} 提取 {text_count} 文本块 + {table_count} 表格块")
+                    msg = f"[{task_id}] ✅ 已提取 {text_count} 文本块 + {table_count} 表格块"
                     task_manager.update_task(task_id, progress=current_progress, message=msg, log=msg)
 
                 if not all_chunks:
@@ -1507,29 +1556,19 @@ def mineru_parse():
         if not pdf_path or not os.path.exists(pdf_path):
             return jsonify({"success": False, "error": f"PDF 文件未找到: {filename}"}), 404
 
-        with open(pdf_path, 'rb') as f:
-            pdf_bytes = f.read()
-
-        logger.info(f"MinerU 解析: project={project_id}, filename={filename}, size={len(pdf_bytes)} bytes")
-
         # === 2. 调用 MinerU API ===
-        mineru_response = requests.post(
-            Config.MINERU_API_URL,
-            files={'pdf_file': (filename, pdf_bytes, 'application/pdf')},
-            timeout=300
-        )
-
-        if mineru_response.status_code != 200:
-            logger.error(f"MinerU API 返回错误: {mineru_response.status_code} - {mineru_response.text[:500]}")
-            return jsonify({"success": False, "error": f"MinerU API 返回错误: {mineru_response.status_code}"}), 502
-
-        mineru_data = mineru_response.json()
+        try:
+            mineru_data = _call_mineru_api(project_id, filename)
+        except FileNotFoundError as e:
+            return jsonify({"success": False, "error": str(e)}), 404
+        except Exception as e:
+            if "连接" in str(e) or "Connection" in str(e):
+                return jsonify({"success": False, "error": "无法连接到 MinerU 服务"}), 503
+            logger.error(f"MinerU API 返回错误: {e}")
+            return jsonify({"success": False, "error": str(e)}), 502
 
         # === 3. 解析 MinerU 返回结果 ===
-        layout_pages = mineru_data.get('layout', [])
         pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
-
-        # 构建 page_size 映射 (page_no -> [width, height])
         page_sizes = {}
         for info in pdf_info_list:
             page_idx = info.get('page_idx', 0)
@@ -1537,55 +1576,11 @@ def mineru_parse():
             if len(page_size) == 2:
                 page_sizes[page_idx] = page_size
 
-        chunks = []
+        chunks = _parse_mineru_to_chunks(mineru_data, filename)
 
-        # 从 content 中提取带文本的 chunks（主数据源）
-        content_list = mineru_data.get('content', [])
-        for content_item in content_list:
-            page_idx = content_item.get('page_idx', 0)
-            text = content_item.get('text', '').strip()
-            if not text:
-                continue
-
-            page_w, page_h = page_sizes.get(page_idx, [595.3, 841.9])
-            content_type = content_item.get('type', 'text')
-            if content_type == 'title':
-                category_id = 0
-            elif content_type == 'table':
-                category_id = 2
-            elif content_type == 'figure':
-                category_id = 3
-            else:
-                category_id = 1
-
-            # 尝试从 layout 中找到对应的 bbox
-            bbox_viewport = [0, 0, page_w, page_h]
-            for layout_page in layout_pages:
-                if layout_page.get('page_info', {}).get('page_no', 0) != page_idx:
-                    continue
-                for det in layout_page.get('layout_dets', []):
-                    # 简单匹配：category_id 相同即复用
-                    if det.get('category_id', 1) == category_id:
-                        bbox = det.get('bbox', [])
-                        if bbox and len(bbox) >= 4:
-                            x0, y0, x1, y1 = bbox[:4]
-                            bbox_viewport = [x0, page_h - y1, x1, page_h - y0]
-                        break
-
-            chunks.append({
-                "chunk_id": f"chunk_{page_idx}_{category_id}_{len(chunks)}",
-                "page_idx": page_idx,
-                "type": content_type,
-                "content": text,
-                "bbox_viewport": bbox_viewport,
-                "page_width": page_w,
-                "page_height": page_h,
-                "category_id": category_id,
-                "source": filename,
-                "nouns": []
-            })
-
-        logger.info(f"MinerU 解析完成: {len(chunks)} 个文本块, {len(page_sizes)} 页")
+        text_count = len([c for c in chunks if c['category_id'] in (0, 1)])
+        table_count = len([c for c in chunks if c['category_id'] == 2])
+        logger.info(f"MinerU 解析完成: {text_count} 文本块 + {table_count} 表格块, {len(page_sizes)} 页")
 
         # === 4. 保存到 chunks.json ===
         ProjectManager.save_chunks(project_id, chunks)
@@ -1597,7 +1592,7 @@ def mineru_parse():
                 "project_id": project_id,
                 "filename": filename,
                 "total_pages": len(page_sizes),
-                "total_layout_blocks": sum(len(lp.get('layout_dets', [])) for lp in layout_pages),
+                "total_layout_blocks": sum(len(lp.get('layout_dets', [])) for lp in mineru_data.get('layout', [])),
                 "chunks": chunks,
                 "mineru_version": mineru_data.get('info', {}).get('_version_name', 'unknown')
             }
@@ -1608,6 +1603,241 @@ def mineru_parse():
     except Exception as e:
         logger.error(f"MinerU 解析失败: {str(e)}\n{traceback.format_exc()}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _call_mineru_api(project_id: str, filename: str) -> Dict[str, Any]:
+    """
+    调用 MinerU API 解析 PDF，返回原始数据并保存到 mineru_parsed.json。
+    供 mineru_parse 和 re_annotate 共用。
+
+    Returns:
+        mineru_data: MinerU API 返回的原始 JSON 数据
+    Raises:
+        FileNotFoundError: PDF 文件未找到
+        Exception: MinerU API 调用失败
+    """
+    # 查找 PDF 文件
+    project_dir = ProjectManager._get_project_dir(project_id)
+    pdf_path = None
+    for root, dirs, f_list in os.walk(project_dir):
+        for f in f_list:
+            if filename.lower() in f.lower() or f.lower() in filename.lower():
+                pdf_path = os.path.join(root, f)
+                break
+        if pdf_path:
+            break
+
+    if not pdf_path or not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"PDF 文件未找到: {filename}")
+
+    with open(pdf_path, 'rb') as f:
+        pdf_bytes = f.read()
+
+    logger.info(f"MinerU 解析: project={project_id}, filename={filename}, size={len(pdf_bytes)} bytes")
+
+    # 调用 MinerU API
+    mineru_response = requests.post(
+        Config.MINERU_API_URL,
+        files={'pdf_file': (filename, pdf_bytes, 'application/pdf')},
+        timeout=300
+    )
+
+    if mineru_response.status_code != 200:
+        raise Exception(f"MinerU API 返回错误: {mineru_response.status_code}")
+
+    mineru_data = mineru_response.json()
+
+    # 保存原始 MinerU 解析结果
+    ProjectManager.save_mineru_parsed(project_id, mineru_data)
+    logger.info(f"MinerU 原始结果已保存: mineru_parsed.json")
+
+    return mineru_data
+
+
+@graph_bp.route('/pdf/re-annotate', methods=['POST'])
+def re_annotate():
+    """
+    重新标注：从 mineru_parsed.json 重新生成 chunks.json
+
+    请求: JSON { "project_id": "xxx" }
+    流程:
+      1. 读取 mineru_parsed.json
+      2. 从原始数据重新构建 chunks（与 mineru-parse 相同的解析逻辑）
+      3. 保存到 chunks.json
+      4. 返回新的 chunks
+
+    Response:
+        {
+            "success": true,
+            "data": { "project_id": "xxx", "filename": "...", "chunks": [...] }
+        }
+    """
+    try:
+        data = request.get_json() or {}
+        project_id = data.get('project_id')
+
+        if not project_id:
+            return jsonify({"success": False, "error": "请提供 project_id"}), 400
+
+        # === 1. 获取 MinerU 数据（有则用，无则自动调用 API 重试）===
+        mineru_parsed = ProjectManager.get_mineru_parsed(project_id)
+        if not mineru_parsed:
+            # 没有原始数据，自动调用 MinerU API
+            logger.info(f"[re-annotate] 未找到 mineru_parsed.json，自动调用 MinerU API...")
+            project = ProjectManager.get_project(project_id)
+            if not project or not project.files:
+                return jsonify({"success": False, "error": "项目无文件记录，无法自动解析"}), 400
+            filename = project.files[0]["filename"]
+            try:
+                mineru_parsed = _call_mineru_api(project_id, filename)
+            except FileNotFoundError as e:
+                return jsonify({"success": False, "error": str(e)}), 404
+            except Exception as e:
+                if "连接" in str(e) or "Connection" in str(e):
+                    return jsonify({"success": False, "error": "无法连接到 MinerU 服务"}), 503
+                logger.error(f"MinerU API 调用失败: {e}")
+                return jsonify({"success": False, "error": str(e)}), 502
+
+        # 判断是单文件格式还是多文件格式
+        if "files" in mineru_parsed:
+            # 多文件格式（ontology/generate 写入的）
+            all_chunks = []
+            for orig_name, mineru_data in mineru_parsed["files"].items():
+                chunks = _parse_mineru_to_chunks(mineru_data, orig_name)
+                all_chunks.extend(chunks)
+            ProjectManager.save_chunks(project_id, all_chunks)
+            return jsonify({
+                "success": True,
+                "data": {
+                    "project_id": project_id,
+                    "filename": list(mineru_parsed["files"].keys())[0] if mineru_parsed["files"] else "",
+                    "total_chunks": len(all_chunks),
+                    "chunks": all_chunks
+                }
+            })
+        else:
+            # 单文件格式（mineru-parse 写入的），从 project.json 取文件名
+            project = ProjectManager.get_project(project_id)
+            filename = project.files[0]["filename"] if project and project.files else "unknown.pdf"
+            chunks = _parse_mineru_to_chunks(mineru_parsed, filename)
+            ProjectManager.save_chunks(project_id, chunks)
+            return jsonify({
+                "success": True,
+                "data": {
+                    "project_id": project_id,
+                    "filename": filename,
+                    "total_chunks": len(chunks),
+                    "chunks": chunks
+                }
+            })
+
+    except Exception as e:
+        logger.error(f"重新标注失败: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+def _parse_mineru_to_chunks(mineru_data: dict, filename: str) -> List[Dict[str, Any]]:
+    """
+    将 MinerU 原始数据解析为 chunks 结构。
+
+    数据源：
+    - 正文/标题：preproc_blocks 中 type=title/text，提取 lines/spans 的 content
+    - 表格：content[] 中 type=table，取 table_caption + img_path
+    """
+    pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
+
+    # page_size 映射
+    page_sizes: dict[int, list] = {}
+    for info in pdf_info_list:
+        page_sizes[info.get('page_idx', 0)] = info.get('page_size', [595, 842])
+
+    chunks: List[Dict[str, Any]] = []
+
+    # ---- 1. preproc_blocks → 正文/标题 chunks ----
+    for page_info in pdf_info_list:
+        page_idx = page_info.get('page_idx', 0)
+        page_w, page_h = page_sizes.get(page_idx, [595, 842])
+        for block in page_info.get('preproc_blocks', []):
+            bt = block.get('type', 'text')
+            if bt not in ('title', 'text'):
+                continue
+            bbox = block.get('bbox', [])
+            lines_text = '\n'.join(
+                ''.join(s.get('content', '') for s in line.get('spans', []))
+                for line in block.get('lines', [])
+            ).strip()
+            if not lines_text:
+                continue
+            chunks.append({
+                "chunk_id": f"chunk_{len(chunks)}",
+                "page_idx": page_idx,
+                "type": bt,
+                "content": lines_text,
+                "bbox_pdf": bbox,
+                "bbox_viewport": bbox,
+                "page_width": page_w,
+                "page_height": page_h,
+                "category_id": {'title': 0, 'text': 1}.get(bt, 1),
+                "block_type": bt,
+                "source": filename
+            })
+
+    # ---- 2. 表格：content[] + preproc_blocks 联合（img_path 做 key）----
+    # preproc_blocks.type=table 有 bbox，通过 page_idx + img_path 匹配
+    table_blocks_map: dict[tuple, list] = {}
+    for page_info in pdf_info_list:
+        page_idx = page_info.get('page_idx', 0)
+        for block in page_info.get('preproc_blocks', []):
+            if block.get('type') != 'table':
+                continue
+            img_paths = []
+            for sub in block.get('blocks', []):
+                for line in sub.get('lines', []):
+                    for span in line.get('spans', []):
+                        if span.get('image_path'):
+                            img_paths.append(span['image_path'])
+            table_blocks_map[(page_idx, tuple(img_paths))] = block.get('bbox', [])
+
+    for item in mineru_data.get('content', []):
+        if item.get('type') != 'table':
+            continue
+        page_idx = item.get('page_idx', 0)
+        page_w, page_h = page_sizes.get(page_idx, [595, 842])
+        img_path = item.get('img_path', '') or ''
+        img_key = img_path.split('/')[-1].split('.')[0]
+        caption = item.get('table_caption', '') or ''
+        content = f"[表格] {caption}" if caption else "[表格]"
+
+        # 精确匹配：page_idx + img_path hash
+        bbox = []
+        for (pi, paths), b in table_blocks_map.items():
+            if pi == page_idx and any(img_key in p for p in paths):
+                bbox = b
+                break
+        if not bbox:
+            # 回退：同一页第一个 table block
+            for (pi, paths), b in table_blocks_map.items():
+                if pi == page_idx:
+                    bbox = b
+                    break
+
+        chunks.append({
+            "chunk_id": f"chunk_{len(chunks)}",
+            "page_idx": page_idx,
+            "type": "table",
+            "content": content,
+            "bbox_pdf": bbox,
+            "bbox_viewport": bbox,
+            "page_width": page_w,
+            "page_height": page_h,
+            "category_id": 2,
+            "block_type": "table",
+            "source": filename,
+            "table_caption": caption,
+            "table_img_path": img_path
+        })
+
+    return chunks
 
 
 def _mineru_cat_to_type(cat_id: int) -> str:
