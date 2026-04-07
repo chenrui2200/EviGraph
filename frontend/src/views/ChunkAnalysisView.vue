@@ -525,6 +525,7 @@ const realtimeLogs = ref([])
 const showStartButton = ref(false)
 const starting = ref(false)
 const reAnnotating = ref(false)
+const waitingForReAnnotate = ref(false)
 const progressPercent = ref(0)
 const hasAutoExpanded = ref(false)
 let pollInterval = null
@@ -960,15 +961,15 @@ async function handleReAnnotate() {
   try {
     const res = await reAnnotateMineru(currentProjectId.value)
     if (res.success) {
-      realtimeLogs.value.push(`✅ 重新标注完成，共 ${res.data.total_chunks} 个文本块`)
-      // 重新加载 MinerU chunks
-      await loadMineruResults()
+      taskId.value = res.data.task_id
+      waitingForReAnnotate.value = true
+      startTaskSSE()
     } else {
       realtimeLogs.value.push(`❌ 重新标注失败: ${res.error}`)
+      reAnnotating.value = false
     }
   } catch (err) {
     realtimeLogs.value.push(`❌ 异常: ${err.message}`)
-  } finally {
     reAnnotating.value = false
   }
 }
@@ -1044,6 +1045,16 @@ function startTaskSSE() {
         if (payload.status === 'completed' || payload.status === 'failed') {
           taskSource.close()
           taskSource = null
+          // re-annotate 任务完成时刷新 MinerU 结果
+          if (waitingForReAnnotate.value) {
+            waitingForReAnnotate.value = false
+            if (payload.status === 'completed') {
+              await loadMineruResults()
+              realtimeLogs.value.push(`✅ 重新标注完成`)
+            } else {
+              realtimeLogs.value.push(`❌ 重新标注失败: ${payload.error || '未知错误'}`)
+            }
+          }
         }
       }
     } catch (err) {
