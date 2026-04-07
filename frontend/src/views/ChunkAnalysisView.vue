@@ -222,6 +222,15 @@
               <span class="detail-page">页 {{ (mineruSelectedChunk.page_idx || 0) + 1 }}</span>
             </div>
             <div class="detail-content">{{ mineruSelectedChunk.content }}</div>
+            <!-- 表格内容 -->
+            <div v-if="mineruSelectedChunk.type === 'table' && mineruSelectedChunk.table_content" class="detail-table-content">
+              <div class="detail-table-label">表格内容</div>
+              <div class="detail-table-markdown">{{ mineruSelectedChunk.table_content }}</div>
+            </div>
+            <div v-if="mineruSelectedChunk.type === 'table' && mineruSelectedChunk.table_caption" class="detail-table-caption">
+              <span class="detail-table-caption-label">表注：</span>
+              <span>{{ mineruSelectedChunk.table_caption }}</span>
+            </div>
             <div v-if="mineruSelectedChunk.bbox_viewport" class="detail-bbox">
               <span class="detail-bbox-label">bbox_viewport:</span>
               <span class="detail-bbox-val">{{ mineruSelectedChunk.bbox_viewport.join(', ') }}</span>
@@ -1588,6 +1597,11 @@ header.ca-header {
 .detail-block-type { padding: 2px 8px; background: #f3f4f6; color: #6b7280; border-radius: 8px; font-size: 11px; }
 .detail-page { font-size: 11px; color: #9ca3af; }
 .detail-content { font-size: 11px; color: #374151; line-height: 1.5; margin-bottom: 8px; white-space: pre-wrap; word-break: break-all; }
+.detail-table-content { margin: 8px 0; }
+.detail-table-label { font-size: 10px; color: #9ca3af; margin-bottom: 4px; font-weight: 500; }
+.detail-table-markdown { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: #374151; overflow-x: auto; }
+.detail-table-caption { font-size: 10px; color: #6b7280; margin-top: 6px; }
+.detail-table-caption-label { color: #9ca3af; }
 .detail-bbox { display: flex; align-items: center; gap: 6px; font-size: 10px; }
 .detail-bbox-label { color: #9ca3af; }
 .detail-bbox-val { color: #6b7280; font-family: monospace; }

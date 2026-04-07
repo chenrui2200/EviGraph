@@ -31,6 +31,56 @@ from ..models.ai_app import AiAppManager
 logger = get_logger('mirofish.api')
 
 
+def _resolve_pdf_path(project_id: str, filename: str = '') -> str:
+    """
+    解析项目 PDF 文件的真实路径。
+
+    优先级：
+    1. project.files[].path（有 path 字段时）
+    2. 从项目 files/ 目录按文件名模糊匹配
+    3. 从项目 files/ 目录按 magic bytes (%PDF-) 查找 PDF
+
+    Returns:
+        PDF 完整路径，找不到返回空字符串
+    """
+    if project_id:
+        project = ProjectManager.get_project(project_id)
+        if project and project.files:
+            # 1. 优先用 project.files 中记录的 path（必须是文件）
+            for pf in project.files:
+                pf_path = pf.get('path', '')
+                if pf_path:
+                    logger.info(f"[PDF路径解析] files[].path={pf_path}, isfile={os.path.isfile(pf_path)}, isdir={os.path.isdir(pf_path)}")
+                    if os.path.isfile(pf_path):
+                        logger.info(f"[PDF路径解析] ✅ 直接命中: {pf_path}")
+                        return pf_path
+            # 2. 按 filename 模糊匹配（从 files/ 目录）
+            if filename:
+                files_dir = ProjectManager._get_project_files_dir(project_id)
+                if os.path.isdir(files_dir):
+                    logger.info(f"[PDF路径解析] 遍历目录: {files_dir}")
+                    for f in os.listdir(files_dir):
+                        if filename in f:
+                            full = os.path.join(files_dir, f)
+                            if os.path.isfile(full):
+                                logger.info(f"[PDF路径解析] ✅ filename匹配: {full}")
+                                return full
+            # 3. 从 files/ 目录找任意 PDF（magic bytes）
+            files_dir = ProjectManager._get_project_files_dir(project_id)
+            if os.path.isdir(files_dir):
+                for f in os.listdir(files_dir):
+                    fpath = os.path.join(files_dir, f)
+                    if os.path.isfile(fpath):
+                        with open(fpath, 'rb') as fh:
+                            if fh.read(5) == b'%PDF-':
+                                logger.info(f"[PDF路径解析] ✅ magic匹配: {fpath}")
+                                return fpath
+        else:
+            logger.info(f"[PDF路径解析] project={project}, files={project.files if project else 'N/A'}")
+    logger.info(f"[PDF路径解析] ❌ 未找到PDF，返回空字符串")
+    return ''
+
+
 def _get_storage():
     """Get Neo4jStorage from Flask app extensions."""
     storage = current_app.extensions.get('neo4j_storage')
@@ -1106,6 +1156,7 @@ def generate_ontology():
                 saved_files.append(file_info)
                 project.files.append({
                     "filename": file_info["original_filename"],
+                    "path": file_info["path"],
                     "size": file_info["size"]
                 })
             except Exception as file_err:
@@ -1208,111 +1259,14 @@ def generate_ontology():
                     mineru_parsed["files"][orig_name] = mineru_data
                     ProjectManager.save_mineru_parsed(project.project_id, mineru_parsed)
 
-                    # 解析 MinerU 返回
-                    pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
-                    page_sizes_map: dict[int, list] = {}
-                    for page_info in pdf_info_list:
-                        page_sizes_map[page_info.get('page_idx', 0)] = page_info.get('page_size', [595, 842])
+                    # 统一解析 MinerU 返回（正文/标题 + 表格）
+                    file_chunks = _parse_mineru_to_chunks(mineru_data, orig_name, pdf_path)
+                    for c in file_chunks:
+                        c["chunk_id"] = f"chunk_{idx}_{c['chunk_id'].split('_', 1)[-1]}"
+                    all_chunks.extend(file_chunks)
 
-                    # ---- 1. 用 preproc_blocks 构建正文/标题 chunks ----
-                    for page_info in pdf_info_list:
-                        page_idx = page_info.get('page_idx', 0)
-                        page_w, page_h = page_sizes_map.get(page_idx, [595, 842])
-                        for block in page_info.get('preproc_blocks', []):
-                            bt = block.get('type', 'text')
-                            if bt not in ('title', 'text'):
-                                continue
-                            bbox = block.get('bbox', [])
-                            lines_text = '\n'.join(
-                                ''.join(s.get('content', '') for s in line.get('spans', []))
-                                for line in block.get('lines', [])
-                            ).strip()
-                            if not lines_text:
-                                continue
-                            cat = {'title': 0, 'text': 1}.get(bt, 1)
-                            all_chunks.append({
-                                "chunk_id": f"chunk_{idx}_{len(all_chunks)}",
-                                "page_idx": page_idx,
-                                "type": bt,
-                                "content": lines_text,
-                                "bbox_pdf": bbox,
-                                "bbox_viewport": bbox,
-                                "page_width": page_w,
-                                "page_height": page_h,
-                                "category_id": cat,
-                                "block_type": bt,
-                                "source": orig_name
-                            })
-
-                    # ---- 2. 构建表格 chunks（用 PyMuPDF 提取表格文字）----
-                    # 通过 img_path 精确匹配 table block 的 bbox
-                    # content img_path = "images/xxx.jpg", preproc_blocks img_path = "xxx.jpg"
-                    table_bboxes_by_img: dict[tuple, list] = {}
-                    table_first_by_page: dict[int, list] = {}
-                    for page_info in pdf_info_list:
-                        page_idx = page_info.get('page_idx', 0)
-                        first_bbox = None
-                        for block in page_info.get('preproc_blocks', []):
-                            if block.get('type') != 'table':
-                                continue
-                            bbox = block.get('bbox', [])
-                            if not bbox or len(bbox) < 4:
-                                continue
-                            img_keys = set()
-                            for sub in block.get('blocks', []):
-                                for line in sub.get('lines', []):
-                                    for span in line.get('spans', []):
-                                        if span.get('image_path'):
-                                            img_keys.add(span['image_path'])
-                            for k in img_keys:
-                                table_bboxes_by_img[(page_idx, k)] = bbox
-                            if first_bbox is None:
-                                first_bbox = bbox
-                        if first_bbox is not None:
-                            table_first_by_page[page_idx] = first_bbox
-
-                    # 用 content[] 的 table 构建 chunks，同时提取表格文字
-                    for item in mineru_data.get('content', []):
-                        if item.get('type') != 'table':
-                            continue
-                        page_idx = item.get('page_idx', 0)
-                        page_w, page_h = page_sizes_map.get(page_idx, [595, 842])
-                        caption = item.get('table_caption', '') or ''
-                        img_path = item.get('img_path', '') or ''
-
-                        # 通过 img_path 精确匹配 bbox
-                        bbox = []
-                        img_key = img_path.split('/')[-1].split('.')[0]
-                        for (pi, k), b in table_bboxes_by_img.items():
-                            if pi == page_idx and img_key in k:
-                                bbox = b
-                                break
-                        # 找不到则 fallback 到该页第一个 table bbox
-                        if not bbox and page_idx in table_first_by_page:
-                            bbox = table_first_by_page[page_idx]
-
-                        # 用 PyMuPDF 提取表格文字
-                        table_content = _extract_table_text_from_pdf(pdf_path, page_idx, bbox) if bbox else ''
-
-                        all_chunks.append({
-                            "chunk_id": f"chunk_{idx}_{len(all_chunks)}",
-                            "page_idx": page_idx,
-                            "type": "table",
-                            "content": caption or '[表格]',
-                            "bbox_pdf": bbox,
-                            "bbox_viewport": bbox,
-                            "page_width": page_w,
-                            "page_height": page_h,
-                            "category_id": 2,
-                            "block_type": "table",
-                            "source": orig_name,
-                            "table_caption": caption,
-                            "table_img_path": img_path,
-                            "table_content": table_content
-                        })
-
-                    text_count = len([c for c in all_chunks if c['category_id'] in (0, 1)])
-                    table_count = len([c for c in all_chunks if c['category_id'] == 2])
+                    text_count = len([c for c in file_chunks if c['category_id'] in (0, 1)])
+                    table_count = len([c for c in file_chunks if c['category_id'] == 2])
                     build_logger.info(f"[{task_id}] 文件 {orig_name} 提取 {text_count} 文本块 + {table_count} 表格块")
                     msg = f"[{task_id}] ✅ 已提取 {text_count} 文本块 + {table_count} 表格块"
                     task_manager.update_task(task_id, progress=current_progress, message=msg, log=msg)
@@ -1755,6 +1709,9 @@ def _do_re_annotate_work(task_id: str, project_id: str):
                     if orig_name in pf.get('path', '') or pf.get('filename', '') == orig_name:
                         file_path = pf.get('path', '')
                         break
+            # 兜底：从项目 files/ 目录自动查找 PDF
+            if not file_path:
+                file_path = _resolve_pdf_path(project_id, orig_name)
             chunks = _parse_mineru_to_chunks(mineru_data, orig_name, file_path)
             all_chunks.extend(chunks)
 
@@ -1773,11 +1730,17 @@ def _do_re_annotate_work(task_id: str, project_id: str):
         })
     else:
         # 单文件格式
-        file_path = ''
         filename = 'unknown.pdf'
+        file_path = ''
         if project and project.files:
-            file_path = project.files[0].get('path', '')
             filename = project.files[0].get('filename', filename)
+            file_path = project.files[0].get('path', '')
+            logger.info(f"[重新标注] project.files[0].path={file_path}, isfile={os.path.isfile(file_path) if file_path else 'N/A'}")
+        # 兜底：从项目 files/ 目录自动查找 PDF
+        if not file_path or not os.path.isfile(file_path):
+            logger.info(f"[重新标注] 触发 _resolve_pdf_path (current path={file_path})")
+            file_path = _resolve_pdf_path(project_id, filename)
+            logger.info(f"[重新标注] _resolve_pdf_path 返回: {file_path}")
 
         task_manager.update_task(task_id, message=f"📝 解析 MinerU 数据: {filename}",
                                 log=f"解析 MinerU 数据: {filename}")
@@ -1795,6 +1758,90 @@ def _do_re_annotate_work(task_id: str, project_id: str):
             "filename": filename,
             "total_chunks": len(chunks)
         })
+
+
+def _build_table_chunk(
+    table_item: dict,
+    table_bboxes_by_img: dict,
+    table_first_by_page: dict,
+    pdf_path: str,
+    filename: str
+) -> dict:
+    """
+    构建单个表格 chunk。
+
+    这是构建表格 chunk 的唯一入口，所有解析路径都调用此函数。
+    """
+    page_idx = table_item.get('page_idx', 0)
+    caption = table_item.get('table_caption', '') or ''
+    img_path = table_item.get('img_path', '') or ''
+
+    # 通过 img_path 精确匹配 bbox
+    bbox = []
+    img_key = img_path.split('/')[-1].split('.')[0]
+    page_keys = [k for (pi, k) in table_bboxes_by_img if pi == page_idx]
+    matched_key = None
+    for (pi, k), b in table_bboxes_by_img.items():
+        if pi == page_idx and img_key in k:
+            bbox = list(b)
+            matched_key = k
+            break
+    logger.info(
+        f"[表格BBox] caption={caption[:30] if caption else '(空)'}, "
+        f"img_key={img_key}, matched_key={matched_key}, bbox={bbox}"
+    )
+    # fallback：该页第一个 table bbox
+    if not bbox and page_idx in table_first_by_page:
+        bbox = list(table_first_by_page[page_idx])
+        logger.warning(
+            f"[表格BBox] 匹配失败fallback: caption={caption[:30] if caption else '(空)'}, "
+            f"img_path={img_path}, img_key={img_key}, 该页keys={page_keys}"
+        )
+    elif not bbox:
+        logger.warning(
+            f"[表格BBox] 无bbox: caption={caption[:30] if caption else '(空)'}, img_path={img_path}"
+        )
+
+    # 修正颠倒的 bbox（y0 > y1 的情况）
+    if bbox and len(bbox) >= 4 and bbox[1] > bbox[3]:
+        logger.info(f"[表格提取] 修正颠倒bbox: {bbox} -> [{bbox[0]},{bbox[3]},{bbox[2]},{bbox[1]}]")
+        bbox = [bbox[0], bbox[3], bbox[2], bbox[1]]
+
+    # 用 PaddleOCR 提取表格内容
+    table_content = ''
+    logger.info(f"[表格提取] 开始: caption={caption[:30] if caption else '(空)'}, bbox={bbox}")
+    if pdf_path and bbox:
+        table_content = _extract_table_text_from_pdf(pdf_path, page_idx, bbox, caption)
+        if not table_content:
+            logger.warning(
+                f"[表格提取] 失败: page={page_idx}, bbox={bbox}, "
+                f"pdf={pdf_path}, caption={caption[:30] if caption else '(空)'}"
+            )
+    elif not pdf_path:
+        logger.warning(
+            f"[表格提取] 跳过（无PDF路径）: caption={caption[:30]}"
+        )
+    elif not bbox:
+        logger.warning(
+            f"[表格提取] 跳过（无BBox）: page={page_idx}, caption={caption[:30]}"
+        )
+
+    return {
+        "chunk_id": "",  # caller 负责生成
+        "page_idx": page_idx,
+        "type": "table",
+        "content": caption or '[表格]',
+        "bbox_pdf": bbox,
+        "bbox_viewport": bbox,
+        "page_width": 595.3,
+        "page_height": 841.9,
+        "category_id": 2,
+        "block_type": "table",
+        "source": filename,
+        "table_caption": caption,
+        "table_img_path": img_path,
+        "table_content": table_content
+    }
 
 
 def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = '') -> List[Dict[str, Any]]:
@@ -1845,81 +1892,176 @@ def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = ''
 
     # ---- 2. 表格：content[] + preproc_blocks 联合 ----
     # preproc_blocks.type=table 有 bbox，通过 img_path 精确匹配
-    # 格式：content img_path = "images/xxx.jpg", preproc_blocks img_path = "xxx.jpg"
+    # 优先用 table_body 的 bbox（不含 caption），fallback 到 outer bbox
     table_bboxes_by_img: dict[tuple, list] = {}
     table_first_by_page: dict[int, list] = {}
     for page_info in pdf_info_list:
         page_idx = page_info.get('page_idx', 0)
-        first_bbox = None
+        first_body_bbox = None
         for block in page_info.get('preproc_blocks', []):
             if block.get('type') != 'table':
                 continue
-            bbox = block.get('bbox', [])
-            if not bbox or len(bbox) < 4:
+            outer_bbox = block.get('bbox', [])
+            if not outer_bbox or len(outer_bbox) < 4:
                 continue
             # 收集 img_path 作为匹配 key
             img_keys = set()
+            table_body_bbox = None
             for sub in block.get('blocks', []):
+                if sub.get('type') == 'table_body':
+                    table_body_bbox = sub.get('bbox', [])
                 for line in sub.get('lines', []):
                     for span in line.get('spans', []):
                         if span.get('image_path'):
                             img_keys.add(span['image_path'])
+            # 优先用 table_body bbox（不含 caption），无则用 outer bbox
+            use_bbox = table_body_bbox if table_body_bbox and len(table_body_bbox) >= 4 else outer_bbox
             for k in img_keys:
-                table_bboxes_by_img[(page_idx, k)] = bbox
-            if first_bbox is None:
-                first_bbox = bbox
-        if first_bbox is not None:
-            table_first_by_page[page_idx] = first_bbox
+                table_bboxes_by_img[(page_idx, k)] = use_bbox
+            if first_body_bbox is None:
+                first_body_bbox = use_bbox
+        if first_body_bbox is not None:
+            table_first_by_page[page_idx] = first_body_bbox
 
     for item in mineru_data.get('content', []):
         if item.get('type') != 'table':
             continue
-        page_idx = item.get('page_idx', 0)
-        page_w, page_h = page_sizes.get(page_idx, [595, 842])
-        caption = item.get('table_caption', '') or ''
-        img_path = item.get('img_path', '') or ''
-
-        # 通过 img_path 精确匹配 bbox
-        bbox = []
-        img_key = img_path.split('/')[-1].split('.')[0]
-        for (pi, k), b in table_bboxes_by_img.items():
-            if pi == page_idx and img_key in k:
-                bbox = b
-                break
-        # 找不到则 fallback 到该页第一个 table bbox
-        if not bbox and page_idx in table_first_by_page:
-            bbox = table_first_by_page[page_idx]
-
-        # 用 PyMuPDF 提取表格文字
-        table_content = _extract_table_text_from_pdf(pdf_path, page_idx, bbox) if pdf_path and bbox else ''
-
-        chunks.append({
-            "chunk_id": f"chunk_{len(chunks)}",
-            "page_idx": page_idx,
-            "type": "table",
-            "content": caption or '[表格]',
-            "bbox_pdf": bbox,
-            "bbox_viewport": bbox,
-            "page_width": page_w,
-            "page_height": page_h,
-            "category_id": 2,
-            "block_type": "table",
-            "source": filename,
-            "table_caption": caption,
-            "table_img_path": img_path,
-            "table_content": table_content
-        })
+        page_w, page_h = page_sizes.get(item.get('page_idx', 0), [595, 842])
+        chunk = _build_table_chunk(
+            item, table_bboxes_by_img, table_first_by_page, pdf_path, filename
+        )
+        chunk["chunk_id"] = f"chunk_{len(chunks)}"
+        chunk["page_width"] = page_w
+        chunk["page_height"] = page_h
+        chunks.append(chunk)
 
     return chunks
+
+
+_pps_table_engine = None
+_pps_table_engine_lock = threading.Lock()
+
+
+def _get_pps_table_engine():
+    """
+    获取全局 PPStructure 表格识别引擎（线程安全单例）。
+
+    使用本地 paddle_model 目录下的模型，GPU/CPU 自适应。
+    """
+    global _pps_table_engine
+    if _pps_table_engine is not None:
+        return _pps_table_engine
+
+    with _pps_table_engine_lock:
+        if _pps_table_engine is not None:
+            return _pps_table_engine
+
+        import os as _os
+        import sys as _sys
+        import io as _io
+
+        # 强制 UTF-8 stdout
+        if _sys.stdout.encoding != 'utf-8':
+            _sys.stdout = _io.TextIOWrapper(_sys.stdout.buffer, encoding='utf-8')
+
+        # 禁用 OneDNN / MKLDNN 避免 Filter 错误
+        _os.environ['FLAGS_use_mkldnn'] = '0'
+        _os.environ['FLAGS_fused_conv_bn_pass'] = '0'
+        _os.environ['FLAGS_fused_conv_add_act_pass'] = '0'
+        _os.environ['FLAGS_cudnn_exhaustive_search'] = '0'
+        _os.environ['FLAGS_max_inplace_grad_add'] = '0'
+        _os.environ['noavx'] = 'true'
+
+        import paddle
+        paddle.set_flags({'FLAGS_use_mkldnn': False})
+
+        _use_gpu = paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
+        paddle.set_device('gpu:0' if _use_gpu else 'cpu')
+        paddle.disable_static()
+
+        from paddleocr import PPStructure
+
+        # 本地模型路径
+        _base = _os.path.join(_os.path.dirname(_sys.modules[__name__].__file__), '..', 'paddle_model')
+        _det_model = _os.path.join(_base, 'det', 'ch', 'ch_PP-OCRv4_det_infer')
+        _rec_model = _os.path.join(_base, 'rec', 'ch', 'ch_PP-OCRv4_rec_infer')
+        _table_model = _os.path.join(_base, 'table', 'ch_ppstructure_mobile_v2.0_SLANet_infer')
+        _cls_model = _os.path.join(_base, 'cls', 'ch_ppocr_mobile_v2.0_cls_infer')
+
+        def _model_exists(p):
+            """检查模型目录是否存在且包含 .pdmodel 文件"""
+            if _os.path.exists(p):
+                return bool(_os.listdir(p))
+            return False
+
+        _pps_table_engine = PPStructure(
+            layout=False,           # 关闭版面分析，只用表格识别
+            table=True,
+            lang='ch',
+            show_log=False,
+            return_ocr_result_in_table=True,
+            use_gpu=_use_gpu,
+            use_angle_cls=False,    # cls 模型可能导致 OneDNN 错误，关闭
+            enable_mkldnn=False,
+            cpu_threads=4,
+            det_db_thresh=0.3,
+            det_db_box_thresh=0.5,
+            det_db_unclip_ratio=1.6,
+            det_model_dir=_det_model if _os.path.exists(_det_model) else None,
+            rec_model_dir=_rec_model if _os.path.exists(_rec_model) else None,
+            table_model_dir=_table_model if _os.path.exists(_table_model) else None,
+            cls_model_dir=_cls_model if _os.path.exists(_cls_model) else None,
+        )
+
+        logger.info(f"[PPStructure] 引擎初始化完成 (GPU={_use_gpu})")
+        return _pps_table_engine
+
+
+def _html_table_to_markdown(html_table: str) -> str:
+    """
+    将 PPStructure 返回的 HTML 表格转换为 Markdown 格式。
+
+    HTML 结构示例:
+    <table><thead><tr><th>xx</th>...</tr></thead><tbody><tr><td>xx</td>...</tr>...</tbody></table>
+    """
+    import re as _re
+
+    rows = []
+    # 提取所有 <tr>...</tr>
+    tr_pattern = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL)
+    # 提取单元格内容，支持 <th> 和 <td>
+    cell_pattern = _re.compile(r'<t[hd][^>]*>(.*?)</t[hd]>', _re.DOTALL)
+    # 清理标签内残留的换行和多余空格
+    clean = _re.compile(r'\s+')
+
+    for tr in tr_pattern.findall(html_table):
+        cells = cell_pattern.findall(tr)
+        clean_cells = []
+        for cell in cells:
+            text = clean.sub(' ', cell).strip()
+            # 保留 | 符号本身
+            text = text.replace('|', '｜')
+            clean_cells.append(text)
+        if clean_cells:
+            rows.append('| ' + ' | '.join(clean_cells) + ' |')
+
+    if not rows:
+        return ''
+
+    # 生成表头分隔行
+    col_count = rows[0].count('|') - 1
+    sep = '| ' + ' | '.join(['---'] * col_count) + ' |'
+    return '\n'.join([rows[0], sep] + rows[1:])
 
 
 def _extract_table_text_from_pdf(
     pdf_path: str,
     page_idx: int,
-    bbox: list
+    bbox: list,
+    caption: str = ''
 ) -> str:
     """
-    用 Tesseract OCR 从 PDF 指定区域提取表格文字。
+    用 PaddleOCR PPStructure 从 PDF 指定区域提取表格内容。
 
     Args:
         pdf_path: PDF 文件路径
@@ -1927,67 +2069,82 @@ def _extract_table_text_from_pdf(
         bbox: [x0, y0, x1, y1] PDF 坐标系
 
     Returns:
-        OCR 提取的文字，失败时返回空字符串
+        Markdown 格式的表格文字，失败时返回空字符串
     """
     try:
         import fitz
         import tempfile
         import os
-        import subprocess
-    except ImportError:
+        import cv2
+        import numpy as np
+    except ImportError as e:
+        logger.warning(f"[PPStructure] 依赖缺失: {e}")
         return ''
 
     try:
-        tesseract_exe = 'C:/Program Files/Tesseract-OCR/tesseract.exe'
-        if not os.path.exists(tesseract_exe):
-            return ''
-
         doc = fitz.open(pdf_path)
         if page_idx < 0 or page_idx >= len(doc):
             doc.close()
             return ''
+
         if not bbox or len(bbox) < 4:
             doc.close()
             return ''
 
         x0, y0_pdf, x1, y1_pdf = bbox
-        page_h = doc[page_idx].rect.height
 
-        # PDF y 坐标从底部起，PyMuPDF clip 用 top-left 坐标
-        clip = fitz.Rect(x0, page_h - y1_pdf, x1, page_h - y0_pdf)
+        # bbox 是 top-left 坐标系，直接作为 PyMuPDF clip
+        clip = fitz.Rect(x0, y0_pdf, x1, y1_pdf)
         if clip.width <= 0 or clip.height <= 0:
+            logger.warning(
+                f"[PPStructure] clip 无效: bbox=[{x0},{y0_pdf},{x1},{y1_pdf}]"
+            )
             doc.close()
             return ''
 
-        # 4x 渲染提升 OCR 精度
-        pix = doc[page_idx].get_pixmap(matrix=fitz.Matrix(4.0, 4.0), clip=clip)
+        logger.info(
+            f"[PPStructure] 裁剪: caption={caption[:30] if caption else '(空)'}, "
+            f"bbox=[{x0},{y0_pdf},{x1},{y1_pdf}], clip=[{clip.x0:.1f},{clip.y0:.1f},{clip.x1:.1f},{clip.y1:.1f}]"
+        )
+
+        # 3x 渲染
+        pix = doc[page_idx].get_pixmap(matrix=fitz.Matrix(3.0, 3.0), clip=clip)
         doc.close()
 
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-            img_path = f.name
-        try:
-            pix.save(img_path)
+        # 转 numpy BGR 图像
+        img_bytes = pix.samples
+        img = np.frombuffer(img_bytes, dtype=np.uint8).reshape(pix.height, pix.width, 3)
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-            tessdata_dir = 'C:/Users/ChenRui/AppData/Local/Temp'
-            cmd = [
-                tesseract_exe, img_path, 'stdout',
-                '--tessdata-dir', tessdata_dir,
-                '-l', 'chi_sim',
-                '--psm', '6'
-            ]
-            result = subprocess.run(
-                cmd, capture_output=True, timeout=30
-            )
-            text = result.stdout.decode('utf-8', errors='replace').strip()
-            lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
-            return '\n'.join(lines)
-        finally:
-            try:
-                os.unlink(img_path)
-            except Exception:
-                pass
+        # 调用 PPStructure 表格识别
+        engine = _get_pps_table_engine()
+        result = engine(img)
+        logger.info(f"[PPStructure] caption={caption[:30] if caption else '(空)'}, 返回 {len(result)} 个结果: {[r.get('type') for r in result]}")
 
-    except Exception:
+        # 解析结果：取 type=table 的条目
+        for item in result:
+            if item.get('type') == 'table':
+                html = item.get('res', {}).get('html', '')
+                if html:
+                    logger.info(f"[PPStructure] caption={caption[:30] if caption else '(空)'}, 识别到表格 HTML，长度={len(html)}")
+                    return _html_table_to_markdown(html)
+
+        # 备选：取文本结果
+        texts = []
+        for item in result:
+            if item.get('type') in ('text', 'table'):
+                bbox_val = item.get('bbox', [])
+                text = item.get('res', {}).get('text', '')
+                if text and bbox_val:
+                    texts.append(text)
+                    logger.info(f"[PPStructure] caption={caption[:30] if caption else '(空)'}, 备选文本: {text[:100]}")
+        if texts:
+            return '\n'.join(texts)
+
+        return ''
+
+    except Exception as e:
+        logger.warning(f"[PPStructure] caption={caption[:30] if caption else '(空)'}, 表格提取失败 page={page_idx} bbox={bbox}: {e}")
         return ''
 
 
