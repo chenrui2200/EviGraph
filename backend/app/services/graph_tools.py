@@ -889,6 +889,154 @@ Your response:"""
             total_facts=total_facts,
         )
 
+    def search_with_intent_guided_dfs_flow(
+        self,
+        graph_ids: List[str],
+        query: str,
+        intent,
+        limit: int = 10,
+        max_depth: int = 3,
+        root_types: List[str] = None,
+    ) -> ObjectFirstSearchResult:
+        """
+        意图引导的 DFS 检索流程。
+
+        与 search_with_dfs_flow 的区别：
+        - 意图解析后，对每个 intent 字段（component/action/obj/condition）
+          分别作为关键词搜索 Object/Term 根节点
+        - DFS 遍历时通过 edge_type_filter 优先走 intent 匹配的边类型
+
+        Args:
+            graph_ids: 图谱 ID 列表
+            query: 原始查询
+            intent: QueryIntent 实例
+            limit: 最大返回行数
+            max_depth: DFS 最大深度
+            root_types: 根节点类型，默认 ["Object", "Term"]
+        """
+        from .query_intent_parser import QueryIntent
+
+        logger.info(
+            f"search_with_intent_guided_dfs_flow: intent=component={intent.component}, "
+            f"action={intent.action}, obj={intent.obj}, condition={intent.condition}, "
+            f"confidence={intent.confidence}, type={intent.type}"
+        )
+
+        if root_types is None:
+            root_types = ["Object", "Term"]
+
+        # 从 intent 提取搜索关键词
+        keywords = intent.to_search_keywords()
+        if not keywords:
+            # fallback: 用原始 query
+            keywords = [query]
+
+        # 根据 intent type 推断需要优先遍历的边类型
+        preferred_edge_types = []
+        if intent.type == "requirement":
+            preferred_edge_types = ["MANDATES", "RECOMMENDS", "PROHIBITS"]
+        elif intent.type == "prohibition":
+            preferred_edge_types = ["PROHIBITS"]
+        elif intent.type == "condition":
+            preferred_edge_types = ["HAS_CONDITION", "IN_SITUATION"]
+        elif intent.type == "definition":
+            preferred_edge_types = ["DEFINES"]
+        # requirement 字段也提供边类型
+        preferred_edge_types.extend(intent.to_edge_types())
+        # 去重
+        preferred_edge_types = list(dict.fromkeys(preferred_edge_types))
+
+        all_rows: List[ObjectFirstRow] = []
+        seen_fact_texts: set = set()
+        seen_root_uuids: set = set()  # 去重根节点
+
+        # 对每个关键词搜索根节点
+        for keyword in keywords:
+            for graph_id in graph_ids:
+                # Object 根节点搜索
+                if "Object" in root_types:
+                    object_roots = self.storage.search_object_nodes(
+                        graph_id=graph_id,
+                        query=keyword,
+                        limit=limit,
+                    )
+                    for obj_node in object_roots:
+                        obj_uuid = obj_node.get("uuid", "")
+                        if not obj_uuid or obj_uuid in seen_root_uuids:
+                            continue
+                        seen_root_uuids.add(obj_uuid)
+                        root_score = (obj_node.get("score", 0)) * 100
+                        row = self._dfs_from_object(
+                            graph_id=graph_id,
+                            object_uuid=obj_uuid,
+                            object_data=obj_node,
+                            max_depth=max_depth,
+                            seen_fact_texts=seen_fact_texts,
+                            root_score=root_score,
+                            edge_type_filter=preferred_edge_types if preferred_edge_types else None,
+                        )
+                        all_rows.append(row)
+
+                # Term 根节点搜索
+                if "Term" in root_types:
+                    term_roots = self.storage.search_term_nodes(
+                        graph_id=graph_id,
+                        query=keyword,
+                        limit=limit,
+                    )
+                    for term_node in term_roots:
+                        term_uuid = term_node.get("uuid", "")
+                        if not term_uuid or term_uuid in seen_root_uuids:
+                            continue
+                        seen_root_uuids.add(term_uuid)
+                        root_score = (term_node.get("score", 0)) * 100
+                        row = self._dfs_from_object(
+                            graph_id=graph_id,
+                            object_uuid=term_uuid,
+                            object_data=term_node,
+                            max_depth=max_depth,
+                            seen_fact_texts=seen_fact_texts,
+                            root_score=root_score,
+                            edge_type_filter=preferred_edge_types if preferred_edge_types else None,
+                        )
+                        all_rows.append(row)
+
+        if not all_rows:
+            return ObjectFirstSearchResult(
+                query=query,
+                rows=[],
+                total_objects=0,
+                total_facts=0,
+            )
+
+        # LLM 重排
+        scored_rows = self._rerank_object_rows(query, all_rows)
+        final_rows = scored_rows[:limit]
+
+        # 批量 PDF 信息
+        if final_rows:
+            root_uuids = [row.object_node.get("uuid") for row in final_rows]
+            root_uuids = [uid for uid in root_uuids if uid]
+            if root_uuids:
+                batch_pdf_info = self._batch_get_node_pdf_info(root_uuids)
+                for row in final_rows:
+                    root_uuid = row.object_node.get("uuid")
+                    if root_uuid and root_uuid in batch_pdf_info:
+                        row.object_node["pdf_info"] = batch_pdf_info[root_uuid]
+
+        total_facts = sum(len(row.facts) for row in final_rows)
+        logger.info(
+            f"search_with_intent_guided_dfs_flow complete: "
+            f"rows={len(final_rows)}, facts={total_facts}, "
+            f"keywords={keywords}, edge_types={preferred_edge_types}"
+        )
+        return ObjectFirstSearchResult(
+            query=query,
+            rows=final_rows,
+            total_objects=len(final_rows),
+            total_facts=total_facts,
+        )
+
     def run_retrieval_flow(
         self,
         final_rows: List[ObjectFirstRow],
@@ -1497,6 +1645,7 @@ Your response:"""
         max_depth: int,
         seen_fact_texts: set,
         root_score: float = 0.0,
+        edge_type_filter: Optional[List[str]] = None,
     ) -> ObjectFirstRow:
         """
         从一个 Object 节点执行优化的迭代 DFS 遍历，收集所有关联节点和边。
@@ -1574,7 +1723,16 @@ Your response:"""
 
                 neighbor_uuid = tgt_uuid
 
-                # Add edge to traversal path
+                # Intent-guided edge filtering:
+                # - If edge_type_filter is set, prefer matching edges by expanding them
+                # - Non-matching edges are still added to traversal_edges as context
+                #   but their neighbors are NOT pushed to the DFS stack (no further expansion)
+                is_matching_edge = (
+                    not edge_type_filter
+                    or edge_name in edge_type_filter
+                )
+
+                # Add edge to traversal path (always, for context)
                 traversal_edges.append(ObjectPathEdge(
                     uuid=edge_uuid,
                     name=edge_name,
@@ -1584,8 +1742,8 @@ Your response:"""
                     depth=depth,
                 ))
 
-                # Collect neighbor for Phase 2 batch fetch (avoid recursive get_node call here)
-                if neighbor_uuid and neighbor_uuid not in visited:
+                # Collect neighbor for Phase 2 batch fetch only if edge matches intent filter
+                if neighbor_uuid and neighbor_uuid not in visited and is_matching_edge:
                     pending_neighbor_info.append((neighbor_uuid, depth + 1, edge, edge_fact, edge_name, src_uuid, tgt_uuid))
 
                 # Process fact text inline (fact generation does NOT need neighbor data)

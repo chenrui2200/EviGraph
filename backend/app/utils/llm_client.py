@@ -46,8 +46,8 @@ class LLMClient:
         if not self.api_key:
             raise ValueError("LLM_API_KEY not configured")
 
-        # Ollama context window size
-        self._num_ctx = int(os.environ.get('OLLAMA_NUM_CTX', '8192'))
+        # Ollama context window size（优化：默认 8192→16384，匹配更大批次输入）
+        self._num_ctx = int(os.environ.get('OLLAMA_NUM_CTX', '16384'))
 
     @property
     def client(self) -> OpenAI:

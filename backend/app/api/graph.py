@@ -3700,14 +3700,51 @@ def ai_qa():
             from ..utils.llm_client import LLMClient
             llm = LLMClient()
 
+            # ===== Stage 0: 意图解析 =====
+            intent = None
+            intent_data = None
+            try:
+                from ..services.query_intent_parser import QueryIntentParser
+                parser = QueryIntentParser()
+                intent = parser.parse(query)
+                intent_data = {
+                    'type': intent.type,
+                    'component': intent.component,
+                    'action': intent.action,
+                    'obj': intent.obj,
+                    'condition': intent.condition,
+                    'requirement': intent.requirement,
+                    'confidence': intent.confidence,
+                }
+                logger.info(f"[Stage 0] Intent parsed: component={intent.component}, "
+                            f"action={intent.action}, obj={intent.obj}, "
+                            f"confidence={intent.confidence:.2f}")
+            except Exception as e:
+                logger.warning(f"[Stage 0] Intent parsing failed: {e}")
+
+            # SSE 推送 intent 解析结果（供前端调试展示）
+            yield f"data: {json.dumps({'type': 'intent_parsed', 'data': intent_data}, ensure_ascii=False)}\n\n"
+
             # ===== Stage 1: 知识库检索 =====
             yield f"data: {json.dumps({'type': 'retrieval_start'})}\n\n"
             retrieval_start = time.time()
 
-            dfs_result = tools.search_with_dfs_flow(
-                graph_ids=graph_ids, query=query, limit=20, max_depth=max_depth,
-                root_types=root_types
+            # 3-tier fallback: 意图有效（置信度>=0.6 且非空）→ 引导搜索；否则 → 原 DFS
+            use_intent = (
+                intent is not None
+                and not intent.is_empty()
+                and intent.confidence >= 0.6
             )
+            if use_intent:
+                dfs_result = tools.search_with_intent_guided_dfs_flow(
+                    graph_ids=graph_ids, query=query, intent=intent,
+                    limit=20, max_depth=max_depth, root_types=root_types
+                )
+            else:
+                dfs_result = tools.search_with_dfs_flow(
+                    graph_ids=graph_ids, query=query, limit=20, max_depth=max_depth,
+                    root_types=root_types
+                )
             ret_dur = round(time.time() - retrieval_start, 2)
 
             # 相似度阈值过滤 rows（参考 HitTest：按 relevance_score 过滤）

@@ -222,6 +222,8 @@ const updatePhaseByStatus = (status) => {
     case 'graph_embedding':
     case 'graph_indexing':
       currentPhase.value = 1; break; // Graph build in progress
+    case 'graph_chunked':
+      currentPhase.value = 0; break; // Chunks ready, Step 01 is active (show start-build button)
     case 'graph_completed':
       currentPhase.value = 2; break;
     case 'failed':
@@ -286,10 +288,17 @@ const fetchGraphData = async () => {
     if (projRes.success && projRes.data.graph_id) {
       const gRes = await getGraphData(projRes.data.graph_id)
       if (gRes.success) {
-        graphData.value = gRes.data
-        const nodeCount = gRes.data.node_count || gRes.data.nodes?.length || 0
-        const edgeCount = gRes.data.edge_count || gRes.data.edges?.length || 0
-        addLog(`Graph data refreshed. Nodes: ${nodeCount}, Edges: ${edgeCount}`)
+        const newNodeCount = gRes.data.node_count || gRes.data.nodes?.length || 0
+        const newEdgeCount = gRes.data.edge_count || gRes.data.edges?.length || 0
+        const oldNodeCount = graphData.value?.node_count || graphData.value?.nodes?.length || 0
+        const oldEdgeCount = graphData.value?.edge_count || graphData.value?.edges?.length || 0
+        // Only log when node/edge count actually changes
+        if (newNodeCount !== oldNodeCount || newEdgeCount !== oldEdgeCount) {
+          graphData.value = gRes.data
+          addLog(`Graph data refreshed. Nodes: ${newNodeCount}, Edges: ${newEdgeCount}`)
+        } else {
+          graphData.value = gRes.data
+        }
       }
     }
   } catch (err) {

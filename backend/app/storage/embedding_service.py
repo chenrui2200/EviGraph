@@ -40,6 +40,9 @@ class EmbeddingService:
         elif "11434" in self.base_url or "ollama" in self.base_url.lower():
             self.provider = "ollama"
             self._embed_url = f"{self.base_url}/api/embed"
+        elif "3020" in self.base_url or "/embed" in self.base_url:
+            self.provider = "custom_embed"
+            self._embed_url = f"{self.base_url.rstrip('/')}/embed"
         else:
             self.provider = "online"
             self._embed_url = self.base_url
@@ -114,6 +117,8 @@ class EmbeddingService:
         # Handle different input keys based on provider
         if self.provider == "nomic":
             payload["texts"] = texts
+        elif self.provider == "custom_embed":
+            payload["inputs"] = texts
         else:
             payload["input"] = texts
 
@@ -158,6 +163,9 @@ class EmbeddingService:
                 elif "data" in data and isinstance(data["data"], list):
                     # OpenAI format
                     embeddings = [item["embedding"] for item in data["data"]]
+                elif self.provider == "custom_embed" and "result" in data:
+                    # Custom embed endpoint format: {"result": [[...], [...]]}
+                    embeddings = data["result"]
                 elif isinstance(data, list):
                     # Direct list format
                     embeddings = data

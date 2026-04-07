@@ -23,6 +23,7 @@ import logging
 import re
 import time
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional, Callable
 from dataclasses import asdict
 from datetime import datetime
@@ -343,16 +344,30 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 
 来源：{source}
 
-1. **核心**：使用 `triplets` 数组提取语义三元组，不要用平行列表！
-2. **术语章节（如"2.0.5 直接接触防护"）需特殊处理**，在 terms 字段中返回术语定义，triplets 设为 []。
-3. **款/项（如"1、"、"2、"）应作为 clause_items 独立提取**，每个款/项单独抽取三元组。
-4. **OCR 文本中的 # 前缀不是条文内容**，忽略即可。
-5. **表格引用**（如 `<table>...</table>` 或 "表3.2.2"）放入 referenced_tables。
-6. **公式引用**（如 "公式（3.2.14）" 或 "$...$"）放入 referenced_formulas 和 formula_content。
-7. **三元组不要编造**，只在条文中明确出现的 component/action/obj 才提取。
+## 关键规则
+1. **语义三元组**：使用 `triplets` 数组，`component → action → obj` 结构，**不要用 components/actions 平行列表**
+2. **术语章节**（编号 X.0.N）：在 terms 字段返回术语定义，triplets 设为 []
+3. **款/项**（"1、"、"2、"）：作为 clause_items 独立提取
+4. **OCR # 前缀**不是条文内容，忽略
+5. **表格/公式引用**放入 referenced_tables / referenced_formulas
+6. 三元组只提取条文中明确出现的 component/action/obj，宁缺毋滥
 
+## 要求类型
+- mandatory: 必须、应、须
+- recommended: 建议、宜
+- prohibited: 严禁、不得、禁止
 
-请输出 JSON 格式：
+## 正确三元组示例
+- "应设置剩余电流保护电器" → {"component": "配电系统", "action": "设置", "obj": "剩余电流保护电器"}
+- "严禁使用TN-C系统" → {"component": "配电系统", "action": "使用", "obj": "TN-C系统", "requirement": "prohibited"}
+- "电缆应敷设在电缆桥架内" → {"component": "电缆", "action": "敷设", "obj": "电缆桥架"}
+- "导体应承受热稳定" → {"component": "导体", "action": "承受", "obj": "热稳定"}
+
+## 术语章节示例（X.0.N）
+原文：`2.0.5 直接接触防护 无故障条件下的电击防护。`
+→ is_term_definition: true, terms: [{"term_name": "直接接触防护", "definition": "无故障条件下的电击防护"}]
+
+请输出 JSON：
 ```json
 {{
     "clauses": [
@@ -363,7 +378,6 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             "requirement_type": "mandatory",
             "is_term_definition": false,
             "triplets": [
-                {{"component": "导体", "action": "承受", "obj": "线路保护", "condition": "过负荷时", "requirement": "mandatory"}},
                 {{"component": "导体", "action": "选用", "obj": "截面积", "condition": "", "requirement": "mandatory"}}
             ],
             "terms": [],
@@ -383,66 +397,6 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
     ]
 }}
 ```
-
-示例条文解析：
-
-**普通条文**：
-原文："低压配电设计所选用的电器，应符合国家现行的有关产品标准"
-错误提取（不要这样）：
-- triplets: [{"component": "电器", "action": "选用", "obj": ""}, {"component": "", "action": "符合", "obj": "产品标准"}]  ← 编造了空字段
-
-正确提取：
-- clause_id: "3.1.1"
-- triplets: [{"component": "电器", "action": "选用", "obj": "国家标准"}]  ← 单一准确三元组
-
-**更多正确三元组示例**：
-- "应设置剩余电流保护电器" → {"component": "配电系统", "action": "设置", "obj": "剩余电流保护电器"}
-- "采用阻燃电缆" → {"component": "线路", "action": "采用", "obj": "阻燃电缆"}
-- "严禁使用TN-C系统" → {"component": "配电系统", "action": "使用", "obj": "TN-C系统", "requirement": "prohibited"}
-- "电缆应敷设在电缆桥架内" → {"component": "电缆", "action": "敷设", "obj": "电缆桥架"}
-
-**普通条文**：
-原文："低压配电设计所选用的电器，应符合国家现行的有关产品标准"
-错误提取（不要这样）：
-- actions: ["选用", "符合"]  ← "符合"不是动作，是状态描述
-
-正确提取：
-- clause_id: "3.1.1"
-- components: ["电器"]
-- actions: ["选用"]  ← "选用"是实操动作，保留
-- objects: ["产品标准"]  ← "符合"应归为objects
-- conditions: []
-
-更多正确示例：
-- "应设置剩余电流保护电器" → actions: ["设置"]，components: ["剩余电流保护电器"]
-- "采用阻燃电缆" → actions: ["采用"]，components: ["阻燃电缆"]
-- "严禁使用TN-C系统" → actions: ["使用"]，conditions: ["TN-C系统"]，requirement_type: "prohibited"
-
-**术语章节**（第2章，格式如 2.0.x）：
-原文：
-```
-2.0.5 直接接触防护
-无故障条件下的电击防护。
-```
-正确提取：
-- clause_id: "2.0.5"
-- clause_title: "直接接触防护"
-- clause_content: "无故障条件下的电击防护"
-- is_term_definition: true
-- terms: [{{"term_name": "直接接触防护", "definition": "无故障条件下的电击防护"}}]
-- actions: []，conditions: []，components: [] ← 术语章节不提取这些！
-
-原文：
-```
-2.0.12 预期接触电压
-人或动物尚未接触到可导电部分时，可能同时触及的可导电部分之间的电压。
-```
-正确提取：
-- clause_id: "2.0.12"
-- clause_title: "预期接触电压"
-- clause_content: "人或动物尚未接触到可导电部分时，可能同时触及的可导电部分之间的电压"
-- is_term_definition: true
-- terms: [{{"term_name": "预期接触电压", "definition": "人或动物尚未接触到可导电部分时，可能同时触及的可导电部分之间的电压"}}]
 
 如果没有发现条文，返回：
 ```json
@@ -582,7 +536,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
     RETRY_MULTIPLIER = 2               # 延迟倍增因子
 
     # Token 限制
-    MAX_CHARS_PER_CHAPTER = 3000        # 每章节最大字符数
+    MAX_CHARS_PER_CHAPTER = 12000       # 每章节最大字符数（优化：从3000→12000，减少调用次数）
     MAX_CHARS_FOR_TOC = 8000           # 目录识别最大字符数
 
     def __init__(
@@ -1016,23 +970,24 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             # 提取该章节的文本
             chapter_text = full_text[start_pos:end_pos]
 
-            # 提取章节内的条文
-            clause_start = time.time()
-            self.logger.info(f"[LLM分块]   → LLM 提取条文中...")
-            chapter_clauses = self._extract_clauses_from_chapter(
-                chapter_text, source_info, chapter_num
-            )
-            clause_time = time.time() - clause_start
-            self.logger.info(f"[LLM分块]   ← 条文提取完成: {len(chapter_clauses)} 条 (耗时 {clause_time:.1f}s)")
+            # 提取章节内的条文 + 要素（优化：并行执行，两个 LLM 调用同时进行）
+            para_start = time.time()
+            self.logger.info(f"[LLM分块]   → LLM 并行提取条文 + 要素...")
 
-            # 提取章节内的要素
-            element_start = time.time()
-            self.logger.info(f"[LLM分块]   → LLM 提取要素中...")
-            chapter_elements = self._extract_elements_from_chapter(
-                chapter_text, chapter_clauses, chapter_num
-            )
-            element_time = time.time() - element_start
-            self.logger.info(f"[LLM分块]   ← 要素提取完成: {len(chapter_elements)} 个 (耗时 {element_time:.1f}s)")
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                f_clauses = executor.submit(
+                    self._extract_clauses_from_chapter,
+                    chapter_text, source_info, chapter_num
+                )
+                f_elements = executor.submit(
+                    self._extract_elements_from_chapter,
+                    chapter_text, [], chapter_num  # 要素提取不依赖条文结果，传空列表
+                )
+                chapter_clauses = f_clauses.result()
+                chapter_elements = f_elements.result()
+
+            para_time = time.time() - para_start
+            self.logger.info(f"[LLM分块]   ← 并行提取完成: {len(chapter_clauses)} 条文, {len(chapter_elements)} 要素 (耗时 {para_time:.1f}s)")
 
             # 为条文和要素标注 PDF 位置（基于字符偏移估算）
             annotated_elements = self._annotate_positions(
@@ -1071,7 +1026,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                 self._save_checkpoint(project_id, current_checkpoint)
 
             # 章节处理完成
-            chapter_time = time.time() - clause_start
+            chapter_time = time.time() - para_start
             self._report_progress(
                 (i + 1) / chapter_count * 0.6 + 0.1,
                 f"✅ 章节 {chapter_num} 完成: {len(chapter_clauses)} 条文, {len(chapter_elements)} 要素 (耗时 {chapter_time:.1f}s)",
