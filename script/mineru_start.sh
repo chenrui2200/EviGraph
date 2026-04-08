@@ -13,4 +13,4 @@ docker run -itd \
   --cap-add=SYS_NICE \
   --cap-add=IPC_LOCK \
   --security-opt seccomp=unconfined \
-  quincyqiang/mineru:0.1-models
+  quincyqiang/mineru:0.3-models

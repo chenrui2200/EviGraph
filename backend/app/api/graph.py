@@ -1902,18 +1902,21 @@ def _merge_bboxes(bboxes: List[list]) -> list:
     return [min(xs), min(ys), max(xe), max(ye)]
 
 
-def _merge_line_bboxes(lines: List[dict], page_idx: int) -> list:
+def _merge_line_bboxes(lines: List[dict], page_idx: int, block_bbox: list = None) -> list:
     """
     合并 lines 的 bbox，遇到跨页行（cross_page: true）时分组合并。
 
     MinerU 0.7.1 中 block.bbox 只有第一行位置，
     但跨页块中不同 page 的行 y 坐标完全不同，不能直接并集。
-    策略：cross_page 标记在 span 级别，找到跨页 span 后按 y 坐标中位数分组，
-    只取当前页所在的行（y 较大的那一半）并集。
+    策略：
+    1. 计算所有 lines bbox 的并集
+    2. 如果 block_bbox 高度 <= page_height(841)，说明块不跨页，直接返回并集
+    3. 如果 > page_height，真正跨页，取 y0 >= page_height - 50 的行并集
 
     Args:
         lines: MinerU preproc_blocks 中的 lines 列表
         page_idx: 当前 page_idx
+        block_bbox: MinerU block 的外层 bbox [x0, y0, x1, y1]，用于判断是否真正跨页
 
     Returns:
         合并后的 bbox [x0, y0, x1, y1]，跨页则取当前页所在行
@@ -1921,18 +1924,13 @@ def _merge_line_bboxes(lines: List[dict], page_idx: int) -> list:
     if not lines:
         return []
 
-    # 判断是否跨页：检查 span 级别是否有 cross_page 标记
-    def has_cross_page_span(line: dict) -> bool:
-        for span in line.get('spans', []):
-            if span.get('cross_page', False):
-                return True
-        return False
-
-    cross_page = any(has_cross_page_span(line) for line in lines)
-
-    if not cross_page:
-        # 正常情况：所有行同页，直接并集
-        return _merge_bboxes([line.get('bbox', []) for line in lines])
+    # 用 block_bbox（块外层 bbox）判断是否真正跨页
+    # MinerU PDF 一页高度约 841 像素
+    if block_bbox and len(block_bbox) >= 4:
+        bbox_height = block_bbox[3] - block_bbox[1]
+        if bbox_height <= 841:
+            # 块高度在一页以内，不跨页，直接并集
+            return _merge_bboxes([line.get('bbox', []) for line in lines if len(line.get('bbox', [])) >= 4])
 
     # 跨页情况：按 y 坐标中位数分组
     # MinerU PDF 坐标：y 从上到下递增（约 0-841 为一页）
@@ -1990,7 +1988,7 @@ def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = ''
             if not lines_text:
                 continue
             # 取所有 lines bbox 的并集，跨页时分组处理
-            bbox = _merge_line_bboxes(lines, page_idx)
+            bbox = _merge_line_bboxes(lines, page_idx, block.get('bbox', []))
             chunks.append({
                 "chunk_id": f"chunk_{len(chunks)}",
                 "page_idx": page_idx,
@@ -2020,7 +2018,7 @@ def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = ''
             img_path = ''
             table_body_bbox = None
             # outer_bbox 取所有 lines bbox 的并集，跨页时分组处理
-            outer_bbox = _merge_line_bboxes(block.get('lines', []), page_idx)
+            outer_bbox = _merge_line_bboxes(block.get('lines', []), page_idx, block.get('bbox', []))
 
             for sub in block.get('blocks', []):
                 sub_type = sub.get('type', '')
