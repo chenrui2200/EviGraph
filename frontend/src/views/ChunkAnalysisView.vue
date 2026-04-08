@@ -629,12 +629,14 @@ const pageAnnotationsCache = computed(() => {
   // MinerU 模式标注
   if (mineruMode.value && mineruChunks.value.length) {
     for (const c of mineruChunks.value) {
+      const bbox = c.bbox_viewport || c.bbox_pdf
+      if (!bbox || bbox.length < 4) continue  // 跳过无有效 bbox 的块，避免画出默认框
       const pageNum = (c.page_idx || 0) + 1
       if (!cache[pageNum]) cache[pageNum] = []
       cache[pageNum].push({
         clauseId: c.chunk_id,
         page: pageNum,
-        bbox: c.bbox_viewport || c.bbox_pdf || [0, 0, 100, 50],
+        bbox,
         type: c.type || 'text',
         categoryId: c.category_id || 1,
         isMineru: true
