@@ -1180,10 +1180,12 @@ function buildAnnotations() {
   for (const c of analysisData.value?.clauses || []) {
     const loc = c.pdf_location
     if (loc && loc.page) {
+      const bbox = loc.bbox
+      if (!bbox || bbox.length < 4) continue  // 跳过无有效 bbox 的标注
       anns.push({
         clauseId: c.clause_id,
         page: loc.page,
-        bbox: loc.bbox || [0, 0, 100, 50],
+        bbox,
         type: 'clause'
       })
     }
