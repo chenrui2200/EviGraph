@@ -288,14 +288,30 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                             message="Performing hierarchical semantic chunking...",
                             progress=5
                         )
-                        hierarchical_result = TextProcessor.hierarchical_chunk(initial_chunks)
+                        # 尝试获取 MinerU md_content 用于条款引用识别
+                        mineru_data = ProjectManager.get_mineru_parsed(project_id)
+                        md_content = None
+                        if mineru_data and mineru_data.get('files'):
+                            # 取第一个文件的 md_content
+                            first_file = next(iter(mineru_data['files'].values()), None)
+                            md_content = first_file.get('md_content') if first_file else None
+                        hierarchical_result = TextProcessor.hierarchical_chunk(
+                            initial_chunks,
+                            md_content=md_content,
+                            chunks_data=chunks_data
+                        )
                         total_chunks = hierarchical_result.total_chunks
                         build_logger.info(f"Hierarchical chunking complete: {total_chunks} chunks")
                     else:
                         # 最终降级：纯文本分块
                         build_logger.warning("chunks.json not found, falling back to plain text splitting")
                         text = ProjectManager.get_extracted_text(project_id)
-                        hierarchical_result = TextProcessor.hierarchical_chunk_text(text)
+                        mineru_data = ProjectManager.get_mineru_parsed(project_id)
+                        md_content = None
+                        if mineru_data and mineru_data.get('files'):
+                            first_file = next(iter(mineru_data['files'].values()), None)
+                            md_content = first_file.get('md_content') if first_file else None
+                        hierarchical_result = TextProcessor.hierarchical_chunk_text(text, md_content=md_content)
                         total_chunks = hierarchical_result.total_chunks
 
                 # Create graph (OR RESUME EXISTING)
@@ -2696,18 +2712,27 @@ def intelligent_chunk():
                         progress_detail=checkpoint_info or {}
                     )
 
-                chunker_logger.info(f"[{task_id}] LLM 智能语义分析开始（基于 MinerU chunks）...")
-                chunker_logger.info(f"[{task_id}] 待分析 chunks 数量: {len(text_chunks)}")
+                # 获取 MinerU md_content 用于条款引用识别和位置匹配
+                mineru_data = ProjectManager.get_mineru_parsed(project_id)
+                md_content = None
+                chunks_data_for_chunker = chunks_data
+                if mineru_data and mineru_data.get('files'):
+                    first_file = next(iter(mineru_data['files'].values()), None)
+                    md_content = first_file.get('md_content') if first_file else None
+
+                # 获取增强版检查点（用于恢复）
+                checkpoint = ProjectManager.get_chunk_checkpoint_v2(project_id)
+
+                chunker_logger.info(f"[{task_id}] LLM 智能语义分析开始...")
+                chunker_logger.info(f"[{task_id}] md_content 条款引用识别: {'已获取' if md_content else '未获取'}")
+                chunker_logger.info(f"[{task_id}] chunks_data 位置索引: {'已获取 ' + str(len(chunks_data_for_chunker)) + ' 条' if chunks_data_for_chunker else '未获取'}")
 
                 task_mgr.update_task(
                     task_id,
                     status=TaskStatus.PROCESSING,
                     progress=0,
-                    message="🚀 开始智能Chunks标注分析..."
+                    message="🚀 开始 LLM 语义分块（md_content 条款引用 + chunks 位置匹配）..."
                 )
-
-                # 获取增强版检查点（用于恢复）
-                checkpoint = ProjectManager.get_chunk_checkpoint_v2(project_id)
 
                 # 执行 LLM 标注分析（支持章节级断点恢复）
                 chunker = LLMDrivenChunker(progress_callback=progress_callback)
@@ -2715,7 +2740,9 @@ def intelligent_chunk():
                     text_chunks,
                     progress_callback,
                     checkpoint=checkpoint,
-                    project_id=project_id
+                    project_id=project_id,
+                    md_content=md_content,
+                    chunks_data=chunks_data_for_chunker
                 )
 
                 # 保存分块结果（尝试序列化，失败时用检查点兜底）

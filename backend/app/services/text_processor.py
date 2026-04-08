@@ -2,7 +2,7 @@
 Textatmanageserveservice
 """
 
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Dict, Any
 from ..utils.file_parser import FileParser, split_text_into_chunks, TextChunk
 
 
@@ -265,7 +265,9 @@ class TextProcessor:
         text_chunks: List[TextChunk],
         strategy: str = "full",
         use_llm: bool = True,
-        progress_callback=None
+        progress_callback=None,
+        md_content: Optional[str] = None,
+        chunks_data: Optional[List[Dict]] = None
     ) -> "HierarchicalChunkResult":
         """
         多层级语义分块 - 基于 LLM 的智能分块
@@ -280,6 +282,8 @@ class TextProcessor:
             strategy: 分块策略（暂未使用，保留兼容性）
             use_llm: 是否使用 LLM 驱动的分块器（必须，默认为 True）
             progress_callback: 进度回调函数，格式: callback(progress, message)
+            md_content: MinerU 解析的 Markdown 内容（用于条款引用识别）
+            chunks_data: chunks.json 数据（用于 clause→chunk 位置匹配）
 
         Returns:
             HierarchicalChunkResult: 包含所有层级分块的结果
@@ -293,7 +297,7 @@ class TextProcessor:
             logger.info(f"使用 LLM 驱动的分块器")
 
             chunker = LLMDrivenChunker(progress_callback=progress_callback)
-            return chunker.chunk(text_chunks, progress_callback)
+            return chunker.chunk(text_chunks, progress_callback, md_content=md_content, chunks_data=chunks_data)
 
         # 不再支持正则分块器作为回退
         raise NotImplementedError(
@@ -305,7 +309,9 @@ class TextProcessor:
     def hierarchical_chunk_text(
         text: str,
         use_llm: bool = True,
-        progress_callback=None
+        progress_callback=None,
+        md_content: Optional[str] = None,
+        chunks_data: Optional[List[Dict]] = None
     ) -> "HierarchicalChunkResult":
         """
         对单个文本进行多层级分块
@@ -314,6 +320,8 @@ class TextProcessor:
             text: 输入文本
             use_llm: 是否使用 LLM 驱动的分块器（必须，默认为 True）
             progress_callback: 进度回调函数
+            md_content: MinerU 解析的 Markdown 内容
+            chunks_data: chunks.json 数据
 
         Returns:
             HierarchicalChunkResult
@@ -327,7 +335,7 @@ class TextProcessor:
             logger.info(f"使用 LLM 驱动的分块器")
 
             chunker = LLMDrivenChunker(progress_callback=progress_callback)
-            return chunker.chunk_single_text(text, progress_callback)
+            return chunker.chunk_single_text(text, progress_callback, md_content=md_content, chunks_data=chunks_data)
 
         raise NotImplementedError(
             "LLM 驱动的分块是必须的，不再支持正则分块器。"

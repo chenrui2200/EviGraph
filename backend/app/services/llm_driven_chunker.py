@@ -789,6 +789,214 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         self.logger.info(f"[条款注册表] 构建完成: {len(registry)} 个条款")
         return registry
 
+    def _build_chunk_position_index(self, chunks: List[Dict]) -> Dict[str, Any]:
+        """
+        为 chunks.json 构建位置索引，供 clause 文本匹配使用。
+
+        索引结构：
+        - by_id: chunk_id → chunk
+        - by_clause_id: 条款编号 → chunk（从 title chunk 的 content 提取）
+        - by_page: page_idx → [chunks]
+        - text_ngrams: ngram(20字符) → [(chunk_id, char_pos)]
+        - by_table_caption: 表格编号 → table chunk（从 table_caption 提取）
+
+        Args:
+            chunks: chunks.json 中的 chunk 列表
+
+        Returns:
+            位置索引字典
+        """
+        index: Dict[str, Any] = {
+            'by_id': {},
+            'by_clause_id': {},
+            'by_page': {},
+            'text_ngrams': {},
+            'by_table_caption': {},
+        }
+
+        for chunk in chunks:
+            chunk_id = chunk.get('chunk_id', '')
+            chunk_type = chunk.get('type', '')
+            page_idx = chunk.get('page_idx', 0)
+            text = chunk.get('content', '') or ''
+            caption = chunk.get('table_caption', '') or ''
+
+            index['by_id'][chunk_id] = chunk
+
+            # 按 page_idx 分组
+            if page_idx not in index['by_page']:
+                index['by_page'][page_idx] = []
+            index['by_page'][page_idx].append(chunk)
+
+            # 从 title chunk 提取 clause_id（如 "3.2.5 配电线路..."）
+            if chunk_type == 'title' and text:
+                # 匹配 X.Y.Z 格式开头
+                m = re.match(r'^(\d+(?:\.\d+)+)\s+', text.strip())
+                if m:
+                    cid = m.group(1)
+                    if cid not in index['by_clause_id']:
+                        index['by_clause_id'][cid] = []
+                    index['by_clause_id'][cid].append(chunk)
+
+            # 从 text chunk 也提取（条款正文块可能以编号开头）
+            if chunk_type == 'text' and text:
+                m = re.match(r'^(\d+(?:\.\d+)+)\s+', text.strip())
+                if m:
+                    cid = m.group(1)
+                    if cid not in index['by_clause_id']:
+                        index['by_clause_id'][cid] = []
+                    index['by_clause_id'][cid].append(chunk)
+
+            # 从 table chunk 的 table_caption 提取表格编号
+            if chunk_type == 'table' and caption:
+                # "表3.2.2" 或 "表 3.2.2" 格式
+                m = re.search(r'表[ ]?([A-Z]?[\d\.]+)', caption)
+                if m:
+                    table_num = m.group(1)
+                    if table_num not in index['by_table_caption']:
+                        index['by_table_caption'][table_num] = []
+                    index['by_table_caption'][table_num].append(chunk)
+
+            # 构建 n-gram 倒排索引（20字符步长10）
+            for start in range(0, max(len(text) - 20, 0), 10):
+                ngram = text[start:start + 20]
+                if ngram not in index['text_ngrams']:
+                    index['text_ngrams'][ngram] = []
+                index['text_ngrams'][ngram].append((chunk_id, start))
+
+        self.logger.info(
+            f"[位置索引] 构建完成: {len(index['by_id'])} chunks, "
+            f"{len(index['by_clause_id'])} clause_id, "
+            f"{len(index['by_table_caption'])} table_caption, "
+            f"{len(index['text_ngrams'])} ngrams"
+        )
+        return index
+
+    def _resolve_clause_position(
+        self,
+        clause_id: str,
+        clause_text: str,
+        position_index: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        将 clause 文本匹配到 chunks.json 中的对应块，返回位置信息。
+
+        匹配策略（优先级递减）：
+        1. clause_id 精确匹配 → 直接命中 title/text chunk
+        2. 子串包含匹配 → clause_text 在 chunk.content 中
+        3. n-gram 交集匹配 → 统计共同 n-gram 数量
+
+        Args:
+            clause_id: 条款编号（如 "3.2.5"）
+            clause_text: 条款文本内容
+            position_index: _build_chunk_position_index 构建的索引
+
+        Returns:
+            位置信息字典（含 page_idx, bbox_pdf, chunk_id 等）
+        """
+        result: Dict[str, Any] = {}
+
+        # 策略1: clause_id 精确匹配 title chunk
+        if clause_id and clause_id in position_index['by_clause_id']:
+            chunks = position_index['by_clause_id'][clause_id]
+            # 优先选 title chunk，其次选 text chunk
+            best = next((c for c in chunks if c.get('type') == 'title'), chunks[0])
+            result = self._extract_position_from_chunk(best)
+            self.logger.debug(f"[位置解析] clause_id={clause_id} 策略1命中: chunk={best.get('chunk_id')}")
+            return result
+
+        # 策略2: 子串包含匹配
+        if clause_text:
+            clause_stripped = clause_text.strip()
+            best_match = None
+            best_ratio = 0.0
+
+            for chunk in position_index['by_id'].values():
+                chunk_text = (chunk.get('content') or '').strip()
+                if not chunk_text or len(chunk_text) < 10:
+                    continue
+                # 检查 clause_text 是否在 chunk_text 中
+                if clause_stripped in chunk_text:
+                    ratio = len(clause_stripped) / max(len(chunk_text), 1)
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_match = chunk
+
+            if best_match and best_ratio >= 0.3:
+                result = self._extract_position_from_chunk(best_match)
+                self.logger.debug(f"[位置解析] clause_id={clause_id} 策略2命中: ratio={best_ratio:.2f}")
+                return result
+
+            # 策略3: n-gram 交集匹配
+            ngram_matches: Dict[str, int] = {}
+            for start in range(0, max(len(clause_stripped) - 20, 0), 5):
+                ngram = clause_stripped[start:start + 20]
+                if ngram in position_index['text_ngrams']:
+                    for (chunk_id, _) in position_index['text_ngrams'][ngram]:
+                        ngram_matches[chunk_id] = ngram_matches.get(chunk_id, 0) + 1
+
+            if ngram_matches:
+                best_chunk_id = max(ngram_matches, key=ngram_matches.get)
+                best_count = ngram_matches[best_chunk_id]
+                if best_count >= 3:
+                    chunk = position_index['by_id'].get(best_chunk_id, {})
+                    result = self._extract_position_from_chunk(chunk)
+                    self.logger.debug(f"[位置解析] clause_id={clause_id} 策略3命中: chunk={best_chunk_id} ngram_count={best_count}")
+                    return result
+
+        self.logger.debug(f"[位置解析] clause_id={clause_id} 未匹配到 chunks")
+        return result
+
+    def _resolve_table_reference(
+        self,
+        table_ref: str,
+        position_index: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        将 "表X.Y.Z" 引用匹配到 chunks.json 中的 table chunk。
+
+        Args:
+            table_ref: 表格引用文本（如 "表3.2.2"、"表 3.2.2"）
+            position_index: 位置索引
+
+        Returns:
+            table chunk 的位置信息
+        """
+        # 提取编号：表3.2.2 → 3.2.2
+        m = re.search(r'表[ ]?([A-Z]?[\d\.]+)', table_ref)
+        if not m:
+            return {}
+        table_num = m.group(1)
+
+        if table_num in position_index['by_table_caption']:
+            chunks = position_index['by_table_caption'][table_num]
+            best = next((c for c in chunks if c.get('type') == 'table'), chunks[0])
+            result = self._extract_position_from_chunk(best)
+            self.logger.debug(f"[表格解析] ref={table_ref} 命中: chunk={best.get('chunk_id')}")
+            return result
+
+        return {}
+
+    def _extract_position_from_chunk(self, chunk: Dict) -> Dict[str, Any]:
+        """
+        从 chunk 提取所有位置相关字段。
+        """
+        if not chunk:
+            return {}
+        return {
+            'page_idx': chunk.get('page_idx'),
+            'bbox_pdf': chunk.get('bbox_pdf'),
+            'bbox_viewport': chunk.get('bbox_viewport'),
+            'chunk_id': chunk.get('chunk_id'),
+            'page_width': chunk.get('page_width'),
+            'page_height': chunk.get('page_height'),
+            'source': chunk.get('source'),
+            # table 特有字段
+            'type': chunk.get('type'),
+            'table_caption': chunk.get('table_caption'),
+            'table_content': chunk.get('table_content'),
+        }
+
     def _parse_md_content_sections(
         self,
         md_content: str,
@@ -1090,7 +1298,8 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         resume_from_chapter: int = 0,
         checkpoint: Optional[ChunkCheckpoint] = None,
         project_id: Optional[str] = None,
-        md_content: Optional[str] = None
+        md_content: Optional[str] = None,
+        chunks_data: Optional[List[Dict]] = None
     ) -> HierarchicalChunkResult:
         """
         主入口：LLM 驱动的三级分块（渐进式，支持增强版断点恢复）
@@ -1130,16 +1339,46 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         self._report_progress(0.0, "🚀 开始智能标注分析...")
 
         # =====================================================================
-        # Step 0: 处理 md_content（如果有）
+        # Step 0: 构建位置索引 + 处理 md_content
         # =====================================================================
+        # 构建 chunks 位置索引（无论是否有 md_content 都构建）
+        self._position_index: Dict[str, Any] = {}
+        if chunks_data:
+            # 使用传入的 chunks_data（来自 chunks.json，已带物理位置）
+            self._position_index = self._build_chunk_position_index(chunks_data)
+            self.logger.info(f"[LLM分块] 位置索引构建完成: {len(chunks_data)} chunks")
+        elif text_chunks:
+            # fallback：从 text_chunks 构建
+            raw_chunks = []
+            for c in text_chunks:
+                raw_chunks.append({
+                    'chunk_id': getattr(c, 'id', '') or c.metadata.get('chunk_id', ''),
+                    'type': c.metadata.get('type', 'text'),
+                    'content': c.text,
+                    'page_idx': c.metadata.get('page'),
+                    'bbox_pdf': c.metadata.get('bbox'),
+                    'bbox_viewport': c.metadata.get('bbox'),
+                    'page_width': c.metadata.get('page_width'),
+                    'page_height': c.metadata.get('page_height'),
+                    'source': c.metadata.get('source'),
+                    'table_caption': c.metadata.get('table_caption', ''),
+                    'table_content': c.metadata.get('table_content', ''),
+                })
+            self._position_index = self._build_chunk_position_index(raw_chunks)
+
         self._clause_registry: Dict[str, Dict] = {}
         md_sections: List[Dict] = []
         title_chunks = [c for c in text_chunks if c.metadata.get('type') == 'title']
         if md_content:
             self.logger.info("[LLM分块] 检测到 md_content，开始解析条款注册表...")
             self._clause_registry = self._build_clause_registry(md_content)
+            # 将 TextChunk 对象转换为 dict（_parse_md_content_sections 内部用 .get()）
+            title_chunks_dicts = [
+                {"content": c.text, "page_idx": c.metadata.get("page_idx"), "chunk_id": c.metadata.get("chunk_id")}
+                for c in title_chunks
+            ]
             md_sections = self._parse_md_content_sections(
-                md_content, title_chunks, self._clause_registry
+                md_content, title_chunks_dicts, self._clause_registry
             )
             self.logger.info(
                 f"[LLM分块] md_content 解析完成: {len(md_sections)} sections, "
@@ -1270,7 +1509,40 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             para_time = time.time() - para_start
             self.logger.info(f"[LLM分块]   ← 并行提取完成: {len(chapter_clauses)} 条文, {len(chapter_elements)} 要素 (耗时 {para_time:.1f}s)")
 
-            # 为条文和要素标注 PDF 位置（基于字符偏移估算）
+            # 为条文解析精确物理位置（从 chunks 位置索引匹配）
+            for clause in chapter_clauses:
+                pos_info = self._resolve_clause_position(
+                    clause.clause_id,
+                    clause.content,
+                    self._position_index
+                )
+                if pos_info:
+                    clause.metadata.update(pos_info)
+
+                # 增强 table 引用：把 referenced_tables 解析为具体位置
+                raw_tables = clause.metadata.get('referenced_tables', [])
+                for table_ref in raw_tables:
+                    table_info = self._resolve_table_reference(table_ref, self._position_index)
+                    if table_info and table_info.get('type') == 'table':
+                        ref = next(
+                            (r for r in clause.referenced_clauses if r.clause_id == table_ref),
+                            None
+                        )
+                        if ref:
+                            ref.page_idx = table_info.get('page_idx')
+                            ref.chunk_id = table_info.get('chunk_id')
+                            ref.section_title = table_info.get('table_caption')
+                        clause.metadata['referenced_table_positions'] = clause.metadata.get('referenced_table_positions', [])
+                        clause.metadata['referenced_table_positions'].append({
+                            'ref': table_ref,
+                            'page_idx': table_info.get('page_idx'),
+                            'bbox_pdf': table_info.get('bbox_pdf'),
+                            'chunk_id': table_info.get('chunk_id'),
+                            'table_caption': table_info.get('table_caption'),
+                        })
+            self.logger.info(f"[LLM分块]   → clause 位置解析完成: {sum(1 for c in chapter_clauses if c.metadata.get('page_idx'))}/{len(chapter_clauses)} 个 clause 有精确位置")
+
+            # 为要素标注 PDF 位置（基于字符偏移估算）
             annotated_elements = self._annotate_positions(
                 chapter_elements, chapter_text, source_info
             )
@@ -1352,14 +1624,15 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         self,
         text: str,
         progress_callback: Optional[Callable] = None,
-        md_content: Optional[str] = None
+        md_content: Optional[str] = None,
+        chunks_data: Optional[List[Dict]] = None
     ) -> HierarchicalChunkResult:
         """单文本分块入口"""
         if progress_callback:
             self.progress_callback = progress_callback
 
         fake_chunk = TextChunk(text=text, metadata={})
-        return self.chunk([fake_chunk], md_content=md_content)
+        return self.chunk([fake_chunk], md_content=md_content, chunks_data=chunks_data)
 
     # =========================================================================
     # 核心提取方法
