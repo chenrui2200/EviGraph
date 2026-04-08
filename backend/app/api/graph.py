@@ -1874,9 +1874,11 @@ def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = ''
     """
     将 MinerU 原始数据解析为 chunks 结构。
 
-    数据源：
+    数据源（MinerU 0.7.1 格式）：
     - 正文/标题：preproc_blocks 中 type=title/text，提取 lines/spans 的 content
-    - 表格：content[] 中 type=table，取 table_caption + img_path
+    - 表格：preproc_blocks 中 type=table，从 blocks.table_caption 提取标题，
+            从 blocks.table_body 提取 img_path 和 bbox，
+            表格内容由 PaddleOCR 从 PDF 提取
     """
     pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
 
@@ -1916,50 +1918,76 @@ def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = ''
                 "source": filename
             })
 
-    # ---- 2. 表格：content[] + preproc_blocks 联合 ----
-    # preproc_blocks.type=table 有 bbox，通过 img_path 精确匹配
-    # 优先用 table_body 的 bbox（不含 caption），fallback 到 outer bbox
-    table_bboxes_by_img: dict[tuple, list] = {}
-    table_first_by_page: dict[int, list] = {}
+    # ---- 2. 表格：从 preproc_blocks.type='table' 直接提取 ----
+    # MinerU 0.7.1 不再有 content[] 数组，表格信息全在 preproc_blocks 中
     for page_info in pdf_info_list:
         page_idx = page_info.get('page_idx', 0)
-        first_body_bbox = None
+        page_w, page_h = page_sizes.get(page_idx, [595, 842])
+
         for block in page_info.get('preproc_blocks', []):
             if block.get('type') != 'table':
                 continue
-            outer_bbox = block.get('bbox', [])
-            if not outer_bbox or len(outer_bbox) < 4:
-                continue
-            # 收集 img_path 作为匹配 key
-            img_keys = set()
-            table_body_bbox = None
-            for sub in block.get('blocks', []):
-                if sub.get('type') == 'table_body':
-                    table_body_bbox = sub.get('bbox', [])
-                for line in sub.get('lines', []):
-                    for span in line.get('spans', []):
-                        if span.get('image_path'):
-                            img_keys.add(span['image_path'])
-            # 优先用 table_body bbox（不含 caption），无则用 outer bbox
-            use_bbox = table_body_bbox if table_body_bbox and len(table_body_bbox) >= 4 else outer_bbox
-            for k in img_keys:
-                table_bboxes_by_img[(page_idx, k)] = use_bbox
-            if first_body_bbox is None:
-                first_body_bbox = use_bbox
-        if first_body_bbox is not None:
-            table_first_by_page[page_idx] = first_body_bbox
 
-    for item in mineru_data.get('content', []):
-        if item.get('type') != 'table':
-            continue
-        page_w, page_h = page_sizes.get(item.get('page_idx', 0), [595, 842])
-        chunk = _build_table_chunk(
-            item, table_bboxes_by_img, table_first_by_page, pdf_path, filename
-        )
-        chunk["chunk_id"] = f"chunk_{len(chunks)}"
-        chunk["page_width"] = page_w
-        chunk["page_height"] = page_h
-        chunks.append(chunk)
+            # 从 sub-blocks 中提取 caption、img_path、bbox
+            caption = ''
+            img_path = ''
+            table_body_bbox = None
+            outer_bbox = block.get('bbox', []) or []
+
+            for sub in block.get('blocks', []):
+                sub_type = sub.get('type', '')
+                # 提取表格标题文字
+                if sub_type == 'table_caption':
+                    for line in sub.get('lines', []):
+                        for span in line.get('spans', []):
+                            content = span.get('content', '')
+                            if content:
+                                caption += content
+                # 提取图片路径和 body bbox
+                elif sub_type == 'table_body':
+                    if not table_body_bbox or len(table_body_bbox) < 4:
+                        table_body_bbox = sub.get('bbox', [])
+                    for line in sub.get('lines', []):
+                        for span in line.get('spans', []):
+                            if span.get('image_path'):
+                                img_path = span['image_path']
+
+            # 优先用 table_body bbox（不含 caption），fallback 到 outer bbox
+            use_bbox = table_body_bbox if table_body_bbox and len(table_body_bbox) >= 4 else outer_bbox
+
+            # 用 PaddleOCR 从 PDF 提取表格内容
+            table_content = ''
+            if pdf_path and use_bbox and len(use_bbox) >= 4:
+                table_content = _extract_table_text_from_pdf(
+                    pdf_path, page_idx, use_bbox, caption
+                )
+                if not table_content:
+                    logger.warning(
+                        f"[表格提取] PaddleOCR 无结果: page={page_idx}, "
+                        f"caption={caption[:30]}, bbox={use_bbox}"
+                    )
+
+            # 修正颠倒的 bbox
+            final_bbox = list(use_bbox)
+            if len(final_bbox) >= 4 and final_bbox[1] > final_bbox[3]:
+                final_bbox = [final_bbox[0], final_bbox[3], final_bbox[2], final_bbox[1]]
+
+            chunks.append({
+                "chunk_id": f"chunk_{len(chunks)}",
+                "page_idx": page_idx,
+                "type": "table",
+                "content": caption or '[表格]',
+                "bbox_pdf": final_bbox,
+                "bbox_viewport": final_bbox,
+                "page_width": page_w,
+                "page_height": page_h,
+                "category_id": 2,
+                "block_type": "table",
+                "source": filename,
+                "table_caption": caption,
+                "table_img_path": img_path,
+                "table_content": table_content,
+            })
 
     return chunks
 
