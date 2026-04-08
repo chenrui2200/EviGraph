@@ -2173,6 +2173,93 @@ class Neo4jStorage(GraphStorage):
             if table_ref:
                 self._create_table_parameter_entity(tx, graph_id, episode_id, entity_uuid, table_ref, content)
 
+        # ========== 条款引用 ==========
+        # Clause --[REFERENCES]--> Clause (被引用的条款)
+        referenced_clauses = metadata.get("referenced_clauses", [])
+        for ref in referenced_clauses:
+            if isinstance(ref, dict):
+                ref_clause_id = ref.get("clause_id", "")
+                ref_context = ref.get("context", "")
+            else:
+                ref_clause_id = str(ref)
+                ref_context = f"本规范第{ref_clause_id}条"
+            if not ref_clause_id:
+                continue
+            ref_clause_name = f"条款{ref_clause_id}"
+            # 生成被引用条款的 Entity UUID（与 _create_entity_for_clause 一致）
+            ref_entity_seed = f"{graph_id}:{ref_clause_name}".encode('utf-8')
+            ref_entity_uuid = str(uuid.UUID(hashlib.md5(ref_entity_seed).hexdigest()))
+            # 查找被引用条款的实际 UUID（MATCH）
+            lookup = tx.run(
+                "MATCH (e:Entity:Clause {graph_id: $gid, clause_id: $cid}) RETURN e.uuid AS uuid LIMIT 1",
+                gid=graph_id, cid=ref_clause_id
+            ).single()
+            if lookup:
+                ref_entity_uuid = lookup["uuid"]
+                # 创建 REFERENCES 关系
+                tx.run(
+                    """
+                    MATCH (src:Entity {uuid: $src_uuid}), (tgt:Entity {uuid: $tgt_uuid})
+                    MERGE (src)-[r:REFERENCES {graph_id: $gid}]->(tgt)
+                    ON CREATE SET
+                        r.uuid = randomUUID(),
+                        r.context = $context,
+                        r.episode_ids = [$ep_id],
+                        r.created_at = datetime()
+                    ON MATCH SET
+                        r.context = COALESCE(r.context, $context),
+                        r.episode_ids = CASE
+                            WHEN r.episode_ids IS NULL THEN [$ep_id]
+                            ELSE r.episode_ids + [$ep_id]
+                        END
+                    """,
+                    src_uuid=entity_uuid,
+                    tgt_uuid=ref_entity_uuid,
+                    gid=graph_id,
+                    context=ref_context,
+                    ep_id=episode_id
+                )
+                logger.debug(f"[hierarchical] Clause {clause_id} REFERENCES {ref_clause_id}")
+
+        # ========== 外部标准引用 ==========
+        # Clause --[CITES]--> ExternalStandard
+        for std in metadata.get("referenced_standards", []):
+            std = str(std).strip()
+            if not std:
+                continue
+            std_entity_seed = f"{graph_id}:Standard:{std}".encode('utf-8')
+            std_entity_uuid = str(uuid.UUID(hashlib.md5(std_entity_seed).hexdigest()))
+            # 创建 ExternalStandard 节点（如不存在）
+            tx.run(
+                """
+                MERGE (s:Entity:ExternalStandard {graph_id: $gid, name_lower: $nl})
+                ON CREATE SET
+                    s.uuid = $uuid,
+                    s.name = $name,
+                    s.created_at = datetime()
+                """,
+                gid=graph_id,
+                nl=std.lower(),
+                uuid=std_entity_uuid,
+                name=std
+            )
+            # 建立 CITES 关系
+            tx.run(
+                """
+                MATCH (src:Entity {uuid: $src_uuid}), (tgt:Entity {uuid: $tgt_uuid})
+                MERGE (src)-[r:CITES {graph_id: $gid}]->(tgt)
+                ON CREATE SET
+                    r.uuid = randomUUID(),
+                    r.episode_ids = [$ep_id],
+                    r.created_at = datetime()
+                """,
+                src_uuid=entity_uuid,
+                tgt_uuid=std_entity_uuid,
+                gid=graph_id,
+                ep_id=episode_id
+            )
+            logger.debug(f"[hierarchical] Clause {clause_id} CITES {std}")
+
     def _create_section_entity(self, tx, graph_id: str, episode_id: str,
                                title: str, metadata: Dict, embedding: List[float]):
         """为Section创建Entity节点"""

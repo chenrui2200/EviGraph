@@ -1870,6 +1870,75 @@ def _build_table_chunk(
     }
 
 
+def _merge_bboxes(bboxes: List[list]) -> list:
+    """
+    计算多个 bbox 的并集包围盒 [x0, y0, x1, y1] → [x0_min, y0_min, x1_max, y1_max]
+    MinerU 0.7.1 中 block.bbox 只有第一行位置，需要从所有 lines 中取并集。
+    """
+    if not bboxes:
+        return []
+    xs = [b[0] for b in bboxes if len(b) >= 4]
+    ys = [b[1] for b in bboxes if len(b) >= 4]
+    xe = [b[2] for b in bboxes if len(b) >= 4]
+    ye = [b[3] for b in bboxes if len(b) >= 4]
+    if not xs:
+        return []
+    return [min(xs), min(ys), max(xe), max(ye)]
+
+
+def _merge_line_bboxes(lines: List[dict], page_idx: int) -> list:
+    """
+    合并 lines 的 bbox，遇到跨页行（cross_page: true）时分组合并。
+
+    MinerU 0.7.1 中 block.bbox 只有第一行位置，
+    但跨页块中不同 page 的行 y 坐标完全不同，不能直接并集。
+    策略：cross_page 标记在 span 级别，找到跨页 span 后按 y 坐标中位数分组，
+    只取当前页所在的行（y 较大的那一半）并集。
+
+    Args:
+        lines: MinerU preproc_blocks 中的 lines 列表
+        page_idx: 当前 page_idx
+
+    Returns:
+        合并后的 bbox [x0, y0, x1, y1]，跨页则取当前页所在行
+    """
+    if not lines:
+        return []
+
+    # 判断是否跨页：检查 span 级别是否有 cross_page 标记
+    def has_cross_page_span(line: dict) -> bool:
+        for span in line.get('spans', []):
+            if span.get('cross_page', False):
+                return True
+        return False
+
+    cross_page = any(has_cross_page_span(line) for line in lines)
+
+    if not cross_page:
+        # 正常情况：所有行同页，直接并集
+        return _merge_bboxes([line.get('bbox', []) for line in lines])
+
+    # 跨页情况：按 y 坐标中位数分组
+    # MinerU PDF 坐标：y 从上到下递增（约 0-841 为一页）
+    # 跨页时，高 y 行在当前页，低 y 行在下一页
+    all_y0 = [line.get('bbox', [0, 0])[1] for line in lines if len(line.get('bbox', [])) >= 4]
+    if not all_y0:
+        return []
+
+    median_y = sorted(all_y0)[len(all_y0) // 2]
+
+    # 找当前页的行（y0 >= median_y - 50 表示在当前页下方/附近）
+    same_page_lines = [
+        line for line in lines
+        if len(line.get('bbox', [])) >= 4 and line['bbox'][1] >= median_y - 50
+    ]
+    if same_page_lines:
+        return _merge_bboxes([line.get('bbox', []) for line in same_page_lines])
+
+    # fallback：全部并集
+    return _merge_bboxes([line.get('bbox', []) for line in lines])
+
+
 def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = '') -> List[Dict[str, Any]]:
     """
     将 MinerU 原始数据解析为 chunks 结构。
@@ -1897,13 +1966,15 @@ def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = ''
             bt = block.get('type', 'text')
             if bt not in ('title', 'text'):
                 continue
-            bbox = block.get('bbox', [])
+            lines = block.get('lines', [])
             lines_text = '\n'.join(
                 ''.join(s.get('content', '') for s in line.get('spans', []))
-                for line in block.get('lines', [])
+                for line in lines
             ).strip()
             if not lines_text:
                 continue
+            # 取所有 lines bbox 的并集，跨页时分组处理
+            bbox = _merge_line_bboxes(lines, page_idx)
             chunks.append({
                 "chunk_id": f"chunk_{len(chunks)}",
                 "page_idx": page_idx,
@@ -1932,7 +2003,8 @@ def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = ''
             caption = ''
             img_path = ''
             table_body_bbox = None
-            outer_bbox = block.get('bbox', []) or []
+            # outer_bbox 取所有 lines bbox 的并集，跨页时分组处理
+            outer_bbox = _merge_line_bboxes(block.get('lines', []), page_idx)
 
             for sub in block.get('blocks', []):
                 sub_type = sub.get('type', '')
@@ -1943,10 +2015,10 @@ def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = ''
                             content = span.get('content', '')
                             if content:
                                 caption += content
-                # 提取图片路径和 body bbox
+                # 提取图片路径和 body bbox（同样取所有 lines bbox 并集）
                 elif sub_type == 'table_body':
-                    if not table_body_bbox or len(table_body_bbox) < 4:
-                        table_body_bbox = sub.get('bbox', [])
+                    if not table_body_bbox:
+                        table_body_bbox = _merge_line_bboxes(sub.get('lines', []), page_idx)
                     for line in sub.get('lines', []):
                         for span in line.get('spans', []):
                             if span.get('image_path'):

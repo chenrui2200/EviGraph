@@ -56,6 +56,23 @@ class CrossReference:
     description: str = ""
 
 
+@dataclass
+class ReferencedClause:
+    """
+    被引用的条款
+
+    用于表示当前条文引用了其他条款的关系。
+    例如："应按本规范第5.2.4条的规定" → referenced_clauses = ["5.2.4"]
+    """
+    clause_id: str = ""           # 被引用的条款编号，如 "5.2.4"、"A.0.7"
+    context: str = ""             # 引用上下文，如 "本规范第5.2.4条的规定"
+    ref_type: str = "clause"      # clause / appendix / section
+    # 物理定位（由 clause_registry 补全）
+    page_idx: Optional[int] = None
+    chunk_id: Optional[str] = None
+    section_title: Optional[str] = None
+
+
 
 @dataclass
 class SemanticTriplet:
@@ -224,6 +241,10 @@ class ClauseSegment(HierarchicalChunk):
     # 层级关联
     parent_chapter: Optional[int] = None  # 所属章节编号
 
+    # 条款引用（新增）
+    referenced_clauses: List[ReferencedClause] = field(default_factory=list)  # 引用的其他条款
+    referenced_standards: List[str] = field(default_factory=list)              # 引用的外部标准
+
     # 兼容字段：从 triplets 推导而来（仅用于序列化）
     conditions: List[str] = field(default_factory=list)
     actions: List[str] = field(default_factory=list)
@@ -259,6 +280,18 @@ class ClauseSegment(HierarchicalChunk):
             "formula_refs": [self.formula_id] if self.formula_id else [],
             "table_refs": self.table_refs,
             "cross_refs": [r.ref_id for r in self.cross_refs],
+            "referenced_clauses": [
+                {
+                    "clause_id": r.clause_id,
+                    "context": r.context,
+                    "ref_type": r.ref_type,
+                    "page_idx": r.page_idx,
+                    "chunk_id": r.chunk_id,
+                    "section_title": r.section_title
+                }
+                for r in self.referenced_clauses
+            ],
+            "referenced_standards": self.referenced_standards,
             "semantics_enriched": self.semantics_enriched,
             "parent_chapter": self.parent_chapter,
             # 语义三元组（核心）

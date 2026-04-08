@@ -39,6 +39,7 @@ from ..models.clause import (
     ElementType,
     RequirementType,
     CrossReference,
+    ReferencedClause,
     SystemApplicability
 )
 from ..models.normative_entity import (
@@ -85,6 +86,19 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "formula_content": clause.formula_content,
         "referenced_tables": clause.metadata.get("referenced_tables", []) if clause.metadata else [],
         "referenced_formulas": clause.metadata.get("referenced_formulas", []) if clause.metadata else [],
+        # 条款引用（新增）
+        "referenced_clauses": [
+            {
+                "clause_id": r.clause_id,
+                "context": r.context,
+                "ref_type": r.ref_type,
+                "page_idx": r.page_idx,
+                "chunk_id": r.chunk_id,
+                "section_title": r.section_title,
+            }
+            for r in clause.referenced_clauses
+        ] if clause.referenced_clauses else [],
+        "referenced_standards": clause.referenced_standards or [],
         # 语义三元组（核心！）
         "triplets": [
             {
@@ -328,6 +342,35 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 - **公式引用**：在 `referenced_formulas` 中提取所有公式编号（如 `公式（3.2.14）`）
 - **公式内容**：如果有公式的具体表达式（如 `$S \\geq I \\cdot t / k$`），提取到 `formula_content` 字段
 
+## ⚠️ 条款引用识别（通用扩展版！）
+
+当条文内容中引用了其他条款时，必须在 `referenced_clauses` 中列出被引用的条款编号。
+
+### 引用格式识别规则
+| 原文示例 | 提取结果 | 说明 |
+|---------|---------|------|
+| "本规范第5.2.4条" | `"5.2.4"` | 标准格式 |
+| "按第3.2.14条" | `"3.2.14"` | 无"本规范" |
+| "见3.2.5条" | `"3.2.5"` | 无"第"字 |
+| "上述条款3.2.4" | `"3.2.4"` | 含"上述"指代词 |
+| "第3.2.5至3.2.10条" | `["3.2.5", "3.2.10"]` | 范围引用 |
+| "第1、2、3条" | `["1", "2", "3"]` | 顿号分隔多条款 |
+| "第3.2.5条或第3.2.6条" | `["3.2.5", "3.2.6"]` | "或"连接 |
+| "按附录A.0.7条" | `"A.0.7"` | 附录条款，保留字母 |
+| "Article 3.2.5规定" | `"3.2.5"` | 英文格式 |
+| "§ 3.2.5" | `"3.2.5"` | 段落符号格式 |
+| "本规范第5.2.4条第1款" | `"5.2.4"` | 款号仅作上下文 |
+| "本节第X条" | 根据上下文补充完整编号 | 含"本节"等指代 |
+
+### ⚠️ 严格区分
+- `referenced_clauses`：仅填条款编号（数字/字母混合格式，如 `"5.2.4"`、`"A.0.7"`）
+- `referenced_standards`：填外部标准编号（如 `"GB/T16895.15"`、`"IEC 60364"`、`"JB/T"）`
+  → **不得**将 GB/T、IEC 等外部标准放入 `referenced_clauses`！
+
+### 常见引用词识别
+- 引导词：`本规范`、`本条`、`本节`、`上述条款`、`见`、`按`、`依据`、`符合`、`遵照`
+- 连接符：`至`、`到`、`和`、`与`、`或`、`，`
+
 ## 要求类型
 - mandatory: 必须、应、须
 - recommended: 建议、宜、推荐
@@ -350,7 +393,9 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 3. **款/项**（"1、"、"2、"）：作为 clause_items 独立提取
 4. **OCR # 前缀**不是条文内容，忽略
 5. **表格/公式引用**放入 referenced_tables / referenced_formulas
-6. 三元组只提取条文中明确出现的 component/action/obj，宁缺毋滥
+6. **条款引用**放入 referenced_clauses，**外部标准**放入 referenced_standards
+   - 支持格式：`本规范第X条`、`见X.Y.Z条`、`Article X.Y.Z`、`§ X.Y.Z`、`第1、2、3条`（顿号分隔）
+7. 三元组只提取条文中明确出现的 component/action/obj，宁缺毋滥
 
 ## 要求类型
 - mandatory: 必须、应、须
@@ -367,23 +412,41 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 原文：`2.0.5 直接接触防护 无故障条件下的电击防护。`
 → is_term_definition: true, terms: [{"term_name": "直接接触防护", "definition": "无故障条件下的电击防护"}]
 
+## 条款引用示例
+原文：`应按本规范第5.2.4条第1款的规定，且应符合本规范第5.2.8条的要求。`
+→ referenced_clauses: ["5.2.4", "5.2.8"]
+
+原文：`线路敷设应符合GB/T16895.15的规定，并按本规范第6.3.1条执行。`
+→ referenced_clauses: ["6.3.1"], referenced_standards: ["GB/T16895.15"]
+
+原文：`见3.2.5条和4.1.2条的规定，或参照第5.1.3条执行。`
+→ referenced_clauses: ["3.2.5", "4.1.2", "5.1.3"]
+
+原文：`第1、2、3条的要求应同时满足。`
+→ referenced_clauses: ["1", "2", "3"]
+
+原文：`Article 3.2.5 和 Clause 4.1.2 规定了具体要求。`
+→ referenced_clauses: ["3.2.5", "4.1.2"]
+
 请输出 JSON：
 ```json
 {{
     "clauses": [
         {{
-            "clause_id": "3.2.1",
-            "clause_title": "导体应满足线路保护的要求",
-            "clause_content": "导体应满足线路保护的要求...",
+            "clause_id": "5.2.13",
+            "clause_title": "TN系统配电线路的保护",
+            "clause_content": "TN系统配电线路的保护...",
             "requirement_type": "mandatory",
             "is_term_definition": false,
             "triplets": [
-                {{"component": "导体", "action": "选用", "obj": "截面积", "condition": "", "requirement": "mandatory"}}
+                {{"component": "配电线路", "action": "选用", "obj": "短路保护电器", "condition": "", "requirement": "mandatory"}}
             ],
             "terms": [],
-            "referenced_tables": ["表3.2.2"],
-            "referenced_formulas": ["公式（3.2.14）"],
-            "formula_content": "S >= I*t/k",
+            "referenced_tables": [],
+            "referenced_formulas": [],
+            "referenced_clauses": ["5.2.4", "5.2.8"],
+            "referenced_standards": ["GB/T16895.15"],
+            "formula_content": null,
             "clause_items": [
                 {{
                     "item_number": "1",
@@ -638,6 +701,206 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         self.logger.info(f"[章节位置精化] ✅ 精化完成")
         return refined_chapters
 
+    def _build_clause_registry(self, md_content: str) -> Dict[str, Dict]:
+        """
+        扫描 md_content，提取所有条款编号及其位置信息，构建注册表。
+
+        通用匹配模式（支持多种文档格式）：
+        - X.Y.Z 编号（如 "3.2.5 配电线路..."、"3.2.5配电线路..."）
+        - 第X.Y.Z条  显式条款标记
+        - 第A.B条    附录条款（字母编号，如 A.0.7）
+        - Article/Clause X.Y.Z  英文格式
+        - § X.Y.Z  段落符号格式
+        - 【X.Y.Z】  方括号格式
+        - Markdown 标题包裹格式（## 3.2.5 直接接触防护）
+
+        Args:
+            md_content: MinerU 解析的 Markdown 内容
+
+        Returns:
+            注册表: {条款编号: {line_range, title, is_appendix, page_idx, chunk_id, section_title}}
+        """
+        registry: Dict[str, Dict] = {}
+
+        # 通用条款编号匹配模式（支持多种格式）
+        CLAUSE_PATTERNS = [
+            # 模式1：行首为 X.Y.Z 编号，可选空格（如 "3.2.5配电线路..." 或 "3.2.5 配电线路..."）
+            (re.compile(r'^(\d+(?:\.\d+)+)\s*'), False),
+            # 模式2：带"第"前缀的数字条款（如 "第3.2.5条配电线路..."）
+            (re.compile(r'^第(\d+(?:\.\d+)+)条\s*'), False),
+            # 模式3：附录条款（如 "第A.0.7条..."）
+            (re.compile(r'^第([A-Z](?:\.\d+)+)条\s*'), True),
+            # 模式4：Article/条款 英文格式（如 "Article 3.2.5" 或 "Clause 3.2.5"）
+            (re.compile(r'^(?:Article|Clause|Art\.)\s+(\d+(?:\.\d+)+)', re.I), False),
+            # 模式5：段落符号格式（如 "§ 3.2.5" 或 "§3.2.5"）
+            (re.compile(r'^§\s*(\d+(?:\.\d+)+)'), False),
+            # 模式6：方括号格式（如 "【3.2.5】配电线路..."）
+            (re.compile(r'^【(\d+(?:\.\d+)+)】\s*'), False),
+            # 模式7：X.Y.Z. 格式（带尾部句点）
+            (re.compile(r'^(\d+(?:\.\d+)+)\.\s*'), False),
+        ]
+
+        # Markdown 标题前缀（匹配后去掉再处理）
+        MARKDOWN_PREFIXES = re.compile(r'^#{1,6}\s+')
+
+        for i, line in enumerate(md_content.split('\n')):
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # 去掉 Markdown 标题前缀后再匹配
+            md_match = MARKDOWN_PREFIXES.match(stripped)
+            if md_match:
+                # Markdown 标题行，检查去掉前缀后的内容
+                inner = stripped[md_match.end():]
+                # 用各种模式匹配内部内容
+                for pattern, is_appendix in CLAUSE_PATTERNS:
+                    m = pattern.match(inner)
+                    if m:
+                        cid = m.group(1)
+                        if cid not in registry:
+                            registry[cid] = {
+                                "line_range": i,
+                                "title": stripped[:120],
+                                "is_appendix": is_appendix,
+                                "page_idx": None,
+                                "chunk_id": None,
+                                "section_title": None,
+                            }
+                        break
+                continue
+
+            # 普通行：直接用各种模式匹配
+            for pattern, is_appendix in CLAUSE_PATTERNS:
+                m = pattern.match(stripped)
+                if m:
+                    cid = m.group(1)
+                    if cid not in registry:
+                        registry[cid] = {
+                            "line_range": i,
+                            "title": stripped[:120],
+                            "is_appendix": is_appendix,
+                            "page_idx": None,
+                            "chunk_id": None,
+                            "section_title": None,
+                        }
+                    break
+
+        self.logger.info(f"[条款注册表] 构建完成: {len(registry)} 个条款")
+        return registry
+
+    def _parse_md_content_sections(
+        self,
+        md_content: str,
+        title_chunks: List[Dict],
+        clause_registry: Dict[str, Dict]
+    ) -> List[Dict]:
+        """
+        将 md_content 按章节标题切分为段落，并关联物理定位。
+
+        流程：
+        1. 按 52 个 # 标题切分 md_content，得到 md_sections
+        2. 用标题相似度将 md_section 与 title_chunk 匹配
+        3. 用 title_chunk 的 page_idx 为 md_section 补充 page 信息
+        4. 用 page_idx 将 clause_registry 中的条款补充 page_idx 和 chunk_id
+
+        Args:
+            md_content: MinerU 解析的 Markdown 内容
+            title_chunks: chunks.json 中 type=title 的 chunks
+            clause_registry: _build_clause_registry 构建的条款注册表
+
+        Returns:
+            md_sections: [{header, body, line_range, page_idx, chunk_id, section_title}, ...]
+        """
+        lines = md_content.split('\n')
+
+        # Step 1: 提取所有 # 标题行的位置
+        header_lines = []  # [(line_idx, header_text), ...]
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith('# '):
+                header_lines.append((i, stripped[2:].strip()))
+
+        if not header_lines:
+            self.logger.warning("[md_content] 未找到 # 标题，返回全文作为单个 section")
+            return [{
+                "header": "",
+                "body": md_content,
+                "line_range": (0, len(lines) - 1),
+                "page_idx": None,
+                "chunk_id": None,
+                "section_title": None,
+            }]
+
+        # Step 2: 切分 md_content 为 sections
+        md_sections: List[Dict] = []
+        for idx, (h_line, h_text) in enumerate(header_lines):
+            next_h_line = header_lines[idx + 1][0] if idx + 1 < len(header_lines) else len(lines)
+            body_lines = lines[h_line + 1:next_h_line]
+            # 去掉末尾空行
+            while body_lines and not body_lines[-1].strip():
+                body_lines.pop()
+            body = '\n'.join(body_lines)
+
+            md_sections.append({
+                "header": h_text,
+                "header_line": h_line,
+                "body": body,
+                "line_range": (h_line, next_h_line - 1),
+                "page_idx": None,
+                "chunk_id": None,
+                "section_title": h_text,
+            })
+
+        self.logger.info(f"[md_content] 解析完成: {len(md_sections)} 个 sections")
+
+        # Step 3: 标题匹配：将 md_sections 与 title_chunks 关联
+        from difflib import SequenceMatcher
+
+        def title_similarity(a: str, b: str) -> float:
+            """计算两个标题文本的相似度"""
+            return SequenceMatcher(None, a, b).ratio()
+
+        # 按 page_idx 排序 title_chunks
+        sorted_chunks = sorted(title_chunks, key=lambda c: c.get('page_idx', 0))
+
+        for sec in md_sections:
+            h = sec["header"]
+            best_score = 0.0
+            best_chunk = None
+            for chunk in sorted_chunks:
+                chunk_text = chunk.get('content', '')
+                score = title_similarity(h, chunk_text)
+                if score > best_score:
+                    best_score = score
+                    best_chunk = chunk
+            if best_chunk and best_score > 0.3:
+                sec["page_idx"] = best_chunk.get('page_idx')
+                sec["chunk_id"] = best_chunk.get('chunk_id')
+                sec["section_title"] = best_chunk.get('content', sec['header'])
+
+        # Step 4: 用 section 的 page_idx 为 clause_registry 补充 page_idx 和 chunk_id
+        for cid, entry in clause_registry.items():
+            sec_line = entry.get("line_range", 0)
+            # 找到 line_range 最接近的 md_section
+            for sec in md_sections:
+                l_start, l_end = sec.get("line_range", (0, 0))
+                if l_start <= sec_line <= l_end:
+                    if sec.get("page_idx") is not None:
+                        entry["page_idx"] = sec["page_idx"]
+                    if sec.get("chunk_id") is not None:
+                        entry["chunk_id"] = sec["chunk_id"]
+                    if sec.get("section_title"):
+                        entry["section_title"] = sec["section_title"]
+                    break
+
+        matched = sum(1 for s in md_sections if s.get("page_idx") is not None)
+        self.logger.info(f"[md_content] title_chunks 匹配完成: {matched}/{len(md_sections)} 个 section 有 page_idx")
+        reg_matched = sum(1 for e in clause_registry.values() if e.get("page_idx") is not None)
+        self.logger.info(f"[md_content] clause_registry 补充完成: {reg_matched}/{len(clause_registry)} 个条款有 page_idx")
+
+        return md_sections
+
     def _clause_to_dict(self, clause: ClauseSegment) -> Dict[str, Any]:
         """将 ClauseSegment 转换为字典（委托给模块级函数）"""
         return clause_to_dict(clause)
@@ -826,7 +1089,8 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         progress_callback: Optional[Callable] = None,
         resume_from_chapter: int = 0,
         checkpoint: Optional[ChunkCheckpoint] = None,
-        project_id: Optional[str] = None
+        project_id: Optional[str] = None,
+        md_content: Optional[str] = None
     ) -> HierarchicalChunkResult:
         """
         主入口：LLM 驱动的三级分块（渐进式，支持增强版断点恢复）
@@ -864,6 +1128,23 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         self.logger.info(f"[LLM分块] 开始分析，文本长度: {len(full_text)}")
         self.logger.info(f"[LLM分块] 来源信息: {source_info}")
         self._report_progress(0.0, "🚀 开始智能标注分析...")
+
+        # =====================================================================
+        # Step 0: 处理 md_content（如果有）
+        # =====================================================================
+        self._clause_registry: Dict[str, Dict] = {}
+        md_sections: List[Dict] = []
+        title_chunks = [c for c in text_chunks if c.metadata.get('type') == 'title']
+        if md_content:
+            self.logger.info("[LLM分块] 检测到 md_content，开始解析条款注册表...")
+            self._clause_registry = self._build_clause_registry(md_content)
+            md_sections = self._parse_md_content_sections(
+                md_content, title_chunks, self._clause_registry
+            )
+            self.logger.info(
+                f"[LLM分块] md_content 解析完成: {len(md_sections)} sections, "
+                f"{len(self._clause_registry)} 个条款注册"
+            )
 
         # =====================================================================
         # Step 1: 读取目录 - 识别章节结构
@@ -1070,14 +1351,15 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
     def chunk_single_text(
         self,
         text: str,
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable] = None,
+        md_content: Optional[str] = None
     ) -> HierarchicalChunkResult:
         """单文本分块入口"""
         if progress_callback:
             self.progress_callback = progress_callback
 
         fake_chunk = TextChunk(text=text, metadata={})
-        return self.chunk([fake_chunk])
+        return self.chunk([fake_chunk], md_content=md_content)
 
     # =========================================================================
     # 核心提取方法
@@ -1210,7 +1492,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                     paragraphs=cd.get("paragraphs", []),
                     requirement_type=requirement_type,
                     applicable_systems=systems,
-                    cross_refs=self._build_cross_refs(cd),
+                    cross_refs=[],
                     source=source_info.get("source", ""),
                     page=source_info.get("page"),
                     triplets=triplets,
@@ -1220,6 +1502,8 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                     formula_content=cd.get("formula_content"),
                     semantics_enriched=bool(triplets),
                     parent_chapter=chapter_num,
+                    referenced_clauses=[],  # 暂空，先创建对象再赋值
+                    referenced_standards=cd.get("referenced_standards", []),
                     metadata={
                         "chunk_type": "clause",
                         "parent_chapter": chapter_num,
@@ -1228,9 +1512,18 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                         "terms": terms_list,
                         "formula_content": cd.get("formula_content"),
                         "referenced_tables": cd.get("referenced_tables", []),
-                        "referenced_formulas": cd.get("referenced_formulas", [])
+                        "referenced_formulas": cd.get("referenced_formulas", []),
+                        "referenced_standards": cd.get("referenced_standards", [])
                     }
                 )
+
+                # 构建交叉引用（一次性调用）
+                clause_cross_refs, clause_referenced = self._build_cross_refs(
+                    cd, self._clause_registry
+                )
+                clause.cross_refs = clause_cross_refs
+                clause.referenced_clauses = clause_referenced
+
                 clauses.append(clause)
 
             self.logger.info(f"章节 {chapter_num}: LLM 提取 {len(clauses)} 条条文")
@@ -1426,10 +1719,25 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             return ElementType.OBJECT
         return ElementType.TABLE_ROW
 
-    def _build_cross_refs(self, clause_data: Dict) -> List[CrossReference]:
-        """构建交叉引用"""
-        refs = []
+    def _build_cross_refs(
+        self,
+        clause_data: Dict,
+        clause_registry: Optional[Dict[str, Dict]] = None
+    ) -> tuple[List[CrossReference], List["ReferencedClause"]]:
+        """
+        构建交叉引用（表格、公式、条款）
 
+        Args:
+            clause_data: LLM 返回的条款数据
+            clause_registry: 条款注册表，用于补全被引用条款的 page_idx/chunk_id
+
+        Returns:
+            (cross_refs, referenced_clauses) 元组
+        """
+        refs: List[CrossReference] = []
+        clause_refs: List[ReferencedClause] = []
+
+        # 表格引用
         for table in clause_data.get("referenced_tables", []):
             refs.append(CrossReference(
                 ref_id=table,
@@ -1437,6 +1745,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                 description=f"引用表格 {table}"
             ))
 
+        # 公式引用
         for formula in clause_data.get("referenced_formulas", []):
             refs.append(CrossReference(
                 ref_id=formula,
@@ -1444,7 +1753,40 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                 description=f"引用公式 {formula}"
             ))
 
-        return refs
+        # 条款引用
+        for clause_ref_str in clause_data.get("referenced_clauses", []):
+            # clause_ref_str 可能是字符串或字典
+            if isinstance(clause_ref_str, dict):
+                cid = clause_ref_str.get("clause_id", "")
+            else:
+                cid = str(clause_ref_str)
+
+            if not cid:
+                continue
+
+            # 从注册表补全物理信息
+            reg_entry = {}
+            if clause_registry:
+                reg_entry = clause_registry.get(cid, {})
+
+            ref_type = "appendix" if cid[0].isalpha() else "clause"
+            clause_refs.append(ReferencedClause(
+                clause_id=cid,
+                context=f"本规范第{cid}条",
+                ref_type=ref_type,
+                page_idx=reg_entry.get("page_idx"),
+                chunk_id=reg_entry.get("chunk_id"),
+                section_title=reg_entry.get("section_title"),
+            ))
+
+            # 同时加到 cross_refs（保持向后兼容）
+            refs.append(CrossReference(
+                ref_id=cid,
+                ref_type="clause",
+                description=f"引用条款 {cid}"
+            ))
+
+        return refs, clause_refs
 
     def _annotate_positions(
         self,
