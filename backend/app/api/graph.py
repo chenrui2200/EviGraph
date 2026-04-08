@@ -1909,9 +1909,10 @@ def _merge_line_bboxes(lines: List[dict], page_idx: int, block_bbox: list = None
     MinerU 0.7.1 中 block.bbox 只有第一行位置，
     但跨页块中不同 page 的行 y 坐标完全不同，不能直接并集。
     策略：
-    1. 计算所有 lines bbox 的并集
-    2. 如果 block_bbox 高度 <= page_height(841)，说明块不跨页，直接返回并集
-    3. 如果 > page_height，真正跨页，取 y0 >= page_height - 50 的行并集
+    1. 优先检查 spans 中是否有 cross_page: true 的 span
+    2. 如果有 cross_page span，只取当前页（无 cross_page 标记）的行
+    3. 如果没有 cross_page span，用 block_bbox 高度判断是否跨页
+    4. 真正跨页时，取当前页所在行（y0 >= median_y - 50）
 
     Args:
         lines: MinerU preproc_blocks 中的 lines 列表
@@ -1923,6 +1924,26 @@ def _merge_line_bboxes(lines: List[dict], page_idx: int, block_bbox: list = None
     """
     if not lines:
         return []
+
+    # 检查 spans 中是否有 cross_page: true（MinerU 0.7.1 中 cross_page 在 span 级别）
+    def _has_cross_page_span(line: dict) -> bool:
+        for span in line.get('spans', []):
+            if span.get('cross_page'):
+                return True
+        return False
+
+    has_cross_page = any(_has_cross_page_span(line) for line in lines)
+    if has_cross_page:
+        # 有跨页行，只取同一页的行（没有 cross_page 标记的）
+        same_page_lines = []
+        for line in lines:
+            if _has_cross_page_span(line):
+                continue  # 跳过跨页行
+            if len(line.get('bbox', [])) >= 4:
+                same_page_lines.append(line)
+        if same_page_lines:
+            return _merge_bboxes([line.get('bbox', []) for line in same_page_lines])
+        # 全部都是 cross_page（异常），fallthrough 到后面处理
 
     # 用 block_bbox（块外层 bbox）判断是否真正跨页
     # MinerU PDF 一页高度约 841 像素
@@ -1950,7 +1971,7 @@ def _merge_line_bboxes(lines: List[dict], page_idx: int, block_bbox: list = None
         return _merge_bboxes([line.get('bbox', []) for line in same_page_lines])
 
     # fallback：全部并集
-    return _merge_bboxes([line.get('bbox', []) for line in lines])
+    return _merge_bboxes([line.get('bbox', []) for line in lines if len(line.get('bbox', [])) >= 4])
 
 
 def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = '') -> List[Dict[str, Any]]:
