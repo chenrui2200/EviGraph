@@ -11,6 +11,7 @@ import time
 import random
 import threading
 import traceback
+import requests
 from typing import Optional, Dict, Any, List
 import openai
 from openai import OpenAI, APIConnectionError, APITimeoutError, RateLimitError, APIStatusError
@@ -66,6 +67,61 @@ class LLMClient:
         """Check if we're talking to an Ollama server."""
         return '11434' in (self.base_url or '')
 
+    def _azure_chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float
+    ) -> str:
+        """
+        Azure OpenAI 请求：直接用 requests 发请求，不走 OpenAI SDK。
+        参考 D:\\mps\\data_prepare\\sentiment\\dtest_sentiment_content.py 的成功调用方式。
+        """
+        headers = {
+            "api-key": self.api_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "messages": messages,
+            "temperature": temperature,
+        }
+        last_error = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = requests.post(
+                    self.base_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    return result['choices'][0]['message']['content'].strip()
+                else:
+                    error_body = response.text
+                    logger.error(f"LLM Azure API error ({response.status_code}): {error_body}")
+                    if 500 <= response.status_code < 600 and attempt < self.max_retries:
+                        last_error = Exception(f"Azure {response.status_code}: {error_body}")
+                        wait_time = (2 ** attempt) + random.random()
+                        logger.warning(f"Azure server error, retry {attempt + 1}/{self.max_retries + 1} in {wait_time:.1f}s...")
+                        time.sleep(wait_time)
+                        continue
+                    raise APIStatusError(
+                        error_body,
+                        response=response,
+                        status_code=response.status_code,
+                        body=error_body
+                    )
+            except requests.RequestException as e:
+                last_error = e
+                if attempt < self.max_retries:
+                    wait_time = (2 ** attempt) + random.random()
+                    logger.warning(f"LLM Azure connection error (attempt {attempt + 1}/{self.max_retries + 1}): {e}. Retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"LLM Azure connection failed after {self.max_retries + 1} attempts: {e}")
+                    raise
+        raise last_error if last_error else Exception("LLM Azure call failed")
+
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -76,13 +132,19 @@ class LLMClient:
         """
         Send chat request with manual retry and thread-safe client access
         """
+        is_azure = 'azure' in (self.base_url or '').lower()
+
+        # Azure: 用 requests 直接调用（绕过 SDK，与 dtest_sentiment_content.py 保持一致）
+        if is_azure:
+            return self._azure_chat(messages, temperature)
+
+        # 非 Azure: 使用 OpenAI SDK
         kwargs = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-
         if response_format:
             kwargs["response_format"] = response_format
 
@@ -95,18 +157,14 @@ class LLMClient:
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
-                # Use property that provides thread-local client
                 response = self.client.chat.completions.create(**kwargs)
                 content = response.choices[0].message.content
-                # Keep <think> content if present, we'll parse it in frontend
                 return content.strip()
 
             except (APIConnectionError, APITimeoutError) as e:
                 last_error = e
-                # If connection error, reset thread-local client for next attempt
                 if hasattr(self._thread_local, "client"):
                     del self._thread_local.client
-
                 if attempt < self.max_retries:
                     wait_time = (2 ** attempt) + random.random()
                     logger.warning(f"LLM connection error (attempt {attempt + 1}/{self.max_retries + 1}): {e}. Retrying in {wait_time:.1f}s...")
@@ -125,7 +183,6 @@ class LLMClient:
                     raise
 
             except APIStatusError as e:
-                # HTTP 状态码错误（4xx/5xx），如 502 Bad Gateway
                 error_details = {
                     "error_type": type(e).__name__,
                     "status_code": e.status_code,
@@ -141,7 +198,6 @@ class LLMClient:
                         error_details["response_body"] = str(e.body)
                 logger.error(f"LLM API error ({e.status_code}): {json.dumps(error_details, ensure_ascii=False, indent=2)}")
 
-                # 5xx 错误自动重试（502/503/504 等通常是上游服务暂时不可用）
                 if 500 <= e.status_code < 600 and attempt < self.max_retries:
                     last_error = e
                     wait_time = (2 ** attempt) + random.random()
@@ -152,23 +208,16 @@ class LLMClient:
                     raise
 
             except Exception as e:
-                # 打印完整错误详情，包括 status_code、response body 等
                 error_details = {
                     "error_type": type(e).__name__,
                     "error_message": str(e),
                     "model": self.model,
                     "base_url": self.base_url,
-                    "temperature": kwargs.get("temperature"),
-                    "max_tokens": kwargs.get("max_tokens"),
-                    "messages_count": len(kwargs.get("messages", [])),
                 }
-                # 尝试从异常中提取更多字段
                 if hasattr(e, "status_code"):
                     error_details["status_code"] = e.status_code
                 if hasattr(e, "body"):
                     error_details["body"] = e.body
-                if hasattr(e, "response"):
-                    error_details["response"] = str(e.response)
                 logger.error(f"LLM unexpected error: {json.dumps(error_details, ensure_ascii=False, indent=2)}")
                 logger.error(f"LLM unexpected error (traceback):\n{traceback.format_exc()}")
                 raise
