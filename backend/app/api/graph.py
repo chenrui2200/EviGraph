@@ -687,6 +687,8 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
                             "components": c.components,
                             "objects": c.objects,
                             "parent_chapter": c.parent_chapter,
+                            "scope_prefix": c.metadata.get("scope_prefix") if c.metadata else None,
+                            "chapter": c.metadata.get("chapter") if c.metadata else None,
                             "metadata": c.metadata
                         }
                         for c in result.clauses
@@ -717,6 +719,8 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
                                     "value": ent.get("value", ""),
                                     "unit": ent.get("unit", ""),
                                     "source_clause_id": ent.get("clause_id", clause.get("clause_id")),
+                                    "scope_prefix": clause.get("scope_prefix") or clause.get("metadata", {}).get("scope_prefix"),
+                                    "chapter": clause.get("chapter") or clause.get("metadata", {}).get("chapter"),
                                     "metadata": ent
                                 }
                                 for clause in (fallback_checkpoint.completed_clauses or [])
@@ -2046,30 +2050,12 @@ def _do_re_annotate_work(task_id: str, project_id: str):
     mineru_parsed = ProjectManager.get_mineru_parsed(project_id)
 
     if not mineru_parsed:
-        # 没有原始数据，自动调用 MinerU API
-        task_manager.update_task(task_id, message="🔍 未找到 mineru_parsed.json，自动调用 MinerU API...",
-                                log="未找到 mineru_parsed.json，自动调用 MinerU API")
-        project = ProjectManager.get_project(project_id)
-        if not project or not project.files:
-            task_manager.fail_task(task_id, "项目无文件记录，无法自动解析")
-            return
-        filename = project.files[0]["filename"]
-        try:
-            mineru_parsed, pdf_path = _call_mineru_api(project_id, filename)
-            task_manager.update_task(task_id, message="✅ MinerU API 调用成功",
-                                    log=f"✅ MinerU API 调用成功: {filename}")
-        except FileNotFoundError as e:
-            task_manager.fail_task(task_id, str(e))
-            return
-        except Exception as e:
-            if "连接" in str(e) or "Connection" in str(e):
-                task_manager.fail_task(task_id, "无法连接到 MinerU 服务")
-            else:
-                task_manager.fail_task(task_id, str(e))
-            return
-    else:
-        task_manager.update_task(task_id, message="✅ mineru_parsed.json 已读取",
-                                log="mineru_parsed.json 已读取")
+        # 没有 mineru_parsed.json 数据，无法重新生成 chunks.json
+        task_manager.fail_task(task_id, "未找到 mineru_parsed.json，请先上传文档进行 MinerU 解析")
+        return
+
+    task_manager.update_task(task_id, message="✅ mineru_parsed.json 已读取",
+                            log="mineru_parsed.json 已读取")
 
     project = ProjectManager.get_project(project_id)
 
@@ -2936,6 +2922,7 @@ def intelligent_chunk():
                         ])(set()),
                         # 从 clauses.metadata["entities"] 提取实体作为 elements（兼容前端格式）
                         # 同时按 entity.name + source_clause_id 去重
+                        # 新增 scope_prefix + chapter 支持按子章节聚合查询
                         "elements": (lambda seen_keys: [
                             {
                                 "element_type": ent.get("entity_type", "unknown"),
@@ -2945,6 +2932,9 @@ def intelligent_chunk():
                                 "abbreviation": ent.get("abbreviation", ""),
                                 "definition": ent.get("definition", ""),
                                 "source_clause_id": ent.get("clause_id", c["clause_id"]),
+                                # 知识域字段：从 clause 顶层继承
+                                "scope_prefix": c.get("scope_prefix") or c.get("metadata", {}).get("scope_prefix"),
+                                "chapter": c.get("chapter") or c.get("metadata", {}).get("chapter"),
                                 "metadata": ent
                             }
                             for c in (
@@ -2982,6 +2972,8 @@ def intelligent_chunk():
                                         "abbreviation": ent.get("abbreviation", ""),
                                         "definition": ent.get("definition", ""),
                                         "source_clause_id": ent.get("clause_id", clause.get("clause_id")),
+                                        "scope_prefix": clause.get("scope_prefix") or clause.get("metadata", {}).get("scope_prefix"),
+                                        "chapter": clause.get("chapter") or clause.get("metadata", {}).get("chapter"),
                                         "metadata": ent
                                     })
                             chunks_result = {
@@ -3276,13 +3268,6 @@ def get_chunk_analysis(project_id: str):
         return (1, str(key))
     sorted_chapters = sorted(chapter_tree.items(), key=_chapter_sort_key)
 
-    # 条文统计
-    requirement_stats = {"mandatory": 0, "recommended": 0, "prohibited": 0}
-    for clause in clauses:
-        req_type = clause.get('requirement_type', 'recommended')
-        if req_type in requirement_stats:
-            requirement_stats[req_type] += 1
-
     # 要素统计（支持 LLM 和 MinerU 两种格式）
     element_stats = {}
     for element in elements:
@@ -3381,7 +3366,6 @@ def get_chunk_analysis(project_id: str):
                 "total_sections": len(sections),
                 "total_clauses": len(clauses),
                 "total_elements": len(elements),
-                "requirement_stats": requirement_stats,
                 "element_stats": element_stats,
                 "source": chunks.get('source', 'llm')
             },

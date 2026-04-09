@@ -222,14 +222,15 @@
               <span class="detail-page">页 {{ (mineruSelectedChunk.page_idx || 0) + 1 }}</span>
             </div>
             <div class="detail-content">{{ mineruSelectedChunk.content }}</div>
+
+            <div v-if="mineruSelectedChunk.type === 'table' && mineruSelectedChunk.table_caption" class="detail-table-caption">
+              <span class="detail-table-caption-label">表头：</span>
+              <span>{{ mineruSelectedChunk.table_caption }}</span>
+            </div>
             <!-- 表格内容 -->
             <div v-if="mineruSelectedChunk.type === 'table' && mineruSelectedChunk.table_content" class="detail-table-content">
               <div class="detail-table-label">表格内容</div>
               <div class="detail-table-markdown" v-html="mineruSelectedChunk.table_content"></div>
-            </div>
-            <div v-if="mineruSelectedChunk.type === 'table' && mineruSelectedChunk.table_caption" class="detail-table-caption">
-              <span class="detail-table-caption-label">表头：</span>
-              <span>{{ mineruSelectedChunk.table_caption }}</span>
             </div>
             <div v-if="mineruSelectedChunk.type === 'table' && mineruSelectedChunk.table_footnote" class="detail-table-footnote">
               <div class="detail-table-label">表注</div>
@@ -250,60 +251,10 @@
         <div class="analysis-panel-header">
           <div class="analysis-panel-title">
             <span>🧠 智能分析</span>
-            <span v-if="analysisData?.summary" class="analysis-summary-badges">
-              <span class="badge">{{ analysisData.summary.total_sections }} 章节</span>
-              <span class="badge">{{ analysisData.summary.total_clauses }} 条文</span>
-              <span class="badge">{{ analysisData.summary.total_elements }} 实体</span>
-            </span>
-            <span v-else class="analysis-summary-badges">
-              <span class="badge" style="background:rgba(255,255,255,0.15)">等待分析...</span>
-            </span>
           </div>
           <button class="re-analyse-btn" @click="handleResetChunking" :disabled="starting">
             🔄 重新分析
           </button>
-        </div>
-        <div class="summary-cards" v-if="analysisData">
-          <div class="summary-card">
-            <div class="summary-num">{{ analysisData.summary.total_sections }}</div>
-            <div class="summary-label">章节</div>
-          </div>
-          <div class="summary-card">
-            <div class="summary-num">{{ analysisData.summary.total_clauses }}</div>
-            <div class="summary-label">条文</div>
-          </div>
-          <div class="summary-card">
-            <div class="summary-num">{{ analysisData.summary.total_elements }}</div>
-            <div class="summary-label">实体</div>
-          </div>
-          <div class="summary-card req-card">
-            <div class="req-bars">
-              <div class="req-bar-row">
-                <span class="req-tag mandatory">M</span>
-                <div class="req-bar">
-                  <div class="req-fill mandatory-fill"
-                    :style="{ width: reqBarWidth('mandatory') + '%' }"></div>
-                </div>
-                <span class="req-count">{{ analysisData.summary.requirement_stats.mandatory }}</span>
-              </div>
-              <div class="req-bar-row">
-                <span class="req-tag recommended">R</span>
-                <div class="req-bar">
-                  <div class="req-fill recommended-fill"
-                    :style="{ width: reqBarWidth('recommended') + '%' }"></div>
-                </div>
-                <span class="req-count">{{ analysisData.summary.requirement_stats.recommended }}</span>
-              </div>
-              <div class="req-bar-row">
-                <span class="req-tag prohibited">P</span>
-                <div class="req-bar">
-                  <div class="req-fill prohibited-fill"
-                    :style="{ width: reqBarWidth('prohibited') + '%' }"></div>
-                </div>
-                <span class="req-count">{{ analysisData.summary.requirement_stats.prohibited }}</span>
-              </div>
-            </div>
-          </div>
         </div>
 
         <!-- 章节树 -->
@@ -338,9 +289,6 @@
                   <div class="clause-row">
                     <span class="clause-id">{{ clause.clause_id }}</span>
                     <span class="clause-title">{{ clause.clause_title || clause.content?.substring(0, 40) + '...' }}</span>
-                    <span class="req-tag-sm" :class="clause.requirement_type">
-                      {{ clause.requirement_type === 'mandatory' ? 'M' : clause.requirement_type === 'recommended' ? 'R' : 'P' }}
-                    </span>
                   </div>
 
                   <!-- 条文详情 -->
@@ -425,6 +373,17 @@
                         <span v-if="triplet.condition" class="triplet-cond">@ {{ triplet.condition }}</span>
                       </div>
                     </div>
+
+                    <!-- 知识实体 -->
+                    <div class="clause-entities-section" v-if="clause.related_elements?.length">
+                      <div class="entity-section-label">📎 知识实体</div>
+                      <div class="entity-item-row" v-for="(elem, ei) in clause.related_elements" :key="ei">
+                        <span class="entity-type-tag">{{ elem.element_type || 'noun_entity' }}</span>
+                        <span class="entity-key">{{ elem.key }}</span>
+                        <span v-if="elem.value" class="entity-value">= {{ elem.value }}</span>
+                        <span v-if="elem.unit" class="entity-unit">{{ elem.unit }}</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -432,31 +391,6 @@
           </div>
         </div>
 
-        <!-- 知识实体池 -->
-        <div class="entity-pool" v-if="analysisData">
-          <div class="pool-header">
-            <span>知识实体池</span>
-            <div class="pool-tabs">
-              <button v-for="tab in poolTabs" :key="tab.key"
-                      class="pool-tab" :class="{ active: activePoolTab === tab.key }"
-                      @click="activePoolTab = tab.key">
-                {{ tab.label }}
-              </button>
-            </div>
-          </div>
-          <div class="pool-body">
-            <div class="entity-tags">
-              <template v-for="clause in poolFilteredClauses" :key="clause.clause_id">
-                <span v-for="(entity, i) in getEntityList(clause, activePoolTab)" :key="i"
-                      class="entity-tag"
-                      :class="poolTabClass(activePoolTab) + '-tag'"
-                      @click="handleEntityClick(entity, clause.clause_id)">
-                  {{ entity }}
-                </span>
-              </template>
-            </div>
-          </div>
-        </div>
       </div>
     </main>
 
@@ -577,16 +511,6 @@ const mineruSelectedChunk = ref(null)
 const mineruSummary = ref(null)
 const mineruchunkListRef = ref(null)
 
-// 知识实体池
-const poolTabs = [
-  { key: 'all', label: 'All' },
-  { key: 'terms', label: 'Terms' },
-  { key: 'conditions', label: 'Conds' },
-  { key: 'actions', label: 'Acts' },
-  { key: 'components', label: 'Comps' }
-]
-const activePoolTab = ref('all')
-
 // 分析数据
 const analysisData = ref(null)
 
@@ -660,10 +584,6 @@ function setCanvasRef(el, pageNum) {
     pageCanvasMap.value[pageNum] = el
   }
 }
-
-const poolFilteredClauses = computed(() => {
-  return analysisData.value?.clauses || []
-})
 
 // ============================================================================
 // 生命周期
@@ -1206,13 +1126,6 @@ function buildAnnotations() {
 // 交互
 // ============================================================================
 
-function reqBarWidth(type) {
-  if (!analysisData.value?.summary?.total_clauses) return 0
-  const total = analysisData.value.summary.total_clauses
-  const count = analysisData.value.summary.requirement_stats[type] || 0
-  return Math.round((count / Math.max(total, 1)) * 100)
-}
-
 function toggleChapter(chapterNum) {
   expandedChapters.value[chapterNum] = !expandedChapters.value[chapterNum]
 }
@@ -1328,29 +1241,6 @@ function toggleTermDef(termName) {
   }
   // 触发响应式更新
   expandedTermDefs.value = new Set(expandedTermDefs.value)
-}
-
-// ============================================================================
-// 知识实体池
-// ============================================================================
-
-function getEntityList(clause, tab) {
-  if (tab === 'all') {
-    const all = [
-      ...(clause.terms || []).map(t => typeof t === 'string' ? t : t.term_name),
-      ...(clause.conditions || []),
-      ...(clause.actions || []),
-      ...(clause.components || [])
-    ]
-    return [...new Set(all)].slice(0, 20)
-  }
-  if (tab === 'terms') return (clause.terms || []).map(t => typeof t === 'string' ? t : t.term_name)
-  return clause[tab] || []
-}
-
-function poolTabClass(tab) {
-  const map = { terms: 'term', conditions: 'cond', actions: 'action', components: 'comp' }
-  return map[tab] || 'term'
 }
 
 // ============================================================================
@@ -1546,32 +1436,6 @@ header.ca-header {
   background: #f8f9fa;
 }
 
-/* 统计摘要 */
-.summary-cards {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 1px;
-  background: #e0e0e0;
-  border-bottom: 1px solid #e0e0e0;
-  flex-shrink: 0;
-}
-.summary-card { background: #ffffff; padding: 12px 16px; text-align: center; }
-.summary-num { font-size: 24px; font-weight: 700; color: #1a1a2e; }
-.summary-label { font-size: 11px; color: #6b7280; margin-top: 2px; }
-.req-card { padding: 10px 12px; }
-.req-bars { display: flex; flex-direction: column; gap: 4px; }
-.req-bar-row { display: flex; align-items: center; gap: 4px; }
-.req-tag { width: 14px; height: 14px; border-radius: 3px; font-size: 9px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
-.req-tag.mandatory { background: #dc2626; color: white; }
-.req-tag.recommended { background: #d97706; color: white; }
-.req-tag.prohibited { background: #6b7280; color: white; }
-.req-bar { flex: 1; height: 4px; background: #e5e7eb; border-radius: 2px; overflow: hidden; }
-.req-fill { height: 100%; border-radius: 2px; }
-.mandatory-fill { background: #dc2626; }
-.recommended-fill { background: #d97706; }
-.prohibited-fill { background: #6b7280; }
-.req-count { font-size: 10px; color: #6b7280; min-width: 20px; }
-
 /* 智能分析面板表头 */
 .analysis-panel-header {
   display: flex;
@@ -1691,10 +1555,6 @@ header.ca-header {
 .clause-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
 .clause-id { font-size: 11px; color: #2563eb; font-family: monospace; min-width: 40px; }
 .clause-title { font-size: 12px; color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.req-tag-sm { padding: 1px 5px; border-radius: 3px; font-size: 10px; font-weight: 700; min-width: 16px; text-align: center; }
-.req-tag-sm.mandatory { background: #dc2626; color: white; }
-.req-tag-sm.recommended { background: #d97706; color: white; }
-.req-tag-sm.prohibited { background: #9ca3af; color: white; }
 
 .clause-detail { margin: 4px 0 6px; padding: 6px 0; border-top: 1px solid #f0f0f0; }
 .entity-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; min-height: 22px; }
@@ -1737,14 +1597,13 @@ header.ca-header {
 .triplet-obj { color: #16a34a; }
 .triplet-cond { color: #ca8a04; font-size: 10px; }
 
-/* 知识实体池 */
-.entity-pool { flex-shrink: 0; border-top: 1px solid #e0e0e0; }
-.pool-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: #ffffff; font-size: 12px; font-weight: 600; color: #1a1a2e; border-bottom: 1px solid #e0e0e0; }
-.pool-tabs { display: flex; gap: 4px; }
-.pool-tab { background: none; border: 1px solid #d0d7de; color: #6b7280; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
-.pool-tab:hover { background: #f0f0f0; color: #1a1a2e; }
-.pool-tab.active { background: #e5e7eb; color: #1a1a2e; border-color: #9ca3af; }
-.pool-body { padding: 8px 16px; max-height: 120px; overflow-y: auto; background: #ffffff; }
+.clause-entities-section { margin: 6px 0; }
+.entity-section-label { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
+.entity-item-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 11px; }
+.entity-type-tag { padding: 1px 6px; border-radius: 4px; font-size: 10px; background: #e5e7eb; color: #6b7280; font-weight: 600; }
+.entity-key { color: #1a1a2e; font-weight: 500; }
+.entity-value { color: #2563eb; }
+.entity-unit { color: #9ca3af; font-size: 10px; }
 
 /* 日志抽屉 */
 .log-drawer { background: #ffffff; border-top: 1px solid #e0e0e0; flex-shrink: 0; }

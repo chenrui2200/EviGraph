@@ -647,6 +647,14 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
 
     简化版：entities 替代 triplets，edges 替代 clause_items 层级结构
     """
+    # 从 triplets 自动提取 conditions/actions/components/objects（供前端展示）
+    # LLM 输出语义三元组，前端需要散列字段，通过此转换兼容两边
+    triplets_list = clause.triplets if clause.triplets else []
+    extracted_conditions = sorted(set(t.condition for t in triplets_list if t.condition)) if triplets_list else []
+    extracted_actions = sorted(set(t.action for t in triplets_list if t.action)) if triplets_list else []
+    extracted_components = sorted(set(t.component for t in triplets_list if t.component)) if triplets_list else []
+    extracted_objects = sorted(set(t.obj for t in triplets_list if t.obj)) if triplets_list else []
+
     return {
         "clause_id": clause.clause_id,
         "clause_title": clause.clause_title,
@@ -654,11 +662,15 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "source": clause.source or "",
         "page": clause.page,
         "requirement_type": clause.requirement_type.value if hasattr(clause.requirement_type, 'value') else str(clause.requirement_type),
-        "conditions": clause.conditions or [],
-        "actions": clause.actions or [],
-        "components": clause.components or [],
-        "objects": clause.objects or [],
+        # 优先使用显式字段，空则从 triplets 提取（兼容 LLM 只输出 triplets 的情况）
+        "conditions": clause.conditions if clause.conditions else extracted_conditions,
+        "actions": clause.actions if clause.actions else extracted_actions,
+        "components": clause.components if clause.components else extracted_components,
+        "objects": clause.objects if clause.objects else extracted_objects,
         "parent_chapter": clause.metadata.get("parent_chapter") if clause.metadata else None,
+        # 知识域字段（SATO 级别查询支持）
+        "scope_prefix": clause.metadata.get("scope_prefix") if clause.metadata else None,
+        "chapter": clause.metadata.get("chapter") if clause.metadata else None,
         "is_term_definition": clause.is_term_definition,
         "terms": clause.terms or [],
         "formula_content": clause.formula_content,
@@ -695,10 +707,11 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
             {
                 "item_number": ci.item_number,
                 "item_content": ci.item_content,
-                "components": ci.components,
-                "actions": ci.actions,
-                "conditions": ci.conditions,
-                "objects": ci.objects,
+                # 从 triplets 提取（兼容 LLM 只输出 triplets 的情况）
+                "components": ci.components if ci.components else sorted(set(t.component for t in (ci.triplets or []) if t.component)),
+                "actions": ci.actions if ci.actions else sorted(set(t.action for t in (ci.triplets or []) if t.action)),
+                "conditions": ci.conditions if ci.conditions else sorted(set(t.condition for t in (ci.triplets or []) if t.condition)),
+                "objects": ci.objects if ci.objects else sorted(set(t.obj for t in (ci.triplets or []) if t.obj)),
                 "triplets": [
                     {
                         "component": t.component,
@@ -1368,6 +1381,105 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         self.logger.info(f"[条款注册表] 构建完成: {len(registry)} 个条款")
         return registry
 
+    def _merge_clause_chunks(
+        self,
+        clause_id: str,
+        position_index: Dict[str, Any],
+        clause_registry: Dict[str, Dict]
+    ) -> tuple[str, list, str]:
+        """
+        合并条款的 title chunk + 后续 text chunks，还原完整条款内容。
+
+        策略：
+        1. 找到 clause_id 对应的所有 chunks（by_clause_id 索引）
+        2. 按 page_idx 和 chunk 内顺序排列
+        3. 合并相邻的 title + text chunks
+        4. 返回 (merged_content, merged_bbox, scope_prefix)
+
+        Returns:
+            (完整条款文本, 合并bbox列表, scope_prefix)
+        """
+        import re
+
+        def get_scope_prefix(cid: str, registry: Dict[str, Dict]) -> str:
+            """从 clause_id 推导 scope_prefix: '2.0.1'→'2.0', '3.1'→'3.1'（若有子条款）/'3'（若无）, 'A.0.7'→'A.0'"""
+            parts = cid.split('.')
+            if len(parts) == 3:
+                return '.'.join(parts[:2])
+            elif len(parts) == 2:
+                # 判断是否字母开头（如 A.0）
+                if parts[0].isalpha():
+                    return parts[0]
+                # 检查是否有子条款（如 3.1 下存在 3.1.1）：若有则用完整 X.Y 作为 scope
+                prefix = cid + '.'
+                has_child = any(k.startswith(prefix) for k in registry.keys())
+                if has_child:
+                    return cid
+                return parts[0]
+            return parts[0]
+
+        def get_chapter_num(cid: str) -> str:
+            """从 clause_id 推导章节号: '2.0.1'→'2', 'A.0.7'→'A'"""
+            return cid.split('.')[0]
+
+        all_clause_chunks = []
+
+        # 从 by_clause_id 获取该条款的所有 chunks（title + text）
+        if clause_id in position_index.get('by_clause_id', {}):
+            all_clause_chunks = list(position_index['by_clause_id'][clause_id])
+
+        # 也通过 text 内容匹配来补充（条款正文可能不以 clause_id 开头）
+        # 按 page_idx 和 chunk_id 排序（chunk_id 的整数顺序即阅读顺序）
+        def sort_key(c):
+            cid_str = c.get('chunk_id', 'chunk_0')
+            parts = cid_str.replace('chunk_', '').split('_')
+            return (int(parts[0]) if parts[0].isdigit() else 0,
+                    int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0)
+        all_clause_chunks.sort(key=sort_key)
+
+        if not all_clause_chunks:
+            return '', [], get_scope_prefix(clause_id, clause_registry)
+
+        # 收集所有 clause_chunks 的 page_idx（去重）
+        pages_involved = sorted(set(c.get('page_idx', 0) for c in all_clause_chunks))
+
+        # 合并文本内容
+        merged_texts = []
+        for c in all_clause_chunks:
+            text = c.get('content', '') or ''
+            if text.strip():
+                merged_texts.append(text.strip())
+
+        # 如果只有 title chunk（无正文），补充条款注册表中的 title
+        if not merged_texts:
+            entry = clause_registry.get(clause_id, {})
+            title = entry.get('title', '')
+            if title:
+                merged_texts.append(title)
+
+        merged_content = '\n'.join(merged_texts)
+
+        # 合并 bbox：取所有 chunks bbox 的并集（跨页时分组处理）
+        all_bboxes = []
+        for c in all_clause_chunks:
+            bbox = c.get('bbox_pdf') or c.get('bbox_viewport') or []
+            if bbox and len(bbox) >= 4:
+                all_bboxes.append((bbox, c.get('page_idx', 0)))
+
+        # 按 page 分组合并 bbox
+        merged_bboxes = []
+        for page_idx in pages_involved:
+            page_bboxes = [bbox for bbox, pid in all_bboxes if pid == page_idx]
+            if not page_bboxes:
+                continue
+            x0 = min(b[0] for b in page_bboxes)
+            y0 = min(b[1] for b in page_bboxes)
+            x1 = max(b[2] for b in page_bboxes)
+            y1 = max(b[3] for b in page_bboxes)
+            merged_bboxes.append([x0, y0, x1, y1])
+
+        return merged_content, merged_bboxes, get_scope_prefix(clause_id, clause_registry)
+
     def _build_chunk_position_index(self, chunks: List[Dict]) -> Dict[str, Any]:
         """
         为 chunks.json 构建位置索引，供 clause 文本匹配使用。
@@ -1455,34 +1567,73 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         self,
         clause_id: str,
         clause_text: str,
-        position_index: Dict[str, Any]
+        position_index: Dict[str, Any],
+        clause_registry: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        将 clause 文本匹配到 chunks.json 中的对应块，返回位置信息。
+        将 clause 文本匹配到 chunks.json 中的对应块，返回位置信息 + 合并后的条款内容。
 
         匹配策略（优先级递减）：
-        1. clause_id 精确匹配 → 直接命中 title/text chunk
+        1. clause_id 精确匹配 → 直接命中 title/text chunk → 合并 title+text
         2. 子串包含匹配 → clause_text 在 chunk.content 中
         3. n-gram 交集匹配 → 统计共同 n-gram 数量
+
+        新增功能：
+        - 返回 merged_content（title + text 合并后的完整条款文本）
+        - 返回 scope_prefix（知识域前缀，如 "2.0"）
+        - 返回 chapter（章节号，如 "2"）
 
         Args:
             clause_id: 条款编号（如 "3.2.5"）
             clause_text: 条款文本内容
             position_index: _build_chunk_position_index 构建的索引
+            clause_registry: 可选，条款注册表（用于补充 title）
 
         Returns:
-            位置信息字典（含 page_idx, bbox_pdf, chunk_id 等）
+            位置信息字典（含 page_idx, bbox_pdf, chunk_id, merged_content, scope_prefix, chapter 等）
         """
         result: Dict[str, Any] = {}
 
-        # 策略1: clause_id 精确匹配 title chunk
-        if clause_id and clause_id in position_index['by_clause_id']:
-            chunks = position_index['by_clause_id'][clause_id]
-            # 优先选 title chunk，其次选 text chunk
-            best = next((c for c in chunks if c.get('type') == 'title'), chunks[0])
-            result = self._extract_position_from_chunk(best)
-            self.logger.debug(f"[位置解析] clause_id={clause_id} 策略1命中: chunk={best.get('chunk_id')}")
-            return result
+        def get_scope_prefix(cid: str, registry: Optional[Dict[str, Any]] = None) -> str:
+            """从 clause_id 推导 scope_prefix: '2.0.1'→'2.0', '3.1'→'3.1'（若有子条款）/'3'（若无）, 'A.0.7'→'A.0'"""
+            parts = cid.split('.')
+            if len(parts) == 3:
+                return '.'.join(parts[:2])
+            elif len(parts) == 2:
+                # 判断是否字母开头（如 A.0）
+                if parts[0].isalpha():
+                    return parts[0]
+                # 检查是否有子条款（如 3.1 下存在 3.1.1）：若有则用完整 X.Y 作为 scope
+                if registry:
+                    prefix = cid + '.'
+                    has_child = any(k.startswith(prefix) for k in registry.keys())
+                    if has_child:
+                        return cid
+                return parts[0]
+            return parts[0]
+
+        def get_chapter_num(cid: str) -> str:
+            return cid.split('.')[0]
+
+        # 策略1: clause_id 精确匹配 → 优先使用 chunks 合并方案
+        if clause_id and clause_id in position_index.get('by_clause_id', {}):
+            # 使用 _merge_clause_chunks 合并 title + text chunks
+            merged_content, merged_bboxes, scope_prefix = self._merge_clause_chunks(
+                clause_id, position_index, clause_registry or {}
+            )
+            all_matched = position_index['by_clause_id'][clause_id]
+            # 取第一个 chunk 的基本信息
+            first_chunk = next((c for c in all_matched if c.get('type') == 'title'), all_matched[0])
+            pos_info = self._extract_position_from_chunk(first_chunk)
+
+            # 补充新增字段
+            pos_info['merged_content'] = merged_content
+            pos_info['scope_prefix'] = scope_prefix
+            pos_info['chapter'] = get_chapter_num(clause_id)
+            if merged_bboxes:
+                pos_info['merged_bboxes'] = merged_bboxes
+            self.logger.debug(f"[位置解析] clause_id={clause_id} 策略1命中: content_chars={len(merged_content)}")
+            return pos_info
 
         # 策略2: 子串包含匹配
         if clause_text:
@@ -1494,7 +1645,6 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                 chunk_text = (chunk.get('content') or '').strip()
                 if not chunk_text or len(chunk_text) < 10:
                     continue
-                # 检查 clause_text 是否在 chunk_text 中
                 if clause_stripped in chunk_text:
                     ratio = len(clause_stripped) / max(len(chunk_text), 1)
                     if ratio > best_ratio:
@@ -1503,6 +1653,9 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 
             if best_match and best_ratio >= 0.3:
                 result = self._extract_position_from_chunk(best_match)
+                result['merged_content'] = best_match.get('content', '') or clause_text
+                result['scope_prefix'] = get_scope_prefix(clause_id, clause_registry)
+                result['chapter'] = get_chapter_num(clause_id)
                 self.logger.debug(f"[位置解析] clause_id={clause_id} 策略2命中: ratio={best_ratio:.2f}")
                 return result
 
@@ -1520,8 +1673,18 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                 if best_count >= 3:
                     chunk = position_index['by_id'].get(best_chunk_id, {})
                     result = self._extract_position_from_chunk(chunk)
+                    result['merged_content'] = chunk.get('content', '') or clause_text
+                    result['scope_prefix'] = get_scope_prefix(clause_id, clause_registry)
+                    result['chapter'] = get_chapter_num(clause_id)
                     self.logger.debug(f"[位置解析] clause_id={clause_id} 策略3命中: chunk={best_chunk_id} ngram_count={best_count}")
                     return result
+
+        # 回退：用 clause 注册表的 title
+        if clause_registry and clause_id in clause_registry:
+            entry = clause_registry[clause_id]
+            result['merged_content'] = entry.get('title', clause_text)
+            result['scope_prefix'] = get_scope_prefix(clause_id, clause_registry)
+            result['chapter'] = get_chapter_num(clause_id)
 
         self.logger.debug(f"[位置解析] clause_id={clause_id} 未匹配到 chunks")
         return result
@@ -1883,14 +2046,12 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         pdf_path: Optional[str] = None
     ) -> HierarchicalChunkResult:
         """
-        主入口：LLM 驱动的智能分块（简化版，表格替换 + 简单边关系 + LLM实体抽取）
+        主入口：基于 chunks.json 的智能分块
 
         策略：
-        1. 表格图片替换（raw_text 生成）
-        2. 按 # 分解层级
-        3. 回溯 chunks.json 找 bbox
-        4. LLM 只做实体抽取（Term, Component, Parameter, Formula, Condition, System）
-        5. 正则抽取简单边关系
+        1. 直接从 chunks_data 构建章节和条款结构（基于 type 和位置）
+        2. 逐章 LLM 提取实体（Term/Component/Parameter/Formula 等）
+        3. 保留检查点机制支持断点恢复
 
         Args:
             text_chunks: 原始文本块列表
@@ -1898,10 +2059,10 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             resume_from_chapter: 从第几个章节恢复（0表示从头开始）
             checkpoint: 增强版检查点（用于断点恢复）
             project_id: 项目ID（用于保存检查点）
-            md_content: MinerU 解析的 Markdown 内容
-            chunks_data: chunks.json 数据
-            mineru_data: MinerU 原始数据（用于表格图片 OCR 替换）
-            pdf_path: PDF 文件路径（用于表格 OCR）
+            md_content: MinerU 解析的 Markdown 内容（可选，用于兼容）
+            chunks_data: chunks.json 数据（核心数据源）
+            mineru_data: MinerU 原始数据（可选）
+            pdf_path: PDF 文件路径（可选）
 
         Returns:
             HierarchicalChunkResult: 包含所有层级分块的结果
@@ -1915,176 +2076,92 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 
         result = HierarchicalChunkResult()
 
-        # 先合并同条款的相邻 chunks，再拼接为全文
-        text_chunks = self.merge_adjacent_chunks(text_chunks)
-        full_text = self._merge_text_chunks(text_chunks)
-        source_info = self._get_source_info(text_chunks)
-
-        self.logger.info(f"[LLM分块] 开始分析，文本长度: {len(full_text)}")
-        self.logger.info(f"[LLM分块] 来源信息: {source_info}")
+        # =====================================================================
+        # Step 0: 数据准备 - 直接从 chunks_data 构建章节和条款
+        # =====================================================================
         self._report_progress(0.0, "🚀 开始智能标注分析...")
+        self.logger.info("[LLM分块] Step 0/4: 从 chunks.json 构建章节和条款结构")
 
-        # =====================================================================
-        # Step 0: 构建位置索引
-        # =====================================================================
-
-        # 构建 chunks 位置索引（无论是否有 md_content 都构建）
-        self._position_index: Dict[str, Any] = {}
-        if chunks_data:
-            # 使用传入的 chunks_data（来自 chunks.json，已带物理位置）
-            self._position_index = self._build_chunk_position_index(chunks_data)
-            self.logger.info(f"[LLM分块] 位置索引构建完成: {len(chunks_data)} chunks")
-        elif text_chunks:
-            # fallback：从 text_chunks 构建
-            raw_chunks = []
-            for c in text_chunks:
-                raw_chunks.append({
-                    'chunk_id': getattr(c, 'id', '') or c.metadata.get('chunk_id', ''),
+        # 优先使用 chunks_data
+        if not chunks_data:
+            # fallback：从 text_chunks 转换
+            chunks_data = []
+            for idx, c in enumerate(text_chunks):
+                chunks_data.append({
+                    'chunk_id': getattr(c, 'id', '') or c.metadata.get('chunk_id', f'tc_{idx}'),
                     'type': c.metadata.get('type', 'text'),
                     'content': c.text,
-                    'page_idx': c.metadata.get('page'),
-                    'bbox_pdf': c.metadata.get('bbox'),
-                    'bbox_viewport': c.metadata.get('bbox'),
-                    'page_width': c.metadata.get('page_width'),
-                    'page_height': c.metadata.get('page_height'),
-                    'source': c.metadata.get('source'),
+                    'page_idx': c.metadata.get('page', 0),
+                    'bbox_viewport': c.metadata.get('bbox', []),
+                    'source': c.metadata.get('source', ''),
                     'table_caption': c.metadata.get('table_caption', ''),
-                    'table_content': c.metadata.get('table_content', ''),
                 })
-            self._position_index = self._build_chunk_position_index(raw_chunks)
 
-        self._clause_registry: Dict[str, Dict] = {}
-        md_sections: List[Dict] = []
-        title_chunks = [c for c in text_chunks if c.metadata.get('type') == 'title']
+        source_info = {"source": chunks_data[0].get('source', '') if chunks_data else ''}
 
-        # Step 0.5: 表格图片替换（如果提供了 mineru_data）
-        raw_md_content = md_content
-        if md_content and mineru_data and pdf_path:
-            # 执行表格图片替换，用 OCR 结果替换 markdown 中的图片引用
-            self.logger.info("[LLM分块] 执行表格图片替换...")
-            raw_md_content = replace_table_images_in_md(md_content, mineru_data, pdf_path)
-            self.logger.info("[LLM分块] 表格图片替换完成")
-        elif md_content:
-            self.logger.info("[LLM分块] 未提供 mineru_data 或 pdf_path，跳过表格图片替换")
+        # 直接从 chunks_data 构建章节和条款
+        sections_data, clauses_data, chapter_plan = self._build_sections_and_clauses_from_chunks(chunks_data)
+        chapter_count = len(sections_data)
 
-        if raw_md_content:
-            self.logger.info("[LLM分块] 检测到 md_content，开始解析条款注册表...")
-            self._clause_registry = self._build_clause_registry(raw_md_content)
-            # 将 TextChunk 对象转换为 dict（_parse_md_content_sections 内部用 .get()）
-            title_chunks_dicts = [
-                {"content": c.text, "page_idx": c.metadata.get("page_idx"), "chunk_id": c.metadata.get("chunk_id")}
-                for c in title_chunks
-            ]
-            md_sections = self._parse_md_content_sections(
-                raw_md_content, title_chunks_dicts, self._clause_registry
-            )
-            self.logger.info(
-                f"[LLM分块] md_content 解析完成: {len(md_sections)} sections, "
-                f"{len(self._clause_registry)} 个条款注册"
-            )
-            # 构建 raw_md_content 行号到字符偏移的映射（用于条款匹配）
-            self._md_line_to_char_offset: List[int] = []
-            if raw_md_content:
-                offset = 0
-                for line in raw_md_content.split('\n'):
-                    self._md_line_to_char_offset.append(offset)
-                    offset += len(line) + 1  # +1 for newline
-            # 为条款注册表中的每个条款补充 char_offset
-            for entry in self._clause_registry.values():
-                line_no = entry.get("line_range", 0)
-                if line_no < len(self._md_line_to_char_offset):
-                    entry["char_offset"] = self._md_line_to_char_offset[line_no]
-                else:
-                    entry["char_offset"] = 0
+        self.logger.info(f"[LLM分块] ✅ 章节构建完成: {chapter_count} 章节, {len(clauses_data)} 条款")
 
         # =====================================================================
-        # Step 1: 读取目录 - 识别章节结构
+        # Step 1: 初始化/恢复检查点
         # =====================================================================
-        self._report_progress(0.02, "📖 LLM 提取目录结构...")
-        self.logger.info("[LLM分块] Step 1/5: 提取目录结构")
-
-        chapter_toc = self._extract_table_of_contents(full_text)
-
-        # 精化章节位置边界
-        refined_chapters = self._refine_chapter_positions(full_text, chapter_toc)
-        chapter_count = len(refined_chapters)
-
-        self.logger.info(f"[LLM分块] ✅ 目录提取完成: {chapter_count} 个章节")
-        self.logger.info(f"[LLM分块] 章节列表: {[c.get('title', 'N/A') for c in refined_chapters]}")
-        self._report_progress(
-            0.1,
-            f"✅ 读取目录完成: {chapter_count} 个章节"
-        )
-
-        # =====================================================================
-        # Step 2: 初始化或恢复检查点
-        # =====================================================================
+        self.logger.info("[LLM分块] Step 1/4: 初始化检查点")
         if checkpoint and checkpoint.chapter_plan:
             # 从检查点恢复
             self.logger.info(f"[LLM分块] 从检查点恢复: 已处理 {len(checkpoint.completed_clauses)} 条文")
             current_checkpoint = checkpoint
-            start_index = checkpoint.current_chapter_index + 1  # 从下一个章节继续
+            start_index = checkpoint.current_chapter_index + 1
 
             # 从检查点恢复已完成的数据
             result = self._build_result_from_checkpoint(checkpoint)
+            all_clauses = list(result.clauses)
         else:
             # 新任务，初始化检查点
             start_index = resume_from_chapter
             current_checkpoint = ChunkCheckpoint(
-                chapter_plan=[
-                    ChapterPlan(
-                        chapter_number=ch.get("chapter_number", i + 1),
-                        title=ch.get("title", f"章节{i + 1}"),
-                        start_position=ch.get("start_position", 0),
-                        end_position=ch.get("end_position", len(full_text)),
-                        status=ChapterStatus.PENDING,
-                        chapter_type=ch.get("chapter_type", "normative")
-                    )
-                    for i, ch in enumerate(refined_chapters)
-                ],
+                chapter_plan=chapter_plan,
                 current_chapter_index=-1,
                 total_chapters=chapter_count,
                 created_at=datetime.now().isoformat(),
                 updated_at=datetime.now().isoformat()
             )
+            all_clauses = []
 
         if start_index > 0:
             self.logger.info(f"[LLM分块] 从章节 {start_index} 恢复，跳过前 {start_index} 个章节")
 
-        # =====================================================================
-        # Step 3: 基于章节分段 - 渐进式处理每个章节
-        # =====================================================================
-        self.logger.info(f"[LLM分块] Step 2/5: 处理 {chapter_count} 个章节")
-        all_clauses = list(result.clauses)  # 已有数据
-        all_edges: List[Dict] = []  # 边关系列表
+        all_edges: List[Dict] = []
 
-        for i, chapter in enumerate(refined_chapters):
-            chapter_num = chapter.get("chapter_number", i + 1)
-            chapter_title = chapter.get("title", f"章节{chapter_num}")
-            start_pos = chapter.get("start_position", 0)
-            end_pos = chapter.get("end_position", len(full_text))
+        # =====================================================================
+        # Step 2: 逐章 LLM 提取实体
+        # =====================================================================
+        self.logger.info(f"[LLM分块] Step 2/4: 逐章 LLM 提取实体（共 {chapter_count} 章）")
+
+        for i, section_data in enumerate(sections_data):
+            chapter_num = section_data['chapter_number']
+            chapter_title = section_data['title']
 
             # 跳过已完成的章节
             if i < start_index:
                 self.logger.info(f"[LLM分块] 跳过章节 {chapter_num} (已处理)")
                 continue
 
-            # 更新检查点：设置当前章节为处理中
+            # 更新检查点
             current_checkpoint.current_chapter_index = i
             if i < len(current_checkpoint.chapter_plan):
                 current_checkpoint.chapter_plan[i].status = ChapterStatus.PROCESSING
                 current_checkpoint.chapter_plan[i].started_at = datetime.now().isoformat()
 
-            # 保存检查点（处理中状态）
             if project_id:
                 self._save_checkpoint(project_id, current_checkpoint)
 
             # 计算进度
-            base_progress = 0.1
-            chapter_progress_base = 0.1 + (i / chapter_count) * 0.6
+            chapter_progress_base = 0.1 + (i / chapter_count) * 0.65
 
             self.logger.info(f"[LLM分块] ▶ 处理章节 {chapter_num}/{chapter_count}: {chapter_title}")
-            self.logger.info(f"[LLM分块]   - 位置范围: [{start_pos}, {end_pos}], 字符数: {end_pos - start_pos}")
 
             self._report_progress(
                 chapter_progress_base,
@@ -2099,79 +2176,47 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                 }
             )
 
-            # 提取该章节的文本
-            chapter_text = full_text[start_pos:end_pos]
+            # 获取该章节的条款
+            chapter_clauses = [c for c in clauses_data if c.parent_chapter == chapter_num]
 
-            # 提取章节内的条文（LLM 只调用一次，提取 entities）
+            # 构建该章节的文本用于 LLM 分析
+            # 收集该章节下所有条款的内容
+            chapter_texts = []
+            for clause in chapter_clauses:
+                if clause.content:
+                    chapter_texts.append(f"[{clause.clause_id}] {clause.content}")
+            chapter_text = "\n\n".join(chapter_texts)
+
+            # 调用 LLM 提取实体
             para_start = time.time()
-            self.logger.info(f"[LLM分块]   → LLM 提取条文 + 实体...")
-
-            chapter_clauses = self._extract_clauses_from_chapter(
-                chapter_text, source_info, chapter_num, start_pos, end_pos
-            )
+            entities_data = []
+            if chapter_text:
+                try:
+                    entities_data = self._extract_entities_from_text(chapter_text, source_info)
+                except Exception as e:
+                    self.logger.warning(f"[LLM分块] 章节 {chapter_num} LLM 实体提取失败: {e}")
 
             para_time = time.time() - para_start
-            self.logger.info(f"[LLM分块]   ← 提取完成: {len(chapter_clauses)} 条文 (耗时 {para_time:.1f}s)")
+            self.logger.info(f"[LLM分块]   ← LLM 实体提取完成: {len(entities_data)} 实体 (耗时 {para_time:.1f}s)")
 
-            # 为条文解析精确物理位置（从 chunks 位置索引匹配）
+            # 为每个条款注入实体
             for clause in chapter_clauses:
-                pos_info = self._resolve_clause_position(
-                    clause.clause_id,
-                    clause.content,
-                    self._position_index
-                )
-                if pos_info:
-                    clause.metadata.update(pos_info)
+                # 简单策略：将所有实体分配给条款（实际应该按款/项分配）
+                clause.metadata['entities'] = entities_data
+                clause.metadata['semantics_enriched'] = True
 
-                # 增强 table 引用：把 referenced_tables 解析为具体位置
-                raw_tables = clause.metadata.get('referenced_tables', [])
-                for table_ref in raw_tables:
-                    table_info = self._resolve_table_reference(table_ref, self._position_index)
-                    if table_info and table_info.get('type') == 'table':
-                        ref = next(
-                            (r for r in clause.referenced_clauses if r.clause_id == table_ref),
-                            None
-                        )
-                        if ref:
-                            ref.page_idx = table_info.get('page_idx')
-                            ref.chunk_id = table_info.get('chunk_id')
-                            ref.section_title = table_info.get('table_caption')
-                        clause.metadata['referenced_table_positions'] = clause.metadata.get('referenced_table_positions', [])
-                        clause.metadata['referenced_table_positions'].append({
-                            'ref': table_ref,
-                            'page_idx': table_info.get('page_idx'),
-                            'bbox_pdf': table_info.get('bbox_pdf'),
-                            'chunk_id': table_info.get('chunk_id'),
-                            'table_caption': table_info.get('table_caption'),
-                        })
-            self.logger.info(f"[LLM分块]   → clause 位置解析完成: {sum(1 for c in chapter_clauses if c.metadata.get('page_idx'))}/{len(chapter_clauses)} 个 clause 有精确位置")
-
-            # 记录结果
-            all_clauses.extend(chapter_clauses)
-
-            # 提取边关系（正则实现）
-            clause_registry_for_edges = {
-                cid: {"line_range": entry.get("line_range"), "title": entry.get("title")}
-                for cid, entry in self._clause_registry.items()
-            }
-            chapter_edges = SimpleEdgeExtractor.extract_edges(chapter_text, clause_registry_for_edges)
-            all_edges.extend(chapter_edges)
-            self.logger.info(f"[LLM分块]   → 边关系提取完成: {len(chapter_edges)} 条边")
+            # 统计实体数量
+            chapter_entities_count = len(entities_data)
 
             # 创建章节对象
             section = SectionSegment(
                 chapter_number=chapter_num,
                 title=chapter_title,
-                content=chapter_text[:500]
+                content=chapter_text[:500] if chapter_text else ""
             )
             result.sections.append(section)
 
-            # 统计实体数量（从 clause.metadata["entities"] 提取）
-            chapter_entities_count = sum(
-                len(clause.metadata.get("entities", [])) for clause in chapter_clauses
-            )
-
-            # 更新检查点：标记章节为完成
+            # 更新检查点
             current_checkpoint.current_chapter_index = i
             if i < len(current_checkpoint.chapter_plan):
                 current_checkpoint.chapter_plan[i].status = ChapterStatus.COMPLETED
@@ -2179,54 +2224,54 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                 current_checkpoint.chapter_plan[i].clauses_count = len(chapter_clauses)
                 current_checkpoint.chapter_plan[i].elements_count = chapter_entities_count
 
-            # 将新处理的条文添加到检查点（实体已包含在 clause metadata 中）
+            # 将条款添加到检查点
             for clause in chapter_clauses:
                 current_checkpoint.completed_clauses.append(self._clause_to_dict(clause))
 
-            # 保存检查点
             if project_id:
                 self._save_checkpoint(project_id, current_checkpoint)
 
-            # 章节处理完成
             chapter_time = time.time() - para_start
             self._report_progress(
-                (i + 1) / chapter_count * 0.6 + 0.1,
+                0.1 + (i + 1) / chapter_count * 0.65,
                 f"✅ 章节 {chapter_num} 完成: {len(chapter_clauses)} 条文, {chapter_entities_count} 实体 (耗时 {chapter_time:.1f}s)",
                 checkpoint_info={
                     "current_chapter": chapter_num,
                     "total_chapters": chapter_count,
                     "completed_chapters": i + 1,
-                    "completed_clauses_count": len(all_clauses),
-                    "completed_entities_count": sum(len(c.metadata.get("entities", [])) for c in all_clauses) + chapter_entities_count,
+                    "completed_clauses_count": len(all_clauses) + len(chapter_clauses),
                     "chapter_completed": True
                 }
             )
             self.logger.info(f"[LLM分块] ✅ 章节 {chapter_num} 处理完成，检查点已保存")
 
+            # 记录结果
+            all_clauses.extend(chapter_clauses)
+
         # =====================================================================
-        # Step 4: 保存结果
+        # Step 3: 保存结果
         # =====================================================================
-        self.logger.info(f"[LLM分块] Step 4/5: 保存分析结果")
-        result.sections = list(result.sections) + [s for s in result.sections if s not in result.sections]
+        self.logger.info(f"[LLM分块] Step 3/4: 保存分析结果")
+        self._report_progress(0.80, "💾 保存 intelligent_chunks.json...")
+
         result.clauses = all_clauses
-        # 边关系存储在 result 的 metadata 中（动态属性）
         result.edges = all_edges
 
         # =====================================================================
-        # Step 5: 汇总报告
+        # Step 4: 汇总报告
         # =====================================================================
-        self.logger.info("[LLM分块] Step 5/5: 汇总报告")
+        self.logger.info("[LLM分块] Step 4/4: 汇总报告")
         total_entities = sum(len(c.metadata.get("entities", [])) for c in all_clauses)
         total_time = time.time() - start_time
         self._report_progress(
             0.95,
-            f"📊 标注分析汇总: {len(result.sections)} 章节, {len(all_clauses)} 条文, {total_entities} 实体, {len(all_edges)} 边关系"
+            f"📊 标注分析汇总: {len(result.sections)} 章节, {len(all_clauses)} 条文, {total_entities} 实体"
         )
 
         self._report_progress(1.0, f"✅ 智能标注分析完成! (总耗时 {total_time:.1f}s)")
 
         self.logger.info(
-            f"[LLM分块] ✅ 分析完成 - 章节: {len(result.sections)}, 条文: {len(all_clauses)}, 实体: {total_entities}, 边: {len(all_edges)}, "
+            f"[LLM分块] ✅ 分析完成 - 章节: {len(result.sections)}, 条文: {len(all_clauses)}, 实体: {total_entities}, "
             f"总耗时: {total_time:.1f}s"
         )
 
@@ -2255,7 +2300,222 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         )
 
     # =========================================================================
-    # 核心提取方法
+    # 核心提取方法 - 基于 chunks.json 直接构建章节和条款
+    # =========================================================================
+
+    def _extract_entities_from_text(
+        self,
+        text: str,
+        source_info: Dict[str, Any]
+    ) -> List[Dict]:
+        """
+        从文本中提取实体（使用 LLM）
+
+        Args:
+            text: 待分析文本
+            source_info: 来源信息
+
+        Returns:
+            实体列表
+        """
+        if not text or len(text.strip()) < 10:
+            return []
+
+        try:
+            response = self._call_llm_with_retry(
+                messages=[
+                    {"role": "system", "content": self.CLAUSE_SYSTEM_PROMPT},
+                    {"role": "user", "content": self.CLAUSE_USER_PROMPT
+                        .replace("{document_text}", text[:self.MAX_CHARS_PER_CHAPTER])
+                        .replace("{source}", source_info.get("source", ""))}
+                ],
+                temperature=0.3
+            )
+            return response.get("entities", [])
+        except Exception as e:
+            self.logger.warning(f"[LLM实体提取] 失败: {e}")
+            return []
+
+    def _build_sections_and_clauses_from_chunks(
+        self,
+        chunks_data: List[Dict]
+    ) -> tuple:
+        """
+        直接从 chunks.json 构建章节和条款结构。
+
+        逻辑：
+        1. type=="title" 的 chunk 作为章节标题
+        2. 相邻 title chunk 之间的内容属于前一个章节
+        3. type=="text" 且以 X.Y.Z 格式开头的作为条款
+        4. 小章节信号（如 1.0.1）标记为 sub_chapter
+
+        Args:
+            chunks_data: chunks.json 数据列表
+
+        Returns:
+            (sections, clauses, chapter_plan)
+            - sections: SectionSegment 列表
+            - clauses: ClauseSegment 列表（含 parent_chapter 关联）
+            - chapter_plan: ChapterPlan 列表（用于检查点）
+        """
+        import re
+
+        sections = []
+        clauses = []
+        chapter_plan = []
+
+        # 用于匹配大章节标题（如 "2 术语"）
+        CHAPTER_PATTERN = re.compile(r'^(\d+(?:\.\d+)?)\s+(.+)')
+
+        # 用于匹配条款编号（如 "2.1"、"3.5.2"、"1.0.1"）
+        CLAUSE_PATTERN = re.compile(r'^(\d+\.\d+(?:\.\d+)?)\s*(.*)')
+
+        # 用于匹配子章节信号（如 "3.1"、"3.1.1"）- 只要有 . 就是子章节
+        SUB_CHAPTER_PATTERN = re.compile(r'^\d+\.\d+')
+
+        current_chapter = None
+        current_chapter_idx = -1
+
+        for i, chunk in enumerate(chunks_data):
+            # 兼容多种 chunk 格式
+            # 1. 顶层字段：chunk.get('type'), chunk.get('content')
+            # 2. metadata 嵌套：chunk.get('metadata', {}).get('type')
+            # 3. 旧格式 text 字段：chunk.get('text')
+            metadata = chunk.get('metadata', {})
+            chunk_type = chunk.get('type') or metadata.get('type', '')
+            content = chunk.get('content') or chunk.get('text') or metadata.get('content', '')
+            if isinstance(content, str):
+                content = content.strip()
+            else:
+                content = ''
+            page_idx = chunk.get('page_idx') or metadata.get('page_idx') or 0
+            bbox_viewport = chunk.get('bbox_viewport') or metadata.get('bbox_viewport', [])
+            chunk_id = chunk.get('chunk_id') or metadata.get('chunk_id', f'chunk_{i}')
+            source = chunk.get('source') or metadata.get('source', '')
+
+            if not content:
+                continue
+
+            # 判断是否为章节标题
+            # 策略：type=='title' 且符合章节编号格式（如 "3 电气和导体的选择"）
+            if chunk_type == 'title' and CHAPTER_PATTERN.match(content):
+                m = CHAPTER_PATTERN.match(content)
+                chapter_num_str = m.group(1)
+                title = m.group(2).strip()
+
+                # 转换章节编号
+                parts = chapter_num_str.split('.')
+                if len(parts) == 1:
+                    chapter_num = int(parts[0])
+                else:
+                    chapter_num = float(chapter_num_str)
+
+                # 检查是否是小章节信号（如 1.0.1）作为条款而非章节
+                if SUB_CHAPTER_PATTERN.match(chapter_num_str):
+                    # 这是一个小章节信号，实际上应该是条款
+                    # 不创建新章节，保留 current_chapter
+                    pass
+                else:
+                    # 创建新章节
+                    current_chapter_idx += 1
+                    current_chapter = {
+                        'chapter_number': chapter_num,
+                        'title': title,
+                        'page_idx': page_idx,
+                        'start_idx': i,
+                        'end_idx': i,
+                        'level': 1 if len(parts) == 1 else 2,
+                        'sub_chapters': []
+                    }
+                    sections.append(current_chapter)
+                    chapter_plan.append(ChapterPlan(
+                        chapter_number=chapter_num,
+                        title=title,
+                        start_position=i,
+                        end_position=len(chunks_data),
+                        status=ChapterStatus.PENDING,
+                        chapter_type='normative'
+                    ))
+
+                    self.logger.info(f"[章节构建] {chapter_num}. {title} (page={page_idx})")
+                continue
+
+            # 如果 type=='title' 但不符合编号格式（如 "前 言"、"目 录"），跳过
+            # 不影响 current_chapter，条款仍归属到前一个有效章节
+            if chunk_type == 'title':
+                self.logger.debug(f"[章节构建] 跳过无编号标题: {content[:30]}")
+                continue
+
+            # 如果有当前章节，处理条款
+            if current_chapter is not None:
+                # 更新章节的结束位置
+                current_chapter['end_idx'] = i
+
+                # 检查是否为条款
+                m = CLAUSE_PATTERN.match(content)
+                if m:
+                    clause_id = m.group(1)
+                    clause_title = m.group(2).strip()[:80] if m.group(2) else ''
+
+                    # 判断条款层级
+                    parts = clause_id.split('.')
+                    is_sub_chapter = len(parts) == 3 and parts[2] == '0'
+
+                    # 判断 requirement_type（基于关键词）
+                    req_type = RequirementType.RECOMMENDED
+                    if any(kw in content for kw in ['应', '必须', '严禁', '不得', '应不', '不应', '不宜']):
+                        req_type = RequirementType.MANDATORY
+                    elif any(kw in content for kw in ['宜', '可', '建议', '推荐']):
+                        req_type = RequirementType.RECOMMENDED
+                    elif any(kw in content for kw in ['禁止', '不应', '不得']):
+                        req_type = RequirementType.PROHIBITED
+
+                    clause = ClauseSegment(
+                        clause_id=clause_id,
+                        clause_title=clause_title,
+                        content=content,
+                        paragraphs=[],
+                        requirement_type=req_type,
+                        applicable_systems=[],
+                        cross_refs=[],
+                        source=source,
+                        page=page_idx,
+                        triplets=[],
+                        clause_items=[],
+                        is_term_definition=False,
+                        terms=[],
+                        formula_content=None,
+                        semantics_enriched=False,
+                        parent_chapter=current_chapter['chapter_number'],
+                        referenced_clauses=[],
+                        referenced_standards=[],
+                        metadata={
+                            "chunk_type": chunk_type,
+                            "chunk_id": chunk_id,
+                            "parent_chapter": current_chapter['chapter_number'],
+                            "parent_chapter_title": current_chapter['title'],
+                            "page_idx": page_idx,
+                            "bbox_viewport": bbox_viewport,
+                            "is_sub_chapter": is_sub_chapter,
+                            "entities": []
+                        }
+                    )
+                    clauses.append(clause)
+
+                    if is_sub_chapter:
+                        current_chapter['sub_chapters'].append(clause_id)
+
+                    self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx})")
+
+        # 更新 chapter_plan 的 end_position
+        for plan in chapter_plan:
+            plan.end_position = len(chunks_data)  # 简化处理
+
+        self.logger.info(f"[章节构建] 完成: {len(sections)} 章节, {len(clauses)} 条款")
+        return sections, clauses, chapter_plan
+
+    # =========================================================================
+    # 核心提取方法 - LLM 目录提取（保留用于参考，后续可删除）
     # =========================================================================
 
     def _extract_table_of_contents(self, text: str) -> List[Dict]:
