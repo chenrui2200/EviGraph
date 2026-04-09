@@ -693,6 +693,8 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "referenced_standards": clause.referenced_standards or [],
         # 简化版：实体列表（替代 triplets）
         "entities": clause.metadata.get("entities", []) if clause.metadata else [],
+        # topic（条款语义摘要）
+        "topic": clause.metadata.get("topic", "") if clause.metadata else "",
         # 语义三元组（保留兼容，但为空）
         "triplets": [
             {
@@ -1058,6 +1060,66 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
     "referenced_standards": []
 }}
 ```"""
+
+    # ============================================================
+    # Topic 提取 Prompt（阶段 A）
+    # ============================================================
+    TOPIC_SYSTEM_PROMPT = """你是一个工程规范文档的条文分析专家。
+
+你的任务是为每条条文生成一个简洁的 topic（主题摘要）。
+
+## 要求
+- topic 描述这条条文介绍了什么方面的知识信息
+- topic 应该是一个简短的短语或句子（不超过 30 字）
+- 只输出 topic 内容，不要其他解释
+- 例如："剩余电流保护电器的设置要求"、"直接接触防护的措施"、"短路电流的计算方法"
+
+## 输出格式
+请输出 JSON 格式：
+{{"topic": "topic 内容"}}
+
+不要输出其他内容，只输出 JSON。"""
+
+    TOPIC_USER_PROMPT = """请为以下条文生成 topic：
+
+{clause_text}
+
+要求：topic 应该说明这条条文介绍了什么方面的知识信息，简短且精确。
+
+请输出 JSON："""
+
+    # ============================================================
+    # 实体提取 Prompt（阶段 B）- 简化版
+    # ============================================================
+    ENTITY_SYSTEM_PROMPT = """你是一个工程规范文档的实体抽取专家。
+
+你的任务是从条文中提取知识实体（名词）。
+
+## 要求
+- 只提取条文中明确提到的实体名词
+- 不要提取动词、形容词、副词等
+- 不要提取条文编号、日期等非实体内容
+- 实体应该是技术相关的：设备、系统、材料、参数、场所等
+- 严格控制数量，最多 3-5 个，只保留最核心的实体
+
+## 输出格式
+请输出 JSON 格式：
+{{"entities": ["实体1", "实体2", "实体3"]}}
+
+如果没有有意义的实体，输出：{{"entities": []}}"""
+
+    ENTITY_USER_PROMPT = """请提取以下条文中的知识实体：
+
+条文内容：{clause_text}
+
+topic：{topic}
+
+要求：
+1. topic 描述了这条条文的核心主题，实体必须与 topic 高度相关
+2. 严格控制数量，最多 3-5 个，只保留最核心的实体
+3. 无关的实体不要提取
+
+请输出 JSON："""
 
     # 要素提取 Prompt
     ELEMENT_SYSTEM_PROMPT = """你是一个工程规范文档的要素提取专家。
@@ -2011,6 +2073,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         retry_delay = self.INITIAL_RETRY_DELAY
 
         for attempt in range(self.MAX_RETRIES + 1):
+            self.logger.info(f"[LLM 调用] attempt {attempt + 1}/{self.MAX_RETRIES + 1}")
             try:
                 response = self.client.chat_json(
                     messages=messages,
@@ -2027,7 +2090,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                     # 指数退避 + 抖动
                     jitter = random.uniform(0, 1)
                     actual_delay = min(retry_delay + jitter, self.MAX_RETRY_DELAY)
-                    self.logger.info(f"等待 {actual_delay:.1f} 秒后重试...")
+                    self.logger.info(f"  → 等待 {actual_delay:.1f} 秒后重试 (attempt {attempt + 2}/{self.MAX_RETRIES + 1})...")
                     time.sleep(actual_delay)
                     retry_delay *= self.RETRY_MULTIPLIER
                 else:
@@ -2181,34 +2244,44 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             # 获取该章节的条款
             chapter_clauses = [c for c in clauses_data if c.parent_chapter == chapter_num]
 
-            # 构建该章节的文本用于 LLM 分析
-            # 收集该章节下所有条款的内容
+            # 逐条款提取 topic + 实体（两阶段 LLM 提取）
+            para_start = time.time()
+            chapter_topics = []
+            chapter_entities_count = 0
+
+            for clause_idx, clause in enumerate(chapter_clauses):
+                if not clause.content:
+                    clause.metadata['topic'] = ""
+                    clause.metadata['entities'] = []
+                    continue
+
+                # 阶段 A: 提取 topic
+                topic_start = time.time()
+                topic = self._extract_topic_from_text(clause.content)
+                topic_time = time.time() - topic_start
+                clause.metadata['topic'] = topic
+                chapter_topics.append(topic)
+
+                # 阶段 B: 基于 topic 提取实体
+                entity_start = time.time()
+                entities = self._extract_entities_by_topic(clause.content, topic)
+                entity_time = time.time() - entity_start
+                clause.metadata['entities'] = entities
+                chapter_entities_count += len(entities)
+                clause.metadata['semantics_enriched'] = True
+
+                # 每条款处理完记录进度
+                self.logger.info(f"[LLM分块]   → 条款 {clause_idx + 1}/{len(chapter_clauses)} 完成, topic={topic[:20] if topic else '(空)'}, entities={len(entities)} 个 (topic提取:{topic_time:.1f}s entity提取:{entity_time:.1f}s)")
+
+            para_time = time.time() - para_start
+            self.logger.info(f"[LLM分块]   ← 章节 {chapter_num} 条款分析完成: {len(chapter_clauses)} 条文, {chapter_entities_count} 实体 (总耗时 {para_time:.1f}s)")
+
+            # 构建该章节的文本（用于 section.content）
             chapter_texts = []
             for clause in chapter_clauses:
                 if clause.content:
                     chapter_texts.append(f"[{clause.clause_id}] {clause.content}")
             chapter_text = "\n\n".join(chapter_texts)
-
-            # 调用 LLM 提取实体
-            para_start = time.time()
-            entities_data = []
-            if chapter_text:
-                try:
-                    entities_data = self._extract_entities_from_text(chapter_text, source_info)
-                except Exception as e:
-                    self.logger.warning(f"[LLM分块] 章节 {chapter_num} LLM 实体提取失败: {e}")
-
-            para_time = time.time() - para_start
-            self.logger.info(f"[LLM分块]   ← LLM 实体提取完成: {len(entities_data)} 实体 (耗时 {para_time:.1f}s)")
-
-            # 为每个条款注入实体
-            for clause in chapter_clauses:
-                # 简单策略：将所有实体分配给条款（实际应该按款/项分配）
-                clause.metadata['entities'] = entities_data
-                clause.metadata['semantics_enriched'] = True
-
-            # 统计实体数量
-            chapter_entities_count = len(entities_data)
 
             # 创建章节对象
             section = SectionSegment(
@@ -2304,6 +2377,97 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
     # =========================================================================
     # 核心提取方法 - 基于 chunks.json 直接构建章节和条款
     # =========================================================================
+
+    def _extract_topic_from_text(
+        self,
+        clause_text: str
+    ) -> str:
+        """
+        从单条条款文本中提取 topic（阶段 A）
+
+        Args:
+            clause_text: 条款文本
+
+        Returns:
+            topic 字符串，如果提取失败返回空字符串
+        """
+        if not clause_text or len(clause_text.strip()) < 10:
+            return ""
+
+        try:
+            self.logger.info(f"[LLM Topic 提取] 开始调用, clause_text长度={len(clause_text)}")
+            response = self._call_llm_with_retry(
+                messages=[
+                    {"role": "system", "content": self.TOPIC_SYSTEM_PROMPT},
+                    {"role": "user", "content": self.TOPIC_USER_PROMPT
+                        .replace("{clause_text}", clause_text[:2000])}
+                ],
+                temperature=0.3
+            )
+            # 兼容处理：response 可能是 dict 也可能是 list
+            if isinstance(response, dict):
+                topic = response.get("topic", "") or response.get("content", "") or ""
+            elif isinstance(response, list):
+                # LLM 返回了数组，尝试取第一个元素作为 topic
+                self.logger.warning(f"[LLM Topic 提取] 响应为 list，取第一个元素: {response[0] if response else '空'}")
+                topic = str(response[0]) if response else ""
+            else:
+                topic = str(response) if response else ""
+            self.logger.info(f"[LLM Topic 提取] 完成, topic={topic[:30] if topic else '(空)'}")
+            return topic.strip()
+        except Exception as e:
+            self.logger.warning(f"[LLM Topic 提取] 失败: {e}")
+            return ""
+
+    def _extract_entities_by_topic(
+        self,
+        clause_text: str,
+        topic: str
+    ) -> List[str]:
+        """
+        基于 topic 从条款中提取实体（阶段 B）
+
+        Args:
+            clause_text: 条款文本
+            topic: 条款的 topic
+
+        Returns:
+            实体名称列表（扁平字符串列表）
+        """
+        if not clause_text or len(clause_text.strip()) < 10:
+            return []
+
+        try:
+            self.logger.info(f"[LLM 实体提取] 开始, clause_text长度={len(clause_text)}, topic={topic[:20] if topic else '(空)'}")
+            response = self._call_llm_with_retry(
+                messages=[
+                    {"role": "system", "content": self.ENTITY_SYSTEM_PROMPT},
+                    {"role": "user", "content": self.ENTITY_USER_PROMPT
+                        .replace("{clause_text}", clause_text[:2000])
+                        .replace("{topic}", topic)}
+                ],
+                temperature=0.3
+            )
+            # 兼容处理：response 可能是 dict{"entities": [...]} 也可能是直接 list[...]
+            if isinstance(response, dict):
+                entities = response.get("entities", [])
+            elif isinstance(response, list):
+                # LLM 返回了直接数组
+                self.logger.warning(f"[LLM 实体提取] 响应为 list，直接作为结果")
+                entities = response
+            else:
+                self.logger.warning(f"[LLM 实体提取] 响应类型异常: {type(response)}")
+                entities = []
+            # 确保返回的是字符串列表
+            if isinstance(entities, list):
+                result = [e for e in entities if isinstance(e, str)]
+                self.logger.info(f"[LLM 实体提取] 完成, entities_count={len(result)}, entities={result}")
+                return result
+            self.logger.info(f"[LLM 实体提取] 完成, entities非列表类型")
+            return []
+        except Exception as e:
+            self.logger.warning(f"[LLM 实体提取] 失败: {e}")
+            return []
 
     def _extract_entities_from_text(
         self,

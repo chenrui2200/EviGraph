@@ -2920,29 +2920,28 @@ def intelligent_chunk():
                                 clause_to_dict(c) for c in result.clauses
                             ) if c["clause_id"] not in seen_ids and not seen_ids.add(c["clause_id"])
                         ])(set()),
-                        # 从 clauses.metadata["entities"] 提取实体作为 elements（兼容前端格式）
-                        # 同时按 entity.name + source_clause_id 去重
-                        # 新增 scope_prefix + chapter 支持按子章节聚合查询
+                        # 从 clauses["entities"] 提取实体作为 elements（简化版：实体为字符串列表）
+                        # 同时按 entity + source_clause_id 去重
                         "elements": (lambda seen_keys: [
                             {
-                                "element_type": ent.get("entity_type", "unknown"),
-                                "key": ent.get("name", ""),
-                                "value": ent.get("value", ""),
-                                "unit": ent.get("unit", ""),
-                                "abbreviation": ent.get("abbreviation", ""),
-                                "definition": ent.get("definition", ""),
-                                "source_clause_id": ent.get("clause_id", c["clause_id"]),
+                                "element_type": "noun_entity",
+                                "key": ent if isinstance(ent, str) else "",
+                                "value": "",
+                                "unit": "",
+                                "abbreviation": "",
+                                "definition": "",
+                                "source_clause_id": c["clause_id"],
                                 # 知识域字段：从 clause 顶层继承
                                 "scope_prefix": c.get("scope_prefix") or c.get("metadata", {}).get("scope_prefix"),
                                 "chapter": c.get("chapter") or c.get("metadata", {}).get("chapter"),
-                                "metadata": ent
+                                "metadata": {"name": ent if isinstance(ent, str) else ""}
                             }
                             for c in (
                                 clause_to_dict(c) for c in result.clauses
                             )
-                            for ent in c.get("metadata", {}).get("entities", [])
-                            if (ent.get("name", "") + "|" + c["clause_id"]) not in seen_keys
-                            and not seen_keys.add((ent.get("name", "") + "|" + c["clause_id"]))
+                            for ent in c.get("entities", [])
+                            if ent and (str(ent) + "|" + c["clause_id"]) not in seen_keys
+                            and not seen_keys.add(str(ent) + "|" + c["clause_id"])
                         ])(set()),
                         # 保存边关系
                         "edges": getattr(result, 'edges', []) or []
@@ -3307,8 +3306,9 @@ def get_chunk_analysis(project_id: str):
             "components": clause.get('components', []),
             "objects": clause.get('objects', []),
             # clause 自带的 entities 标准化（intelligent_chunks 格式 → 前端期望格式）
+            # 兼容处理：entities 可能是字符串列表（新版）或 dict 列表（旧版）
             "entities": [
-                {
+                e if isinstance(e, str) else {
                     "element_type": e.get("entity_type", "unknown"),
                     "key": e.get("name", ""),
                     "value": e.get("value", ""),
@@ -3318,7 +3318,7 @@ def get_chunk_analysis(project_id: str):
             ],
             # 关联要素：合并 elements 列表匹配 + clause 自带的 entities
             "related_elements": related_elements + [
-                {
+                e if isinstance(e, str) else {
                     "element_type": e.get("entity_type", "unknown"),
                     "key": e.get("name", ""),
                     "value": e.get("value", ""),
