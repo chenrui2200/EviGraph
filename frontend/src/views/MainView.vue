@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">Knowledge EviGrap</div>
+        <div class="brand" @click="router.push('/')">Knowledge EviGraph</div>
       </div>
       
       <div class="header-center">

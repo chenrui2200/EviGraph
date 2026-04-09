@@ -2,7 +2,7 @@
   <div class="process-page">
     <!-- Top navigation bar -->
     <nav class="navbar">
-      <div class="nav-brand" @click="goHome">Knowledge EviGrap</div>
+      <div class="nav-brand" @click="goHome">Knowledge EviGraph</div>
 
       <!-- Center step indicator -->
       <div class="nav-center">

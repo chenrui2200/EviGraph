@@ -267,7 +267,9 @@ class TextProcessor:
         use_llm: bool = True,
         progress_callback=None,
         md_content: Optional[str] = None,
-        chunks_data: Optional[List[Dict]] = None
+        chunks_data: Optional[List[Dict]] = None,
+        mineru_data: Optional[Dict] = None,
+        pdf_path: Optional[str] = None
     ) -> "HierarchicalChunkResult":
         """
         多层级语义分块 - 基于 LLM 的智能分块
@@ -284,6 +286,8 @@ class TextProcessor:
             progress_callback: 进度回调函数，格式: callback(progress, message)
             md_content: MinerU 解析的 Markdown 内容（用于条款引用识别）
             chunks_data: chunks.json 数据（用于 clause→chunk 位置匹配）
+            mineru_data: MinerU 原始数据（用于表格图片 OCR 替换）
+            pdf_path: PDF 文件路径（用于表格 OCR）
 
         Returns:
             HierarchicalChunkResult: 包含所有层级分块的结果
@@ -297,7 +301,14 @@ class TextProcessor:
             logger.info(f"使用 LLM 驱动的分块器")
 
             chunker = LLMDrivenChunker(progress_callback=progress_callback)
-            return chunker.chunk(text_chunks, progress_callback, md_content=md_content, chunks_data=chunks_data)
+            return chunker.chunk(
+                text_chunks,
+                progress_callback,
+                md_content=md_content,
+                chunks_data=chunks_data,
+                mineru_data=mineru_data,
+                pdf_path=pdf_path
+            )
 
         # 不再支持正则分块器作为回退
         raise NotImplementedError(
@@ -311,7 +322,9 @@ class TextProcessor:
         use_llm: bool = True,
         progress_callback=None,
         md_content: Optional[str] = None,
-        chunks_data: Optional[List[Dict]] = None
+        chunks_data: Optional[List[Dict]] = None,
+        mineru_data: Optional[Dict] = None,
+        pdf_path: Optional[str] = None
     ) -> "HierarchicalChunkResult":
         """
         对单个文本进行多层级分块
@@ -322,6 +335,8 @@ class TextProcessor:
             progress_callback: 进度回调函数
             md_content: MinerU 解析的 Markdown 内容
             chunks_data: chunks.json 数据
+            mineru_data: MinerU 原始数据（用于表格图片 OCR 替换）
+            pdf_path: PDF 文件路径（用于表格 OCR）
 
         Returns:
             HierarchicalChunkResult
@@ -335,7 +350,14 @@ class TextProcessor:
             logger.info(f"使用 LLM 驱动的分块器")
 
             chunker = LLMDrivenChunker(progress_callback=progress_callback)
-            return chunker.chunk_single_text(text, progress_callback, md_content=md_content, chunks_data=chunks_data)
+            return chunker.chunk_single_text(
+                text,
+                progress_callback,
+                md_content=md_content,
+                chunks_data=chunks_data,
+                mineru_data=mineru_data,
+                pdf_path=pdf_path
+            )
 
         raise NotImplementedError(
             "LLM 驱动的分块是必须的，不再支持正则分块器。"

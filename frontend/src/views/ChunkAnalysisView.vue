@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="ca-header">
       <div class="header-left">
-        <div class="brand" @click="router.push('/')">Knowledge EviGrap</div>
+        <div class="brand" @click="router.push('/')">Knowledge EviGraph</div>
       </div>
 
       <div class="header-right">
@@ -225,11 +225,15 @@
             <!-- 表格内容 -->
             <div v-if="mineruSelectedChunk.type === 'table' && mineruSelectedChunk.table_content" class="detail-table-content">
               <div class="detail-table-label">表格内容</div>
-              <div class="detail-table-markdown">{{ mineruSelectedChunk.table_content }}</div>
+              <div class="detail-table-markdown" v-html="mineruSelectedChunk.table_content"></div>
             </div>
             <div v-if="mineruSelectedChunk.type === 'table' && mineruSelectedChunk.table_caption" class="detail-table-caption">
-              <span class="detail-table-caption-label">表注：</span>
+              <span class="detail-table-caption-label">表头：</span>
               <span>{{ mineruSelectedChunk.table_caption }}</span>
+            </div>
+            <div v-if="mineruSelectedChunk.type === 'table' && mineruSelectedChunk.table_footnote" class="detail-table-footnote">
+              <div class="detail-table-label">表注</div>
+              <div class="detail-table-footnote-text">{{ mineruSelectedChunk.table_footnote }}</div>
             </div>
             <div v-if="mineruSelectedChunk.bbox_viewport" class="detail-bbox">
               <span class="detail-bbox-label">bbox_viewport:</span>
@@ -249,7 +253,7 @@
             <span v-if="analysisData?.summary" class="analysis-summary-badges">
               <span class="badge">{{ analysisData.summary.total_sections }} 章节</span>
               <span class="badge">{{ analysisData.summary.total_clauses }} 条文</span>
-              <span class="badge">{{ analysisData.summary.total_elements }} 要素</span>
+              <span class="badge">{{ analysisData.summary.total_elements }} 实体</span>
             </span>
             <span v-else class="analysis-summary-badges">
               <span class="badge" style="background:rgba(255,255,255,0.15)">等待分析...</span>
@@ -270,7 +274,7 @@
           </div>
           <div class="summary-card">
             <div class="summary-num">{{ analysisData.summary.total_elements }}</div>
-            <div class="summary-label">要素</div>
+            <div class="summary-label">实体</div>
           </div>
           <div class="summary-card req-card">
             <div class="req-bars">
@@ -782,6 +786,11 @@ async function loadExistingProject() {
       startTaskSSE()
       startProgressPolling()
     } else if (res.data.status === 'ontology_generated' || res.data.status === 'created') {
+      // ontology_generation 状态下也可能 MinerU 正在解析，需要建立 SSE 接收日志
+      if (res.data.ontology_task_id) {
+        taskId.value = res.data.ontology_task_id
+        startTaskSSE()
+      }
       showStartButton.value = true
     }
 
@@ -1632,9 +1641,16 @@ header.ca-header {
 .detail-content { font-size: 11px; color: #374151; line-height: 1.5; margin-bottom: 8px; white-space: pre-wrap; word-break: break-all; }
 .detail-table-content { margin: 8px 0; }
 .detail-table-label { font-size: 10px; color: #9ca3af; margin-bottom: 4px; font-weight: 500; }
-.detail-table-markdown { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: #374151; overflow-x: auto; }
+.detail-table-markdown { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px; font-size: 11px; line-height: 1.6; color: #374151; overflow-x: auto; }
+.detail-table-markdown table { width: auto; max-width: 100%; border-collapse: collapse; font-size: 11px; }
+.detail-table-markdown td, .detail-table-markdown th { border: 1px solid #d1d5db; padding: 4px 8px; text-align: left; vertical-align: top; }
+.detail-table-markdown th { background: #f3f4f6; font-weight: 600; }
+.detail-table-markdown tr:nth-child(even) td { background: #f9fafb; }
+.detail-table-markdown tr:hover td { background: #eff6ff; }
 .detail-table-caption { font-size: 10px; color: #6b7280; margin-top: 6px; }
 .detail-table-caption-label { color: #9ca3af; }
+.detail-table-footnote { margin-top: 8px; }
+.detail-table-footnote-text { font-size: 11px; color: #374151; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 10px; line-height: 1.6; white-space: pre-wrap; }
 .detail-bbox { display: flex; align-items: center; gap: 6px; font-size: 10px; }
 .detail-bbox-label { color: #9ca3af; }
 .detail-bbox-val { color: #6b7280; font-family: monospace; }

@@ -58,6 +58,580 @@ from ..utils.llm_client import LLMClient
 logger = logging.getLogger('mirofish.llm_chunker')
 
 
+# ============================================================================
+# 表格图片替换辅助函数
+# ============================================================================
+
+def _reconstruct_image_refs_from_placeholders(
+    md_content: str,
+    img_path_list: list,
+    logger
+) -> str:
+    """
+    当 MinerU 输出 [表格内容待解析] 占位符时，重建 ![xxx](images/xxx.jpg) 格式的图片引用。
+
+    策略：由于编码问题导致 table_caption 乱码无法用于匹配，
+    采用顺序匹配策略：按顺序将占位符与 img_path_list 中的 img_path 配对。
+
+    流程：
+    1. 找到所有 [表格内容待解析] 的位置
+    2. 按顺序与 img_path_list 中的 img_path 配对
+    3. 将 [表格内容待解析] 替换为 ![表序号](img_path)
+
+    Args:
+        md_content: 包含占位符的 md 内容
+        img_path_list: [(caption, img_path), ...] 列表（保持顺序）
+        logger: 日志记录器
+
+    Returns:
+        替换图片引用后的 md_content
+    """
+    import re
+
+    # 查找所有 [表格内容待解析] 的位置
+    placeholder_pattern = re.compile(r'\[表格内容待解析\]')
+    placeholder_matches = list(placeholder_pattern.finditer(md_content))
+
+    if not placeholder_matches:
+        return md_content
+
+    logger.info(f"[表格替换] 找到 {len(placeholder_matches)} 个 [表格内容待解析] 占位符")
+
+    # 按顺序与 img_path_list 配对
+    logger.info(f"[表格替换] 可用的 img_path 数量: {len(img_path_list)}")
+
+    if len(placeholder_matches) > len(img_path_list):
+        logger.warning(f"[表格替换] 占位符数量 ({len(placeholder_matches)}) > img_path 数量 ({len(img_path_list)})")
+
+    # 逐个替换（逆序保持位置）
+    replacements = []
+    for i, ph_match in enumerate(placeholder_matches):
+        if i < len(img_path_list):
+            caption, img_path = img_path_list[i]
+            # 使用序号作为 alt text
+            replacement = f"![表{i+1}]({img_path})"
+            replacements.append((ph_match.start(), ph_match.end(), replacement))
+            logger.info(f"[表格替换] 重建 {i+1}: {replacement}")
+        else:
+            logger.warning(f"[表格替换] 没有足够的 img_path 用于替换占位符 {i+1}")
+
+    # 逆序替换
+    for start, end, replacement in reversed(replacements):
+        md_content = md_content[:start] + replacement + md_content[end:]
+
+    logger.info(f"[表格替换] 完成重建，共替换 {len(replacements)} 个占位符")
+    return md_content
+
+
+# ============================================================================
+# 表格图片替换函数
+# ============================================================================
+
+def replace_table_images_in_md(
+    md_content: str,
+    mineru_data: dict,
+    pdf_path: str = ''
+) -> str:
+    """
+    解析 md_content 中的表格图片，用 OCR 结果替换为实际表格内容。
+
+    流程：
+    1. 扫描 md_content 中所有 ![alt](images/xxx.jpg) 格式
+    2. 用 img_path（图片文件名）在 mineru_data 的 content_list 中匹配 table
+    3. 获取 table_caption 和 bbox
+    4. 调用 PaddleOCR（graph.py 中的 _extract_table_text_from_pdf）提取表格内容
+    5. 替换为加粗标题 + 表格内容
+
+    MinerU 数据结构（不同版本）：
+    - files[filename]['content_list']: 包含 type=table 的项，每项有 img_path, table_caption
+    - files[filename]['info']['pdf_info'][x]['preproc_blocks']: 旧版结构
+
+    Args:
+        md_content: MinerU 解析的 Markdown 内容
+        mineru_data: MinerU 原始数据
+        pdf_path: PDF 文件路径（用于 PaddleOCR）
+
+    Returns:
+        替换后的 md_content
+    """
+    import re
+
+    logger.info(f"[表格替换] 函数被调用: md_content 长度={len(md_content) if md_content else 0}, mineru_data keys={list(mineru_data.keys()) if mineru_data else []}, pdf_path={pdf_path}")
+
+    # 格式: ![表A.0.5 xxx](images/xxx.jpg) 或 ![表A.0.5](images/xxx.jpg)
+    table_pattern = r'!\[\s*([^\]]*?)\s*\]\s*\(\s*(images/[^)]+\.jpe?g)\s*\)'
+
+    matches = re.findall(table_pattern, md_content)
+
+    # 检查是否有 [表格内容待解析] 占位符（MinerU 直接输出占位符的情况）
+    placeholder_count = len(re.findall(r'\[表格内容待解析\]', md_content))
+    if placeholder_count > 0 and not matches:
+        logger.info(f"[表格替换] 发现 {placeholder_count} 个 [表格内容待解析] 占位符，需要重建图片引用")
+
+        # 从 mineru_data 构建 img_path 列表（保持顺序）
+        # 使用列表而非字典，确保顺序匹配
+        img_path_list = []  # [(caption, img_path), ...]
+        files = mineru_data.get('files', {})
+        for filename, file_data in files.items():
+            content_list = file_data.get('content_list', [])
+            for item in content_list:
+                if item.get('type') == 'table':
+                    img_path = item.get('img_path', '')
+                    table_caption = item.get('table_caption', '') or ''
+                    if img_path:
+                        img_path_list.append((table_caption, img_path))
+                        logger.debug(f"[表格替换] 注册 table: caption=[{table_caption}], img_path={img_path}")
+
+        if img_path_list:
+            # 查找每个 [表格内容待解析] 前的标题，建立图片引用
+            md_content = _reconstruct_image_refs_from_placeholders(md_content, img_path_list, logger)
+        else:
+            logger.warning("[表格替换] content_list 中没有有效的 img_path")
+            return md_content
+
+        # 重建引用后，重新查找
+        matches = re.findall(table_pattern, md_content)
+        logger.info(f"[表格替换] 重建后找到 {len(matches)} 个表格图片引用")
+
+    if not matches:
+        logger.info("[表格替换] 未找到任何表格图片引用 (md_content 中没有 ![xxx](images/xxx.jpg) 格式)")
+        return md_content
+
+    logger.info(f"[表格替换] 找到 {len(matches)} 个表格图片引用")
+
+    # 从 mineru_data 中提取表格信息
+    # 兼容多种数据结构：优先从 content_list 提取（旧版MinerU），也尝试 preproc_blocks
+    tables_map = {}  # img_path -> {caption, content, page_idx, bbox}
+
+    # 方式1：从 content_list 提取（新版 MinerU）
+    files = mineru_data.get('files', {})
+    for filename, file_data in files.items():
+        content_list = file_data.get('content_list', [])
+        for item in content_list:
+            if item.get('type') == 'table':
+                img_path = item.get('img_path', '')
+                table_caption = item.get('table_caption', '') or ''
+                table_content = item.get('table_content', '') or ''
+
+                if img_path:
+                    tables_map[img_path] = {
+                        'caption': table_caption,
+                        'content': table_content,
+                        'page_idx': item.get('page_idx'),
+                        'bbox': item.get('bbox'),
+                    }
+                    logger.debug(f"[表格替换] 注册 table: img_path={img_path}, caption=[{table_caption}]")
+
+    # 方式2：从 pdf_info[x].tables 提取（完整的 bbox 和 image_path）
+    pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
+    for page_idx_val, page_info in enumerate(pdf_info_list):
+        for table_block in page_info.get('tables', []):
+            table_bbox = table_block.get('bbox', [])
+            # 从 table_body 的 spans 中提取 image_path
+            img_path = ''
+            for sub in table_block.get('blocks', []):
+                if sub.get('type') == 'table_body':
+                    for line in sub.get('lines', []):
+                        for span in line.get('spans', []):
+                            if span.get('image_path'):
+                                img_path = span['image_path']
+                                break
+                        if img_path:
+                            break
+                    if img_path:
+                        break
+            if not img_path:
+                continue
+            full_img_path = img_path if img_path.startswith('images/') else f'images/{img_path}'
+
+            # 检查是否已存在，更新缺失字段
+            if full_img_path in tables_map:
+                existing = tables_map[full_img_path]
+                if not existing.get('bbox') and table_bbox:
+                    existing['bbox'] = table_bbox
+                if existing.get('page_idx') is None and page_idx_val is not None:
+                    existing['page_idx'] = page_idx_val
+                logger.debug(f"[表格替换] 从 tables 更新: {full_img_path}, bbox={table_bbox}")
+            else:
+                tables_map[full_img_path] = {
+                    'caption': '',
+                    'content': '',
+                    'page_idx': page_idx_val,
+                    'bbox': table_bbox,
+                }
+                logger.debug(f"[表格替换] 从 tables 注册: {full_img_path}, bbox={table_bbox}")
+
+    # 方式3：从 preproc_blocks 提取（兼容旧版 MinerU）
+    for page_idx_val, page_info in enumerate(pdf_info_list):
+        for block in page_info.get('preproc_blocks', []):
+            if block.get('type') != 'table':
+                continue
+            # 尝试从 blocks 中提取 caption
+            caption = ''
+            for sub in block.get('blocks', []):
+                if sub.get('type') == 'table_caption':
+                    for line in sub.get('lines', []):
+                        for span in line.get('spans', []):
+                            content = span.get('content', '')
+                            if content:
+                                caption += content
+            # 尝试获取 img_path（可能嵌套在 table_body 的 spans 中）
+            img_path = ''
+            for sub in block.get('blocks', []):
+                if sub.get('type') == 'table_body':
+                    for line in sub.get('lines', []):
+                        for span in line.get('spans', []):
+                            if span.get('image_path'):
+                                img_path = span['image_path']
+                                break
+            if img_path:
+                # 尝试添加 images/ 前缀（preproc_blocks 中的 img_path 可能没有前缀）
+                full_img_path = img_path if img_path.startswith('images/') else f'images/{img_path}'
+
+                if full_img_path in tables_map:
+                    # 更新缺失字段（bbox, page_idx）
+                    existing = tables_map[full_img_path]
+                    if not existing.get('bbox') and block.get('bbox'):
+                        existing['bbox'] = block.get('bbox')
+                    if existing.get('page_idx') is None and page_idx_val is not None:
+                        existing['page_idx'] = page_idx_val
+                    if not existing.get('caption') and caption:
+                        existing['caption'] = caption.strip()
+                    logger.debug(f"[表格替换] 更新 table (fallback): {full_img_path}")
+                elif img_path in tables_map:
+                    # 也没有 images/ 前缀的版本
+                    existing = tables_map[img_path]
+                    if not existing.get('bbox') and block.get('bbox'):
+                        existing['bbox'] = block.get('bbox')
+                    if existing.get('page_idx') is None and page_idx_val is not None:
+                        existing['page_idx'] = page_idx_val
+                    if not existing.get('caption') and caption:
+                        existing['caption'] = caption.strip()
+                    logger.debug(f"[表格替换] 更新 table (fallback): {img_path}")
+                else:
+                    tables_map[img_path] = {
+                        'caption': caption.strip() if caption else '',
+                        'content': block.get('table_content', '') or '',
+                        'page_idx': page_idx_val,
+                        'bbox': block.get('bbox'),
+                    }
+                    logger.debug(f"[表格替换] 注册 table (fallback): {img_path}")
+
+    logger.info(f"[表格替换] 从 mineru_data 提取了 {len(tables_map)} 个表格")
+
+    # 逐个替换
+    replaced_count = 0
+    failed_count = 0
+
+    for alt_text, img_path in matches:
+        logger.info(f"[表格替换] 处理: alt='{alt_text}', img='{img_path}'")
+
+        # 通过 img_path 精确匹配
+        table_info = tables_map.get(img_path)
+
+        if table_info is None:
+            logger.warning(f"[表格替换] 未找到 img_path: {img_path}")
+            failed_count += 1
+            continue
+
+        caption = table_info['caption']
+        table_content = table_info['content']
+
+        # 优先使用 table_content（已提取的表格文本）
+        ocr_result = ''
+        if table_content:
+            ocr_result = table_content
+            logger.info(f"[表格替换] 使用 table_content，长度: {len(ocr_result)} 字符")
+        else:
+            # 尝试从 PDF OCR（使用 PaddleOCR）
+            bbox = table_info.get('bbox')
+            page_idx = table_info.get('page_idx')
+            logger.info(f"[表格替换] 准备 OCR: pdf_path={pdf_path}, page_idx={page_idx}, bbox={bbox}")
+
+            if pdf_path and page_idx is not None and bbox:
+                try:
+                    # 调用 graph.py 中的 PaddleOCR 版本
+                    from ..api.graph import _extract_table_text_from_pdf as paddle_ocr
+                    logger.info(f"[表格替换] 调用 PaddleOCR: page={page_idx}, bbox={bbox}")
+                    ocr_result = paddle_ocr(pdf_path, page_idx, bbox, alt_text)
+                    logger.info(f"[表格替换] PaddleOCR 返回: {len(ocr_result) if ocr_result else 0} 字符")
+                    if ocr_result:
+                        logger.info(f"[表格替换] PaddleOCR 结果预览: {ocr_result[:100]}...")
+                except Exception as e:
+                    import traceback
+                    logger.warning(f"[表格替换] PaddleOCR 失败: {e}")
+                    logger.warning(f"[表格替换] PaddleOCR traceback: {traceback.format_exc()[:500]}")
+            else:
+                logger.warning(f"[表格替换] 跳过 OCR: pdf_path={bool(pdf_path)}, page_idx={page_idx}, bbox={bool(bbox)}")
+
+        # 如果还是没有，使用占位符
+        if not ocr_result:
+            display_caption = caption if caption else alt_text
+            ocr_result = f"[表格内容待解析] {display_caption}"
+            logger.warning(f"[表格替换] 使用占位符: {ocr_result}")
+
+        # 组装替换文本：优先用 alt_text（md_content 中的原始文本），其次用 caption
+        display_text = alt_text if alt_text else caption
+        if not display_text:
+            display_text = img_path.split('/')[-1]  # 用文件名作为 fallback
+
+        replacement = f"**{display_text}**\n\n{ocr_result}"
+        original_pattern = f'![{alt_text}]({img_path})' if alt_text else f'![{alt_text}]({img_path})'
+        md_content = md_content.replace(original_pattern, replacement)
+        replaced_count += 1
+
+    logger.info(f"[表格替换] 完成: {replaced_count} 个成功, {failed_count} 个失败")
+    return md_content
+
+
+def _merge_bboxes(bboxes: List[list]) -> list:
+    """合并多个 bbox，返回并集"""
+    if not bboxes:
+        return []
+    xs = [b[0] for b in bboxes if len(b) >= 4]
+    ys = [b[1] for b in bboxes if len(b) >= 4]
+    xe = [b[2] for b in bboxes if len(b) >= 4]
+    ye = [b[3] for b in bboxes if len(b) >= 4]
+    if not xs:
+        return []
+    return [min(xs), min(ys), max(xe), max(ye)]
+
+
+# ============================================================================
+# 简单边关系抽取（正则实现）
+# ============================================================================
+
+class SimpleEdgeExtractor:
+    """
+    简单结构化边关系抽取（正则实现，不依赖 LLM）
+
+    实体-知识块关系（5种）：
+    - defined_in: 术语/公式在条款中被定义
+    - subject_of: 实体是条款的主题/主语
+    - condition_for: 条件适用于某条款
+    - parameter_of: 参数属于某条款
+    - appears_in: 实体出现在条款中（通用提及）
+    """
+
+    # 术语定义识别：条款编号 + 术语名 + 定义内容（冒号分隔）
+    TERM_DEFINED_PATTERN = re.compile(r'^(\d+\.\d+\.\d+)\s+(.+?)\s*[:：]\s*(.+)$', re.MULTILINE)
+
+    # 款/项识别：条款编号.款号 内容
+    ITEM_PATTERN = re.compile(r'^(\d+\.\d+\.\d+)\.(\d+)\s+(.+)$', re.MULTILINE)
+
+    # 参数识别：数值 + 单位（mm²、A、V、kV等）
+    PARAMETER_PATTERN = re.compile(r'(\d+(?:\.\d+)?)\s*(mm²|mm|A|V|kV|W|kW|Ω|μF|mH|H|Hz|kHz|MHz|℃|KPa|Mpa|Pa|kN|N)', re.IGNORECASE)
+
+    # 表格引用识别
+    TABLE_REF_PATTERN = re.compile(r'(?:表[\s　]*(\d+(?:\.\d+)?)|见表\s*(\d+(?:\.\d+)?))', re.IGNORECASE)
+
+    # 公式引用识别
+    FORMULA_REF_PATTERN = re.compile(r'(?:公式[\(（]?(\d+\.\d+(?:-\d+)?)[\)）]?|式[\(（]?(\d+\.\d+(?:-\d+)?)[\)）]?)', re.IGNORECASE)
+
+    # 条款引用识别
+    CLAUSE_REF_PATTERN = re.compile(r'(?:本规范)?第?(\d+(?:\.\d+)+)条')
+
+    # 系统引用识别
+    SYSTEM_PATTERN = re.compile(r'(?:适用于?|仅适用于?|适用)\s*((?:TN|TT|IT)(?:-C|-S|-C-S)?)\s*系统', re.IGNORECASE)
+
+    # 条件模式识别
+    CONDITION_PATTERNS = [
+        re.compile(r'在(.+?)条件下'),
+        re.compile(r'在(.+?)时'),
+        re.compile(r'当(.+?)时'),
+        re.compile(r'(.+?)条件下'),
+    ]
+
+    # 主语识别（条款开头的名词短语）
+    SUBJECT_PATTERNS = [
+        re.compile(r'^\d+\.\d+\.\d+\s+(?:应|必须|严禁|不得|宜|可)\s+(.+?)[，,]'),  # "应设置XXX，"
+        re.compile(r'^\d+\.\d+\.\d+\s+(?:严禁|不得)\s+(.+?)[，,]'),  # "严禁使用XXX，"
+    ]
+
+    # 术语/组件名称识别（从上下文提取）
+    ENTITY_PATTERNS = [
+        re.compile(r'(?:采用|使用|设置|选用|安装|敷设|连接|接头)\s+([^\s，,。]+?(?:器|线|缆|箱|柜|开关|断路器|保护|系统|装置|设备))'),
+        re.compile(r'(?:TN|TT|IT)(?:-C|-S|-C-S)?系统'),
+    ]
+
+    @classmethod
+    def extract_edges(cls, md_content: str, clause_registry: Dict[str, Dict]) -> List[Dict]:
+        """
+        从 md_content 中提取实体-条款边关系。
+
+        Args:
+            md_content: Markdown 文本内容
+            clause_registry: 条款注册表
+
+        Returns:
+            边列表: [{"source": "...", "target": "...", "relation": "...", "importance": "..."}]
+        """
+        edges = []
+        lines = md_content.split('\n')
+        current_clause = None
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # 检测条款编号
+            clause_match = re.match(r'^(\d+\.\d+\.\d+)\s+(.+)$', line)
+            if clause_match:
+                clause_id = clause_match.group(1)
+                content = clause_match.group(2)
+                current_clause = clause_id
+
+                # === 1. defined_in: 术语定义 ===
+                term_match = cls.TERM_DEFINED_PATTERN.match(line)
+                if term_match:
+                    term_name = term_match.group(2).strip()
+                    edges.append({
+                        "source": term_name,
+                        "target": clause_id,
+                        "relation": "defined_in",
+                        "importance": "high",
+                        "metadata": {"term_name": term_name}
+                    })
+
+                # === 2. subject_of: 实体作为条款主语 ===
+                for subj_pattern in cls.SUBJECT_PATTERNS:
+                    subj_match = subj_pattern.search(line)
+                    if subj_match:
+                        subject = subj_match.group(1).strip()
+                        edges.append({
+                            "source": subject,
+                            "target": clause_id,
+                            "relation": "subject_of",
+                            "importance": cls._calculate_importance(line),
+                            "metadata": {}
+                        })
+                        break
+
+                # === 3. condition_for: 条件适用于条款 ===
+                for cond_pattern in cls.CONDITION_PATTERNS:
+                    cond_match = cond_pattern.search(line)
+                    if cond_match:
+                        condition_text = cond_match.group(1).strip()
+                        edges.append({
+                            "source": condition_text,
+                            "target": clause_id,
+                            "relation": "condition_for",
+                            "importance": "high",
+                            "metadata": {}
+                        })
+                        break
+
+                # === 4. parameter_of: 参数属于条款 ===
+                for param_match in cls.PARAMETER_PATTERN.finditer(line):
+                    param_value = param_match.group(0).strip()
+                    edges.append({
+                        "source": param_value,
+                        "target": clause_id,
+                        "relation": "parameter_of",
+                        "importance": "medium",
+                        "metadata": {}
+                    })
+
+                # === 5. appears_in: 实体被条款提及 ===
+                # 提取设备/组件名称
+                for ent_pattern in cls.ENTITY_PATTERNS:
+                    for ent_match in ent_pattern.finditer(line):
+                        entity = ent_match.group(0).strip()
+                        # 排除已分类的实体
+                        if entity and len(entity) > 1:
+                            edges.append({
+                                "source": entity,
+                                "target": clause_id,
+                                "relation": "appears_in",
+                                "importance": "low",
+                                "metadata": {}
+                            })
+
+                # === 条款引用：references ===
+                for ref_match in cls.CLAUSE_REF_PATTERN.finditer(line):
+                    ref_id = ref_match.group(1)
+                    if ref_id != clause_id:  # 排除自引用
+                        edges.append({
+                            "source": clause_id,
+                            "target": ref_id,
+                            "relation": "references",
+                            "importance": cls._calculate_importance(line),
+                            "metadata": {}
+                        })
+
+                # === 表格引用：appears_in ===
+                for ref_match in cls.TABLE_REF_PATTERN.finditer(line):
+                    table_num = ref_match.group(1) or ref_match.group(2)
+                    if table_num:
+                        edges.append({
+                            "source": f"表{table_num}",
+                            "target": clause_id,
+                            "relation": "appears_in",
+                            "importance": "medium",
+                            "metadata": {}
+                        })
+
+                # === 公式引用：appears_in ===
+                for ref_match in cls.FORMULA_REF_PATTERN.finditer(line):
+                    formula_num = ref_match.group(1) or ref_match.group(2)
+                    if formula_num:
+                        edges.append({
+                            "source": f"公式({formula_num})",
+                            "target": clause_id,
+                            "relation": "appears_in",
+                            "importance": "medium",
+                            "metadata": {}
+                        })
+
+                # === 适用系统：appears_in ===
+                for sys_match in cls.SYSTEM_PATTERN.finditer(line):
+                    system = sys_match.group(1).upper()
+                    edges.append({
+                        "source": f"{system}系统",
+                        "target": clause_id,
+                        "relation": "appears_in",
+                        "importance": "high",
+                        "metadata": {"system": system}
+                    })
+
+            # 检测款/项：elaborates（条款详细说明）
+            item_match = re.match(r'^(\d+\.\d+\.\d+)\.(\d+)\s+(.+)$', line)
+            if item_match and current_clause:
+                parent_clause = item_match.group(1)
+                item_num = item_match.group(2)
+                edges.append({
+                    "source": parent_clause,
+                    "target": f"{parent_clause}.{item_num}",
+                    "relation": "elaborates",
+                    "importance": "low",
+                    "metadata": {}
+                })
+
+        return edges
+
+    @classmethod
+    def _calculate_importance(cls, text: str) -> str:
+        """
+        根据文本特征计算重要性权重。
+
+        规则：
+        - 强制性条文（必须、严禁、不得）→ high
+        - 推荐性条文（宜、建议、推荐）→ medium
+        - 一般描述 → low
+        """
+        text_lower = text.lower()
+
+        # 强制性标识
+        if any(kw in text_lower for kw in ['必须', '严禁', '不得', '不应', '强制']):
+            return 'high'
+        # 推荐性标识
+        if any(kw in text_lower for kw in ['宜', '建议', '推荐', '可']):
+            return 'medium'
+
+        return 'low'
+
+
 class LLMChunkerError(Exception):
     """LLM 分块器异常"""
     pass
@@ -68,7 +642,11 @@ class LLMChunkerError(Exception):
 # ============================================================================
 
 def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
-    """将 ClauseSegment 转换为完整字典（含 triplets、terms、clause_items 等核心语义字段）"""
+    """
+    将 ClauseSegment 转换为完整字典
+
+    简化版：entities 替代 triplets，edges 替代 clause_items 层级结构
+    """
     return {
         "clause_id": clause.clause_id,
         "clause_title": clause.clause_title,
@@ -86,7 +664,7 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "formula_content": clause.formula_content,
         "referenced_tables": clause.metadata.get("referenced_tables", []) if clause.metadata else [],
         "referenced_formulas": clause.metadata.get("referenced_formulas", []) if clause.metadata else [],
-        # 条款引用（新增）
+        # 条款引用
         "referenced_clauses": [
             {
                 "clause_id": r.clause_id,
@@ -99,7 +677,9 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
             for r in clause.referenced_clauses
         ] if clause.referenced_clauses else [],
         "referenced_standards": clause.referenced_standards or [],
-        # 语义三元组（核心！）
+        # 简化版：实体列表（替代 triplets）
+        "entities": clause.metadata.get("entities", []) if clause.metadata else [],
+        # 语义三元组（保留兼容，但为空）
         "triplets": [
             {
                 "component": t.component,
@@ -110,7 +690,7 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
             }
             for t in clause.triplets
         ] if clause.triplets else [],
-        # 款/项结构化（含款/项级三元组）
+        # 款/项结构化（简化版为空）
         "clause_items": [
             {
                 "item_number": ci.item_number,
@@ -174,46 +754,28 @@ class LLMDrivenChunker:
     # =========================================================================
 
     # 目录提取 Prompt
-    TOC_SYSTEM_PROMPT = """你是一个工程规范文档的目录分析专家。
+    TOC_SYSTEM_PROMPT = """你是工程规范文档的目录分析专家。
 
-你的任务是从文档中提取目录结构，记住每个章节的位置信息。
+## 任务
+从文档开头提取章节结构（最多10个章节），返回JSON格式。
 
-## 重要说明
+## 章节类型
+- 含"术语"、"名词解释"→"term_definition"
+- 含"附录"、"附表"→"appendix"
+- 其他→"normative"
 
-1. **只分析目录部分**：通常在文档开头，包含"目录"、"Contents"、"第X章"等
-2. **记录位置**：估算每个章节在文档中的大概位置（字符偏移量）
-3. **章节编号**：提取章节编号和标题
-4. **章节类型识别**（重要）：
-   - 如果章节标题包含"术语"、"名词解释"，则 `chapter_type` 为 `"term_definition"`
-   - 如果章节标题包含"附录"、"附表"，则 `chapter_type` 为 `"appendix"`
-   - 其他章节为 `"normative"`（规范正文）
-5. **OCR文本注意**：如果文档中章节标题前有 `#` 符号（如 "# 3 电器和导体的选择"），这不代表实际内容，忽略即可
-
-## 输出要求
-
-请输出 JSON 格式，包含章节编号、标题、估算位置和章节类型：
+## 输出格式（必须严格遵守）
 ```json
-{{
-    "chapters": [
-        {{
-            "chapter_number": 1,
-            "title": "总则",
-            "chapter_type": "normative",
-            "start_position": 0,
-            "end_position": 5000
-        }},
-        {{
-            "chapter_number": 2,
-            "title": "术语",
-            "chapter_type": "term_definition",
-            "start_position": 5000,
-            "end_position": 12000
-        }}
-    ]
-}}
+{"chapters":[{"chapter_number":1,"title":"总则","chapter_type":"normative","start_position":0,"end_position":5000}]}
 ```
 
-如果没有目录，请根据文档内容识别章节边界。"""
+## 规则
+1. 只分析前5000字符中的目录部分
+2. 最多返回10个章节，超出忽略
+3. OCR中#前缀不是内容，忽略
+4. 输出必须是合法JSON，不要 markdown 包裹"""
+
+
 
     TOC_USER_PROMPT = """请分析以下文档，提取目录结构（章节列表）：
 
@@ -380,90 +942,106 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 
 请保持 JSON 格式输出。"""
 
+    # 简化版：只做实体抽取
+    CLAUSE_SYSTEM_PROMPT = """你是一个工程规范文档的实体抽取专家。
+
+你的任务是从工程规范文本中提取知识实体。
+
+## 实体类型（只抽取这6类）
+
+1. **term（术语）**：条文定义的专门术语
+   - 例："直接接触防护"、"预期接触电压"
+   - 属性：term_name, definition
+
+2. **component（组件/设备）**：电气设备、系统、材料
+   - 例："剩余电流保护电器"、"配电变压器"、"电缆"
+   - 属性：name, abbreviation, type
+
+3. **parameter（参数/数值）**：技术参数
+   - 例："最小截面积：4mm²"、"额定电流：16A"
+   - 属性：name, value, unit
+
+4. **formula（公式）**：计算公式
+   - 例："S ≥ I·t / k"
+   - 属性：formula_id, expression
+
+5. **condition（条件）**：适用条件、环境、场景
+   - 例："短路条件下"、"潮湿环境"
+   - 属性：name, type
+
+6. **system（系统）**：配电系统类型
+   - 例："TN-S系统"、"TT系统"、"IT系统"
+   - 属性：name, type
+
+## 条文识别规则
+
+1. **条文编号**：如 "3.2.1"、"5.1.3"、"第4.2.5条" 等
+2. **术语章节**：条文编号 X.0.N 格式为术语定义
+
+## OCR 文本处理
+
+1. **# 前缀**不是条文内容，忽略
+2. **LaTeX 公式**：如 `$公式内容$`，提取为 formula
+3. **表格引用**：提取表格编号（如 `表3.2.2`）到 `referenced_tables`
+4. **条款引用**：提取条款编号（如 `第5.2.4条`）到 `referenced_clauses`
+5. **外部标准**：提取外部标准编号（如 `GB/T16895.15`）到 `referenced_standards`
+
+## 输出格式
+
+请输出 JSON：
+```json
+{{
+    "entities": [
+        {{
+            "entity_type": "term|component|parameter|formula|condition|system",
+            "name": "实体名称",
+            "value": "参数值或公式表达式（可选）",
+            "unit": "单位（可选）",
+            "abbreviation": "缩写（可选）",
+            "definition": "定义（仅用于term）"
+        }}
+    ],
+    "referenced_tables": ["表3.2.2"],
+    "referenced_formulas": ["公式(3.2.14)"],
+    "referenced_clauses": ["5.2.4"],
+    "referenced_standards": ["GB/T16895.15"]
+}}
+```
+
+请保持 JSON 格式输出。只抽取文本中**明确提到**的实体，不要臆造。"""
+
     CLAUSE_USER_PROMPT = """
-请分析以下文本，提取条文及其语义要素：
+请分析以下文本，提取知识实体：
 
 {document_text}
 
 来源：{source}
 
-## 关键规则
-1. **语义三元组**：使用 `triplets` 数组，`component → action → obj` 结构，**不要用 components/actions 平行列表**
-2. **术语章节**（编号 X.0.N）：在 terms 字段返回术语定义，triplets 设为 []
-3. **款/项**（"1、"、"2、"）：作为 clause_items 独立提取
-4. **OCR # 前缀**不是条文内容，忽略
-5. **表格/公式引用**放入 referenced_tables / referenced_formulas
-6. **条款引用**放入 referenced_clauses，**外部标准**放入 referenced_standards
-   - 支持格式：`本规范第X条`、`见X.Y.Z条`、`Article X.Y.Z`、`§ X.Y.Z`、`第1、2、3条`（顿号分隔）
-7. 三元组只提取条文中明确出现的 component/action/obj，宁缺毋滥
+## 抽取规则
+1. **实体类型**：只抽取 term、component、parameter、formula、condition、system
+2. **条款引用**：放入 referenced_clauses，外部标准放入 referenced_standards
+3. **表格/公式引用**：放入 referenced_tables / referenced_formulas
 
-## 要求类型
-- mandatory: 必须、应、须
-- recommended: 建议、宜
-- prohibited: 严禁、不得、禁止
+## 示例
 
-## 正确三元组示例
-- "应设置剩余电流保护电器" → {"component": "配电系统", "action": "设置", "obj": "剩余电流保护电器"}
-- "严禁使用TN-C系统" → {"component": "配电系统", "action": "使用", "obj": "TN-C系统", "requirement": "prohibited"}
-- "电缆应敷设在电缆桥架内" → {"component": "电缆", "action": "敷设", "obj": "电缆桥架"}
-- "导体应承受热稳定" → {"component": "导体", "action": "承受", "obj": "热稳定"}
-
-## 术语章节示例（X.0.N）
 原文：`2.0.5 直接接触防护 无故障条件下的电击防护。`
-→ is_term_definition: true, terms: [{"term_name": "直接接触防护", "definition": "无故障条件下的电击防护"}]
+→ entities: [{{"entity_type": "term", "name": "直接接触防护", "definition": "无故障条件下的电击防护"}}]
 
-## 条款引用示例
-原文：`应按本规范第5.2.4条第1款的规定，且应符合本规范第5.2.8条的要求。`
-→ referenced_clauses: ["5.2.4", "5.2.8"]
+原文：`配电箱内应设置剩余电流保护电器（RCD）。`
+→ entities: [{{"entity_type": "component", "name": "剩余电流保护电器", "abbreviation": "RCD"}}]
 
-原文：`线路敷设应符合GB/T16895.15的规定，并按本规范第6.3.1条执行。`
-→ referenced_clauses: ["6.3.1"], referenced_standards: ["GB/T16895.15"]
-
-原文：`见3.2.5条和4.1.2条的规定，或参照第5.1.3条执行。`
-→ referenced_clauses: ["3.2.5", "4.1.2", "5.1.3"]
-
-原文：`第1、2、3条的要求应同时满足。`
-→ referenced_clauses: ["1", "2", "3"]
-
-原文：`Article 3.2.5 和 Clause 4.1.2 规定了具体要求。`
-→ referenced_clauses: ["3.2.5", "4.1.2"]
+原文：`本规范第5.2.4条的要求应符合GB/T16895.15的规定。`
+→ referenced_clauses: ["5.2.4"], referenced_standards: ["GB/T16895.15"]
 
 请输出 JSON：
 ```json
 {{
-    "clauses": [
-        {{
-            "clause_id": "5.2.13",
-            "clause_title": "TN系统配电线路的保护",
-            "clause_content": "TN系统配电线路的保护...",
-            "requirement_type": "mandatory",
-            "is_term_definition": false,
-            "triplets": [
-                {{"component": "配电线路", "action": "选用", "obj": "短路保护电器", "condition": "", "requirement": "mandatory"}}
-            ],
-            "terms": [],
-            "referenced_tables": [],
-            "referenced_formulas": [],
-            "referenced_clauses": ["5.2.4", "5.2.8"],
-            "referenced_standards": ["GB/T16895.15"],
-            "formula_content": null,
-            "clause_items": [
-                {{
-                    "item_number": "1",
-                    "item_content": "按敷设方式及环境条件确定的导体载流量，不应小于计算电流",
-                    "triplets": [
-                        {{"component": "导体", "action": "承受", "obj": "计算电流"}}
-                    ]
-                }}
-            ]
-        }}
-    ]
+    "entities": [],
+    "referenced_tables": [],
+    "referenced_formulas": [],
+    "referenced_clauses": [],
+    "referenced_standards": []
 }}
-```
-
-如果没有发现条文，返回：
-```json
-{{"clauses": []}}
 ```"""
 
     # 要素提取 Prompt
@@ -600,7 +1178,8 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 
     # Token 限制
     MAX_CHARS_PER_CHAPTER = 12000       # 每章节最大字符数（优化：从3000→12000，减少调用次数）
-    MAX_CHARS_FOR_TOC = 8000           # 目录识别最大字符数
+    MAX_CHARS_FOR_TOC = 5000           # 目录识别最大字符数
+    MAX_TOKENS_FOR_TOC = 4096 * 2      # 目录提取专用 token 限制
 
     def __init__(
         self,
@@ -1299,16 +1878,19 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         checkpoint: Optional[ChunkCheckpoint] = None,
         project_id: Optional[str] = None,
         md_content: Optional[str] = None,
-        chunks_data: Optional[List[Dict]] = None
+        chunks_data: Optional[List[Dict]] = None,
+        mineru_data: Optional[Dict] = None,
+        pdf_path: Optional[str] = None
     ) -> HierarchicalChunkResult:
         """
-        主入口：LLM 驱动的三级分块（渐进式，支持增强版断点恢复）
+        主入口：LLM 驱动的智能分块（简化版，表格替换 + 简单边关系 + LLM实体抽取）
 
-        策略：渐进式披露
-        1. 先读取目录（章节结构），记住位置
-        2. 基于章节分段处理
-        3. 每段独立提取条文和要素
-        4. 根据要素和条文在 PDF 中标注位置
+        策略：
+        1. 表格图片替换（raw_text 生成）
+        2. 按 # 分解层级
+        3. 回溯 chunks.json 找 bbox
+        4. LLM 只做实体抽取（Term, Component, Parameter, Formula, Condition, System）
+        5. 正则抽取简单边关系
 
         Args:
             text_chunks: 原始文本块列表
@@ -1316,6 +1898,10 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             resume_from_chapter: 从第几个章节恢复（0表示从头开始）
             checkpoint: 增强版检查点（用于断点恢复）
             project_id: 项目ID（用于保存检查点）
+            md_content: MinerU 解析的 Markdown 内容
+            chunks_data: chunks.json 数据
+            mineru_data: MinerU 原始数据（用于表格图片 OCR 替换）
+            pdf_path: PDF 文件路径（用于表格 OCR）
 
         Returns:
             HierarchicalChunkResult: 包含所有层级分块的结果
@@ -1339,8 +1925,9 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         self._report_progress(0.0, "🚀 开始智能标注分析...")
 
         # =====================================================================
-        # Step 0: 构建位置索引 + 处理 md_content
+        # Step 0: 构建位置索引
         # =====================================================================
+
         # 构建 chunks 位置索引（无论是否有 md_content 都构建）
         self._position_index: Dict[str, Any] = {}
         if chunks_data:
@@ -1369,27 +1956,52 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         self._clause_registry: Dict[str, Dict] = {}
         md_sections: List[Dict] = []
         title_chunks = [c for c in text_chunks if c.metadata.get('type') == 'title']
-        if md_content:
+
+        # Step 0.5: 表格图片替换（如果提供了 mineru_data）
+        raw_md_content = md_content
+        if md_content and mineru_data and pdf_path:
+            # 执行表格图片替换，用 OCR 结果替换 markdown 中的图片引用
+            self.logger.info("[LLM分块] 执行表格图片替换...")
+            raw_md_content = replace_table_images_in_md(md_content, mineru_data, pdf_path)
+            self.logger.info("[LLM分块] 表格图片替换完成")
+        elif md_content:
+            self.logger.info("[LLM分块] 未提供 mineru_data 或 pdf_path，跳过表格图片替换")
+
+        if raw_md_content:
             self.logger.info("[LLM分块] 检测到 md_content，开始解析条款注册表...")
-            self._clause_registry = self._build_clause_registry(md_content)
+            self._clause_registry = self._build_clause_registry(raw_md_content)
             # 将 TextChunk 对象转换为 dict（_parse_md_content_sections 内部用 .get()）
             title_chunks_dicts = [
                 {"content": c.text, "page_idx": c.metadata.get("page_idx"), "chunk_id": c.metadata.get("chunk_id")}
                 for c in title_chunks
             ]
             md_sections = self._parse_md_content_sections(
-                md_content, title_chunks_dicts, self._clause_registry
+                raw_md_content, title_chunks_dicts, self._clause_registry
             )
             self.logger.info(
                 f"[LLM分块] md_content 解析完成: {len(md_sections)} sections, "
                 f"{len(self._clause_registry)} 个条款注册"
             )
+            # 构建 raw_md_content 行号到字符偏移的映射（用于条款匹配）
+            self._md_line_to_char_offset: List[int] = []
+            if raw_md_content:
+                offset = 0
+                for line in raw_md_content.split('\n'):
+                    self._md_line_to_char_offset.append(offset)
+                    offset += len(line) + 1  # +1 for newline
+            # 为条款注册表中的每个条款补充 char_offset
+            for entry in self._clause_registry.values():
+                line_no = entry.get("line_range", 0)
+                if line_no < len(self._md_line_to_char_offset):
+                    entry["char_offset"] = self._md_line_to_char_offset[line_no]
+                else:
+                    entry["char_offset"] = 0
 
         # =====================================================================
         # Step 1: 读取目录 - 识别章节结构
         # =====================================================================
         self._report_progress(0.02, "📖 LLM 提取目录结构...")
-        self.logger.info("[LLM分块] Step 1/4: 开始提取目录结构")
+        self.logger.info("[LLM分块] Step 1/5: 提取目录结构")
 
         chapter_toc = self._extract_table_of_contents(full_text)
 
@@ -1409,7 +2021,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         # =====================================================================
         if checkpoint and checkpoint.chapter_plan:
             # 从检查点恢复
-            self.logger.info(f"[LLM分块] 从检查点恢复: 已处理 {len(checkpoint.completed_clauses)} 条文, {len(checkpoint.completed_elements)} 要素")
+            self.logger.info(f"[LLM分块] 从检查点恢复: 已处理 {len(checkpoint.completed_clauses)} 条文")
             current_checkpoint = checkpoint
             start_index = checkpoint.current_chapter_index + 1  # 从下一个章节继续
 
@@ -1442,9 +2054,9 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         # =====================================================================
         # Step 3: 基于章节分段 - 渐进式处理每个章节
         # =====================================================================
-        self.logger.info(f"[LLM分块] Step 2/4: 开始处理 {chapter_count} 个章节")
+        self.logger.info(f"[LLM分块] Step 2/5: 处理 {chapter_count} 个章节")
         all_clauses = list(result.clauses)  # 已有数据
-        all_elements = list(result.elements)  # 已有数据
+        all_edges: List[Dict] = []  # 边关系列表
 
         for i, chapter in enumerate(refined_chapters):
             chapter_num = chapter.get("chapter_number", i + 1)
@@ -1482,7 +2094,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                     "total_chapters": chapter_count,
                     "completed_chapters": i,
                     "completed_clauses_count": len(all_clauses),
-                    "completed_elements_count": len(all_elements),
+                    "completed_entities_count": sum(len(c.metadata.get("entities", [])) for c in all_clauses),
                     "is_resuming": i > start_index
                 }
             )
@@ -1490,24 +2102,16 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             # 提取该章节的文本
             chapter_text = full_text[start_pos:end_pos]
 
-            # 提取章节内的条文 + 要素（优化：并行执行，两个 LLM 调用同时进行）
+            # 提取章节内的条文（LLM 只调用一次，提取 entities）
             para_start = time.time()
-            self.logger.info(f"[LLM分块]   → LLM 并行提取条文 + 要素...")
+            self.logger.info(f"[LLM分块]   → LLM 提取条文 + 实体...")
 
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                f_clauses = executor.submit(
-                    self._extract_clauses_from_chapter,
-                    chapter_text, source_info, chapter_num
-                )
-                f_elements = executor.submit(
-                    self._extract_elements_from_chapter,
-                    chapter_text, [], chapter_num  # 要素提取不依赖条文结果，传空列表
-                )
-                chapter_clauses = f_clauses.result()
-                chapter_elements = f_elements.result()
+            chapter_clauses = self._extract_clauses_from_chapter(
+                chapter_text, source_info, chapter_num, start_pos, end_pos
+            )
 
             para_time = time.time() - para_start
-            self.logger.info(f"[LLM分块]   ← 并行提取完成: {len(chapter_clauses)} 条文, {len(chapter_elements)} 要素 (耗时 {para_time:.1f}s)")
+            self.logger.info(f"[LLM分块]   ← 提取完成: {len(chapter_clauses)} 条文 (耗时 {para_time:.1f}s)")
 
             # 为条文解析精确物理位置（从 chunks 位置索引匹配）
             for clause in chapter_clauses:
@@ -1542,15 +2146,17 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                         })
             self.logger.info(f"[LLM分块]   → clause 位置解析完成: {sum(1 for c in chapter_clauses if c.metadata.get('page_idx'))}/{len(chapter_clauses)} 个 clause 有精确位置")
 
-            # 为要素标注 PDF 位置（基于字符偏移估算）
-            annotated_elements = self._annotate_positions(
-                chapter_elements, chapter_text, source_info
-            )
-            self.logger.info(f"[LLM分块]   → PDF 位置标注完成: {len(annotated_elements)} 个要素")
-
             # 记录结果
             all_clauses.extend(chapter_clauses)
-            all_elements.extend(annotated_elements)
+
+            # 提取边关系（正则实现）
+            clause_registry_for_edges = {
+                cid: {"line_range": entry.get("line_range"), "title": entry.get("title")}
+                for cid, entry in self._clause_registry.items()
+            }
+            chapter_edges = SimpleEdgeExtractor.extract_edges(chapter_text, clause_registry_for_edges)
+            all_edges.extend(chapter_edges)
+            self.logger.info(f"[LLM分块]   → 边关系提取完成: {len(chapter_edges)} 条边")
 
             # 创建章节对象
             section = SectionSegment(
@@ -1560,19 +2166,22 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             )
             result.sections.append(section)
 
+            # 统计实体数量（从 clause.metadata["entities"] 提取）
+            chapter_entities_count = sum(
+                len(clause.metadata.get("entities", [])) for clause in chapter_clauses
+            )
+
             # 更新检查点：标记章节为完成
             current_checkpoint.current_chapter_index = i
             if i < len(current_checkpoint.chapter_plan):
                 current_checkpoint.chapter_plan[i].status = ChapterStatus.COMPLETED
                 current_checkpoint.chapter_plan[i].completed_at = datetime.now().isoformat()
                 current_checkpoint.chapter_plan[i].clauses_count = len(chapter_clauses)
-                current_checkpoint.chapter_plan[i].elements_count = len(chapter_elements)
+                current_checkpoint.chapter_plan[i].elements_count = chapter_entities_count
 
-            # 将新处理的条文和要素添加到检查点
+            # 将新处理的条文添加到检查点（实体已包含在 clause metadata 中）
             for clause in chapter_clauses:
                 current_checkpoint.completed_clauses.append(self._clause_to_dict(clause))
-            for element in annotated_elements:
-                current_checkpoint.completed_elements.append(self._element_to_dict(element))
 
             # 保存检查点
             if project_id:
@@ -1582,13 +2191,13 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             chapter_time = time.time() - para_start
             self._report_progress(
                 (i + 1) / chapter_count * 0.6 + 0.1,
-                f"✅ 章节 {chapter_num} 完成: {len(chapter_clauses)} 条文, {len(chapter_elements)} 要素 (耗时 {chapter_time:.1f}s)",
+                f"✅ 章节 {chapter_num} 完成: {len(chapter_clauses)} 条文, {chapter_entities_count} 实体 (耗时 {chapter_time:.1f}s)",
                 checkpoint_info={
                     "current_chapter": chapter_num,
                     "total_chapters": chapter_count,
                     "completed_chapters": i + 1,
                     "completed_clauses_count": len(all_clauses),
-                    "completed_elements_count": len(all_elements),
+                    "completed_entities_count": sum(len(c.metadata.get("entities", [])) for c in all_clauses) + chapter_entities_count,
                     "chapter_completed": True
                 }
             )
@@ -1597,24 +2206,27 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         # =====================================================================
         # Step 4: 保存结果
         # =====================================================================
-        self.logger.info(f"[LLM分块] Step 3/4: 保存分析结果")
+        self.logger.info(f"[LLM分块] Step 4/5: 保存分析结果")
         result.sections = list(result.sections) + [s for s in result.sections if s not in result.sections]
         result.clauses = all_clauses
-        result.elements = all_elements
+        # 边关系存储在 result 的 metadata 中（动态属性）
+        result.edges = all_edges
 
         # =====================================================================
         # Step 5: 汇总报告
         # =====================================================================
+        self.logger.info("[LLM分块] Step 5/5: 汇总报告")
+        total_entities = sum(len(c.metadata.get("entities", [])) for c in all_clauses)
         total_time = time.time() - start_time
         self._report_progress(
             0.95,
-            f"📊 标注分析汇总: {len(result.sections)} 章节, {len(all_clauses)} 条文, {len(all_elements)} 要素"
+            f"📊 标注分析汇总: {len(result.sections)} 章节, {len(all_clauses)} 条文, {total_entities} 实体, {len(all_edges)} 边关系"
         )
 
         self._report_progress(1.0, f"✅ 智能标注分析完成! (总耗时 {total_time:.1f}s)")
 
         self.logger.info(
-            f"[LLM分块] ✅ 分析完成 - 章节: {len(result.sections)}, 条文: {len(all_clauses)}, 要素: {len(all_elements)}, "
+            f"[LLM分块] ✅ 分析完成 - 章节: {len(result.sections)}, 条文: {len(all_clauses)}, 实体: {total_entities}, 边: {len(all_edges)}, "
             f"总耗时: {total_time:.1f}s"
         )
 
@@ -1625,14 +2237,22 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         text: str,
         progress_callback: Optional[Callable] = None,
         md_content: Optional[str] = None,
-        chunks_data: Optional[List[Dict]] = None
+        chunks_data: Optional[List[Dict]] = None,
+        mineru_data: Optional[Dict] = None,
+        pdf_path: Optional[str] = None
     ) -> HierarchicalChunkResult:
         """单文本分块入口"""
         if progress_callback:
             self.progress_callback = progress_callback
 
         fake_chunk = TextChunk(text=text, metadata={})
-        return self.chunk([fake_chunk], md_content=md_content, chunks_data=chunks_data)
+        return self.chunk(
+            [fake_chunk],
+            md_content=md_content,
+            chunks_data=chunks_data,
+            mineru_data=mineru_data,
+            pdf_path=pdf_path
+        )
 
     # =========================================================================
     # 核心提取方法
@@ -1654,7 +2274,8 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                         document_text=text[:self.MAX_CHARS_FOR_TOC]
                     )}
                 ],
-                temperature=0.3
+                temperature=0.3,
+                max_tokens=self.MAX_TOKENS_FOR_TOC
             )
 
             toc = response.get("chapters", [])
@@ -1680,10 +2301,14 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
         self,
         text: str,
         source_info: Dict[str, Any],
-        chapter_num: int
+        chapter_num: int,
+        chapter_start_pos: int,
+        chapter_end_pos: int
     ) -> List[ClauseSegment]:
         """
-        从章节文本中提取条文（使用 LLM）
+        从章节文本中提取条文及实体（使用 LLM）
+
+        简化版：LLM 只提取实体，条文结构从 md_content 的条款注册表获取。
 
         Args:
             text: 章节文本
@@ -1691,7 +2316,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             chapter_num: 章节编号
 
         Returns:
-            条文列表
+            条文列表（含提取的实体）
         """
         try:
             response = self._call_llm_with_retry(
@@ -1704,102 +2329,85 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
                 temperature=0.3
             )
 
-            clauses_data = response.get("clauses", [])
-            clauses = []
+            # 简化版：解析实体列表（不再是 clauses 数组）
+            entities_data = response.get("entities", [])
+            referenced_tables = response.get("referenced_tables", [])
+            referenced_formulas = response.get("referenced_formulas", [])
+            referenced_clauses = response.get("referenced_clauses", [])
+            referenced_standards = response.get("referenced_standards", [])
 
-            for cd in clauses_data:
-                clause_id = cd.get("clause_id", "")
-                requirement_type = self._parse_requirement_type(
-                    cd.get("requirement_type", "recommended")
-                )
-
-                systems = self._extract_systems_from_text(cd.get("clause_content", ""))
-
-                # 解析语义三元组（核心改动）
-                triplets = []
-                for t in cd.get("triplets", []):
-                    if t.get("component") or t.get("action") or t.get("obj"):
-                        triplets.append(SemanticTriplet(
-                            component=t.get("component", "").strip(),
-                            action=t.get("action", "").strip(),
-                            obj=t.get("obj", "").strip(),
-                            condition=t.get("condition", "").strip(),
-                            requirement=t.get("requirement", "mandatory")
-                        ))
-
-                # 解析款/项结构化数据（款/项内也有三元组）
-                clause_items = []
-                for ci_data in cd.get("clause_items", []):
-                    ci_triplets = []
-                    for t in ci_data.get("triplets", []):
-                        if t.get("component") or t.get("action") or t.get("obj"):
-                            ci_triplets.append(SemanticTriplet(
-                                component=t.get("component", "").strip(),
-                                action=t.get("action", "").strip(),
-                                obj=t.get("obj", "").strip(),
-                                condition=t.get("condition", "").strip(),
-                                requirement=t.get("requirement", "mandatory")
-                            ))
-                    clause_items.append(ClauseItem(
-                        item_number=ci_data.get("item_number", ""),
-                        item_content=ci_data.get("item_content", ""),
-                        # 兼容旧格式：从 flat lists 提取（fallback）
-                        components=[c.get("name", "") for c in ci_data.get("components", [])],
-                        actions=[a.get("name", "") for a in ci_data.get("actions", [])],
-                        conditions=[c.get("name", "") for c in ci_data.get("conditions", [])],
-                        objects=[o.get("name", "") for o in ci_data.get("objects", [])]
-                    ))
-
-                # 解析术语数据
-                terms_list = []
-                for term_data in cd.get("terms", []):
-                    terms_list.append({
-                        "term_name": term_data.get("term_name", ""),
-                        "definition": term_data.get("definition", "")
+            # 从条款注册表获取该章节的条款列表
+            # 用 char_offset（字符偏移）判断条款是否在本章节范围内
+            chapter_clauses = []
+            for cid, entry in self._clause_registry.items():
+                char_offset = entry.get("char_offset", 0)
+                if chapter_start_pos <= char_offset < chapter_end_pos:
+                    chapter_clauses.append({
+                        "clause_id": cid,
+                        "clause_title": entry.get("title", ""),
+                        "content": entry.get("title", ""),  # 实际内容会在 chunk() 中补充
+                        "line_range": entry.get("line_range"),
+                        "char_offset": char_offset
                     })
+
+            # 按 line_range 排序
+            chapter_clauses.sort(key=lambda x: x.get("line_range", 0))
+
+            clauses = []
+            for cd in chapter_clauses:
+                clause_id = cd.get("clause_id", "")
+
+                # 从 LLM 返回的实体中筛选属于本条款的
+                # （简化：全部实体都关联到第一个条款，实际应在款/项级别提取）
+                clause_entities = entities_data if entities_data else []
 
                 clause = ClauseSegment(
                     clause_id=clause_id,
                     clause_title=cd.get("clause_title", ""),
-                    content=cd.get("clause_content", ""),
-                    paragraphs=cd.get("paragraphs", []),
-                    requirement_type=requirement_type,
-                    applicable_systems=systems,
+                    content=cd.get("content", ""),
+                    paragraphs=[],
+                    requirement_type=RequirementType.RECOMMENDED,
+                    applicable_systems=[],
                     cross_refs=[],
                     source=source_info.get("source", ""),
                     page=source_info.get("page"),
-                    triplets=triplets,
-                    clause_items=clause_items,
-                    is_term_definition=cd.get("is_term_definition", False),
-                    terms=terms_list,
-                    formula_content=cd.get("formula_content"),
-                    semantics_enriched=bool(triplets),
+                    triplets=[],  # 简化版不使用三元组
+                    clause_items=[],
+                    is_term_definition=False,
+                    terms=[],  # 术语从实体中提取
+                    formula_content=None,
+                    semantics_enriched=False,
                     parent_chapter=chapter_num,
-                    referenced_clauses=[],  # 暂空，先创建对象再赋值
-                    referenced_standards=cd.get("referenced_standards", []),
+                    referenced_clauses=[],
+                    referenced_standards=referenced_standards,
                     metadata={
                         "chunk_type": "clause",
                         "parent_chapter": chapter_num,
-                        "semantics_enriched": bool(triplets),
-                        "is_term_definition": cd.get("is_term_definition", False),
-                        "terms": terms_list,
-                        "formula_content": cd.get("formula_content"),
-                        "referenced_tables": cd.get("referenced_tables", []),
-                        "referenced_formulas": cd.get("referenced_formulas", []),
-                        "referenced_standards": cd.get("referenced_standards", [])
+                        "semantics_enriched": False,
+                        "entities": clause_entities,  # 新增：提取的实体
+                        "referenced_tables": referenced_tables,
+                        "referenced_formulas": referenced_formulas,
+                        "referenced_clauses": referenced_clauses,
+                        "referenced_standards": referenced_standards
                     }
                 )
 
-                # 构建交叉引用（一次性调用）
+                # 构建交叉引用
                 clause_cross_refs, clause_referenced = self._build_cross_refs(
-                    cd, self._clause_registry
+                    {
+                        "referenced_tables": referenced_tables,
+                        "referenced_formulas": referenced_formulas,
+                        "referenced_clauses": referenced_clauses,
+                        "referenced_standards": referenced_standards
+                    },
+                    self._clause_registry
                 )
                 clause.cross_refs = clause_cross_refs
                 clause.referenced_clauses = clause_referenced
 
                 clauses.append(clause)
 
-            self.logger.info(f"章节 {chapter_num}: LLM 提取 {len(clauses)} 条条文")
+            self.logger.info(f"章节 {chapter_num}: LLM 提取 {len(clauses)} 条条文, {len(entities_data)} 个实体")
             return clauses
 
         except LLMChunkerError as e:
@@ -1951,6 +2559,8 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 
     def _parse_requirement_type(self, req_type_str: str) -> RequirementType:
         """解析要求类型"""
+        if req_type_str is None:
+            return RequirementType.RECOMMENDED
         req_type_str = req_type_str.lower()
         if req_type_str in ['mandatory', '必须', '应', '须']:
             return RequirementType.MANDATORY

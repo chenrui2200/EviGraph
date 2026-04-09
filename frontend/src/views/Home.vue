@@ -2,7 +2,7 @@
   <div class="home-container">
     <!-- Top Navigation Bar -->
     <nav class="navbar" :style="s.navbar">
-      <div class="nav-brand" :style="s.navBrand">Knowledge EviGrap</div>
+      <div class="nav-brand" :style="s.navBrand">Knowledge EviGraph</div>
     </nav>
 
     <div class="main-content" :style="s.mainContent">
@@ -21,14 +21,14 @@
 
           <div class="hero-desc" :style="s.heroDesc">
             <p :style="s.heroDescP">
-              通过单一文档，<span :style="s.highlightBold">Knowledge EviGrap</span> 提取现实种子并构建一个由 <span :style="s.highlightOrange">自主 AI 知识图谱构架</span> 组成的知识库。注入问题，观察涌现行为，并在复杂的知识库群中寻找 <span :style="s.highlightCode">答案</span>。
+              通过单一文档，<span :style="s.highlightBold">Knowledge EviGraph</span> 提取现实种子并构建一个由 <span :style="s.highlightOrange">自主 AI 知识图谱构架</span> 组成的知识库。注入问题，观察涌现行为，并在复杂的知识库群中寻找 <span :style="s.highlightCode">答案</span>。
             </p>
           </div>
         </div>
 
         <div class="hero-right" :style="s.heroRight">
           <div class="logo-container" :style="s.logoContainer">
-            <img src="../assets/logo/EviGraph_log.png" alt="Knowledge EviGrap Logo" :style="s.heroLogo" />
+            <img src="../assets/logo/EviGraph_log.png" alt="Knowledge EviGraph Logo" :style="s.heroLogo" />
           </div>
           <button :style="s.scrollDownBtn" @click="scrollToBottom">↓</button>
         </div>
@@ -112,7 +112,7 @@
               <div :style="s.readyStatus">
                 <div :style="s.readyIcon">⚙️</div>
                 <div :style="s.readyTitle">准备处理 {{ files.length }} 份文档</div>
-                <div :style="s.readyDesc">Knowledge EviGrap 将提取实体、关系，并创建一个支持 PDF 位置映射的可搜索知识图谱。</div>
+                <div :style="s.readyDesc">Knowledge EviGraph 将提取实体、关系，并创建一个支持 PDF 位置映射的可搜索知识图谱。</div>
               </div>
             </div>
 
