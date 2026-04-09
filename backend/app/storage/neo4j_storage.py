@@ -1991,8 +1991,14 @@ class Neo4jStorage(GraphStorage):
                 if chunk_type == "clause":
                     clause_id = metadata.get("clause_id", "")
                     if clause_id:
-                        # 创建Clause实体
-                        self._create_entity_for_clause(tx, graph_id, episode_id, clause_id, content, embedding, metadata)
+                        # 如果 metadata 已包含 topic/entities（来自 intelligent_chunks），跳过 LLM 语义解析
+                        # Topic/Entity 节点将由 add_topic_and_entity_nodes 统一创建
+                        has_topic = metadata.get("topic") and metadata.get("entities")
+                        if has_topic:
+                            logger.info(f"[hierarchical] Skipping LLM parse for clause {clause_id} (has topic+entities from intelligent_chunks)")
+                        else:
+                            # 创建Clause实体（旧路径：需要 LLM 解析三元组）
+                            self._create_entity_for_clause(tx, graph_id, episode_id, clause_id, content, embedding, metadata)
                 elif chunk_type == "section":
                     title = metadata.get("title", content[:50])
                     self._create_section_entity(tx, graph_id, episode_id, title, metadata, embedding)
@@ -2005,6 +2011,160 @@ class Neo4jStorage(GraphStorage):
 
         logger.info(f"[hierarchical] Created episode {episode_id[:8]} with entities (Level{level}, {chunk_type})")
         return episode_id
+
+    def add_topic_and_entity_nodes(
+        self,
+        graph_id: str,
+        clauses_data: List[Dict],
+        entities_data: List[Dict]
+    ) -> Dict[str, int]:
+        """
+        为图谱添加 Topic 和 Entity 节点及关系
+
+        图谱结构：
+            Clause (Episode:Level2) --HAS_TOPIC--> Topic
+            Topic --MENTIONS--> Entity
+
+        Topic 节点：一个 Topic 对应一个 clause 的 topic 摘要
+        Entity 节点：一个 Entity 对应 clause.entities 中的一个字符串实体
+
+        Args:
+            graph_id: 图谱ID
+            clauses_data: 条款列表（来自 intelligent_chunks['clauses']）
+            entities_data: 要素列表（来自 intelligent_chunks['elements']）
+
+        Returns:
+            {"topics": N, "entities": M, "has_topic": X, "mentions": Y}
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        topic_count = 0
+        entity_count = 0
+        has_topic_count = 0
+        mentions_count = 0
+
+        with self._driver.session() as session:
+            def _create_nodes_and_relations(tx):
+                nonlocal topic_count, entity_count, has_topic_count, mentions_count
+
+                # 预统计
+                clauses_with_topic = [c for c in clauses_data if c.get('topic')]
+                entities_by_clause = {}
+                for e in entities_data:
+                    src = e.get('source_clause_id', '')
+                    if src:
+                        if src not in entities_by_clause:
+                            entities_by_clause[src] = []
+                        entities_by_clause[src].append(e)
+
+                # 批量 MERGE Topic 节点和 HAS_TOPIC 关系
+                for clause in clauses_with_topic:
+                    clause_id = clause.get('clause_id', '')
+                    topic_text = clause.get('topic', '')
+                    if not clause_id or not topic_text:
+                        continue
+
+                    # 创建 Topic 节点
+                    topic_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{clause_id}:topic".encode()).hexdigest()))
+                    tx.run(
+                        """
+                        MERGE (t:Topic {uuid: $uuid})
+                        ON CREATE SET
+                            t.graph_id = $gid,
+                            t.topic = $topic,
+                            t.clause_id = $clause_id,
+                            t.created_at = $created_at
+                        ON MATCH SET
+                            t.topic = $topic,
+                            t.clause_id = $clause_id
+                        """,
+                        uuid=topic_uuid,
+                        gid=graph_id,
+                        topic=topic_text,
+                        clause_id=clause_id,
+                        created_at=now
+                    )
+                    topic_count += 1
+
+                    # 找到对应的 Episode:Level2 节点并创建 HAS_TOPIC 关系
+                    tx.run(
+                        """
+                        MATCH (ep:Episode:Level2 {graph_id: $gid})
+                        WHERE ep.metadata_json CONTAINS $clause_id
+                        MERGE (ep)-[r:HAS_TOPIC]->(t:Topic {uuid: $uuid})
+                        ON CREATE SET
+                            r.graph_id = $gid,
+                            r.created_at = datetime()
+                        """,
+                        gid=graph_id,
+                        clause_id=clause_id,
+                        uuid=topic_uuid
+                    )
+                    # 检查是否成功创建了关系
+                    result = tx.run(
+                        """
+                        MATCH (ep:Episode:Level2 {graph_id: $gid})
+                        WHERE ep.metadata_json CONTAINS $clause_id
+                        RETURN count((ep)-[:HAS_TOPIC]->(:Topic {uuid: $uuid})) as cnt
+                        """,
+                        gid=graph_id,
+                        clause_id=clause_id,
+                        uuid=topic_uuid
+                    )
+                    record = result.single()
+                    if record and record["cnt"] > 0:
+                        has_topic_count += 1
+
+                    # 为该条款的 entities 创建 Entity 节点和 MENTIONS 关系
+                    clause_entities = clause.get('entities', [])
+                    if isinstance(clause_entities, list):
+                        for ent in clause_entities:
+                            # 兼容字符串实体和字典实体
+                            entity_name = ent if isinstance(ent, str) else ent.get('key', '')
+                            if not entity_name:
+                                continue
+
+                            entity_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{entity_name}:entity".encode()).hexdigest()))
+                            tx.run(
+                                """
+                                MERGE (e:Entity {uuid: $uuid})
+                                ON CREATE SET
+                                    e.graph_id = $gid,
+                                    e.name = $name,
+                                    e.created_at = $created_at
+                                ON MATCH SET
+                                    e.name = $name
+                                """,
+                                uuid=entity_uuid,
+                                gid=graph_id,
+                                name=entity_name,
+                                created_at=now
+                            )
+                            entity_count += 1
+
+                            # 创建 Topic --MENTIONS--> Entity 关系
+                            tx.run(
+                                """
+                                MATCH (t:Topic {uuid: $topic_uuid})
+                                MERGE (t)-[r:MENTIONS]->(e:Entity {uuid: $entity_uuid})
+                                ON CREATE SET
+                                    r.graph_id = $gid,
+                                    r.created_at = datetime()
+                                """,
+                                topic_uuid=topic_uuid,
+                                entity_uuid=entity_uuid,
+                                gid=graph_id
+                            )
+                            mentions_count += 1
+
+                return {
+                    "topics": topic_count,
+                    "entities": entity_count,
+                    "has_topic": has_topic_count,
+                    "mentions": mentions_count
+                }
+
+            result = self._call_with_retry(session.execute_write, _create_nodes_and_relations)
+            return result
 
     def _create_entity_for_clause(self, tx, graph_id: str, episode_id: str,
                                   clause_id: str, content: str,

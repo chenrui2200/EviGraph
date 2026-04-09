@@ -376,6 +376,28 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                         progress_callback=add_progress_callback
                     )
 
+                # 创建 Topic + Entity 节点及关系（Clause --HAS_TOPIC--> Topic, Topic --MENTIONS--> Entity）
+                if intelligent_chunks_data:
+                    try:
+                        task_manager.update_task(
+                            task_id,
+                            message="Creating Topic and Entity nodes...",
+                            progress=88
+                        )
+                        topic_result = storage.add_topic_and_entity_nodes(
+                            graph_id,
+                            intelligent_chunks_data.get('clauses', []),
+                            intelligent_chunks_data.get('elements', [])
+                        )
+                        build_logger.info(f"[{task_id}] Topic/Entity nodes created: {topic_result}")
+                        task_manager.update_task(
+                            task_id,
+                            message=f"Created {topic_result.get('topics', 0)} Topics, {topic_result.get('entities', 0)} Entities",
+                            progress=89
+                        )
+                    except Exception as topic_err:
+                        build_logger.warning(f"[{task_id}] Failed to create Topic/Entity nodes: {topic_err}")
+
                 # Update status to embedding generation
                 project.status = ProjectStatus.GRAPH_EMBEDDING
                 ProjectManager.save_project(project)
