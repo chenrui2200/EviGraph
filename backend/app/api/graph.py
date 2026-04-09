@@ -2913,36 +2913,36 @@ def intelligent_chunk():
                             }
                             for s in result.sections
                         ],
-                        # 使用 clause_to_dict 完整序列化（含 entities、triplets、terms、clause_items 等核心语义字段）
+                        # 使用 clause_to_dict 完整序列化（含 entities、topic、triplets、terms、clause_items 等核心语义字段）
                         # 同时按 clause_id 去重，保留第一条（内容最完整）
                         "clauses": (lambda seen_ids: [
                             c for c in (
                                 clause_to_dict(c) for c in result.clauses
                             ) if c["clause_id"] not in seen_ids and not seen_ids.add(c["clause_id"])
                         ])(set()),
-                        # 从 clauses.metadata["entities"] 提取实体作为 elements（兼容前端格式）
-                        # 同时按 entity.name + source_clause_id 去重
+                        # 从 clauses["entities"] 提取实体作为 elements（简化版：实体为字符串列表）
+                        # 同时按 entity + source_clause_id 去重
                         # 新增 scope_prefix + chapter 支持按子章节聚合查询
                         "elements": (lambda seen_keys: [
                             {
-                                "element_type": ent.get("entity_type", "unknown"),
-                                "key": ent.get("name", ""),
-                                "value": ent.get("value", ""),
-                                "unit": ent.get("unit", ""),
-                                "abbreviation": ent.get("abbreviation", ""),
-                                "definition": ent.get("definition", ""),
-                                "source_clause_id": ent.get("clause_id", c["clause_id"]),
+                                "element_type": "noun_entity",
+                                "key": ent if isinstance(ent, str) else "",
+                                "value": "",
+                                "unit": "",
+                                "abbreviation": "",
+                                "definition": "",
+                                "source_clause_id": c["clause_id"],
                                 # 知识域字段：从 clause 顶层继承
                                 "scope_prefix": c.get("scope_prefix") or c.get("metadata", {}).get("scope_prefix"),
                                 "chapter": c.get("chapter") or c.get("metadata", {}).get("chapter"),
-                                "metadata": ent
+                                "metadata": {"name": ent if isinstance(ent, str) else ""}
                             }
                             for c in (
                                 clause_to_dict(c) for c in result.clauses
                             )
-                            for ent in c.get("metadata", {}).get("entities", [])
-                            if (ent.get("name", "") + "|" + c["clause_id"]) not in seen_keys
-                            and not seen_keys.add((ent.get("name", "") + "|" + c["clause_id"]))
+                            for ent in c.get("entities", [])
+                            if ent and (str(ent) + "|" + c["clause_id"]) not in seen_keys
+                            and not seen_keys.add(str(ent) + "|" + c["clause_id"])
                         ])(set()),
                         # 保存边关系
                         "edges": getattr(result, 'edges', []) or []

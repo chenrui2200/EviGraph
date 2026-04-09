@@ -376,13 +376,25 @@
                     </div>
 
                     <!-- 知识实体 -->
-                    <div class="clause-entities-section" v-if="(clause.related_elements?.length || clause.entities?.length)">
-                      <div class="entity-section-label">📎 知识实体</div>
+                    <div class="clause-entities-section" v-if="clause.topic || (clause.entities?.length || clause.related_elements?.length)">
+                      <!-- 条款摘要 -->
+                      <div v-if="clause.topic" class="clause-topic-row">
+                        <span class="topic-label">📝 摘要</span>
+                        <span class="topic-content">{{ clause.topic }}</span>
+                      </div>
+                      <!-- 实体列表 -->
+                      <div v-if="clause.entities?.length || clause.related_elements?.length" class="entity-section-label">📎 知识实体</div>
                       <div class="entity-item-row" v-for="(elem, ei) in (clause.entities || clause.related_elements || [])" :key="ei">
-                        <span class="entity-type-tag">{{ elem.element_type || 'noun_entity' }}</span>
-                        <span class="entity-key">{{ elem.key }}</span>
-                        <span v-if="elem.value" class="entity-value">= {{ elem.value }}</span>
-                        <span v-if="elem.unit" class="entity-unit">{{ elem.unit }}</span>
+                        <template v-if="typeof elem === 'string'">
+                          <span class="entity-type-tag">noun</span>
+                          <span class="entity-key">{{ elem }}</span>
+                        </template>
+                        <template v-else>
+                          <span class="entity-type-tag">{{ elem.element_type || 'noun_entity' }}</span>
+                          <span class="entity-key">{{ elem.key }}</span>
+                          <span v-if="elem.value" class="entity-value">= {{ elem.value }}</span>
+                          <span v-if="elem.unit" class="entity-unit">{{ elem.unit }}</span>
+                        </template>
                       </div>
                     </div>
                   </div>
@@ -1610,6 +1622,9 @@ header.ca-header {
 .triplet-cond { color: #ca8a04; font-size: 10px; }
 
 .clause-entities-section { margin: 6px 0; }
+.clause-topic-row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 6px; padding: 6px 8px; background: #f0f9ff; border: 1px solid #e0f2fe; border-radius: 6px; }
+.topic-label { font-size: 11px; font-weight: 600; color: #0369a1; flex-shrink: 0; }
+.topic-content { font-size: 12px; color: #1e40af; line-height: 1.4; }
 .entity-section-label { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
 .entity-item-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 11px; }
 .entity-type-tag { padding: 1px 6px; border-radius: 4px; font-size: 10px; background: #e5e7eb; color: #6b7280; font-weight: 600; }
