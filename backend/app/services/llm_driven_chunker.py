@@ -661,6 +661,8 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "content": clause.content,
         "source": clause.source or "",
         "page": clause.page,
+        "bbox": clause.metadata.get("bbox_viewport") if clause.metadata else None,
+        "page_idx": clause.metadata.get("page_idx") if clause.metadata else None,
         "requirement_type": clause.requirement_type.value if hasattr(clause.requirement_type, 'value') else str(clause.requirement_type),
         # 优先使用显式字段，空则从 triplets 提取（兼容 LLM 只输出 triplets 的情况）
         "conditions": clause.conditions if clause.conditions else extracted_conditions,

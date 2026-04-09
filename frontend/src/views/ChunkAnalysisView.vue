@@ -375,9 +375,9 @@
                     </div>
 
                     <!-- 知识实体 -->
-                    <div class="clause-entities-section" v-if="clause.related_elements?.length">
+                    <div class="clause-entities-section" v-if="(clause.related_elements?.length || clause.entities?.length)">
                       <div class="entity-section-label">📎 知识实体</div>
-                      <div class="entity-item-row" v-for="(elem, ei) in clause.related_elements" :key="ei">
+                      <div class="entity-item-row" v-for="(elem, ei) in (clause.entities || clause.related_elements || [])" :key="ei">
                         <span class="entity-type-tag">{{ elem.element_type || 'noun_entity' }}</span>
                         <span class="entity-key">{{ elem.key }}</span>
                         <span v-if="elem.value" class="entity-value">= {{ elem.value }}</span>
@@ -1107,13 +1107,15 @@ async function loadAnalysis() {
 function buildAnnotations() {
   const anns = []
   for (const c of analysisData.value?.clauses || []) {
+    // 优先使用 pdf_location（来自 Neo4j），否则使用 clauses 顶层的 page_idx/bbox
+    // pdf_location.page 为 1-based；clause.page_idx 为 0-based，需 +1
     const loc = c.pdf_location
-    if (loc && loc.page) {
-      const bbox = loc.bbox
-      if (!bbox || bbox.length < 4) continue  // 跳过无有效 bbox 的标注
+    const page = loc?.page ?? ((c.page_idx != null) ? c.page_idx + 1 : null)
+    const bbox = loc?.bbox ?? c.bbox
+    if (page && bbox && bbox.length >= 4) {
       anns.push({
         clauseId: c.clause_id,
-        page: loc.page,
+        page,
         bbox,
         type: 'clause'
       })
@@ -1152,8 +1154,10 @@ async function handleClauseClick(clause) {
   highlightedClauseId.value = clause.clause_id
 
   const loc = clause.pdf_location
-  if (loc?.page) {
-    scrollToPage(loc.page)
+  // pdf_location.page 为 1-based；clause.page_idx 为 0-based，需 +1
+  const page = loc?.page ?? ((clause.page_idx != null) ? clause.page_idx + 1 : null)
+  if (page) {
+    scrollToPage(page)
   }
 }
 

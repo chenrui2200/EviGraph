@@ -3306,8 +3306,26 @@ def get_chunk_analysis(project_id: str):
             "actions": clause.get('actions', []),
             "components": clause.get('components', []),
             "objects": clause.get('objects', []),
-            # 关联要素
-            "related_elements": related_elements,
+            # clause 自带的 entities 标准化（intelligent_chunks 格式 → 前端期望格式）
+            "entities": [
+                {
+                    "element_type": e.get("entity_type", "unknown"),
+                    "key": e.get("name", ""),
+                    "value": e.get("value", ""),
+                    "unit": e.get("unit", ""),
+                }
+                for e in clause.get('entities', [])
+            ],
+            # 关联要素：合并 elements 列表匹配 + clause 自带的 entities
+            "related_elements": related_elements + [
+                {
+                    "element_type": e.get("entity_type", "unknown"),
+                    "key": e.get("name", ""),
+                    "value": e.get("value", ""),
+                    "unit": e.get("unit", ""),
+                }
+                for e in clause.get('entities', [])
+            ],
             "metadata": clause.get('metadata', {}),
             # PDF 定位信息
             "pdf_location": pdf_location
