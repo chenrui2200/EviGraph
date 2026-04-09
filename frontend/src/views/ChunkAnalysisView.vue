@@ -247,18 +247,19 @@
           </div>
         </div>
 
-        <!-- 统计摘要 -->
-        <div class="analysis-panel-header">
-          <div class="analysis-panel-title">
-            <span>🧠 智能分析</span>
+        <!-- 统计摘要 + 章节树（与 MinerU 面板互斥） -->
+        <div v-if="!mineruMode" class="analysis-content">
+          <div class="analysis-panel-header">
+            <div class="analysis-panel-title">
+              <span>🧠 智能分析</span>
+            </div>
+            <button class="re-analyse-btn" @click="handleResetChunking" :disabled="starting">
+              🔄 重新分析
+            </button>
           </div>
-          <button class="re-analyse-btn" @click="handleResetChunking" :disabled="starting">
-            🔄 重新分析
-          </button>
-        </div>
 
-        <!-- 章节树 -->
-        <div class="chapter-tree" v-if="analysisData">
+          <!-- 章节树 -->
+          <div class="chapter-tree" v-if="analysisData">
           <div class="tree-header">
             <span>章节树</span>
             <div class="tree-actions">
@@ -389,6 +390,7 @@
               </div>
             </div>
           </div>
+        </div>
         </div>
 
       </div>
@@ -1438,6 +1440,12 @@ header.ca-header {
   flex-direction: column;
   overflow-y: auto;
   background: #f8f9fa;
+}
+
+.analysis-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
 }
 
 /* 智能分析面板表头 */
