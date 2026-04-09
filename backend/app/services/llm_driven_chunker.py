@@ -2443,7 +2443,56 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
             # 如果 type=='title' 但不符合编号格式（如 "前 言"、"目 录"），跳过
             # 不影响 current_chapter，条款仍归属到前一个有效章节
             if chunk_type == 'title':
-                self.logger.debug(f"[章节构建] 跳过无编号标题: {content[:30]}")
+                # X.0.Y 格式的术语标题（如 "2.0.1 预期接触电压"），应作为条款处理
+                term_title_m = re.match(r'^(\d+\.\d+\.\d+)\s+(.+)', content)
+                if term_title_m and current_chapter is not None:
+                    clause_id = term_title_m.group(1)
+                    clause_title = term_title_m.group(2).strip()[:80]
+                    parts = clause_id.split('.')
+                    is_sub_chapter = len(parts) == 3 and parts[2] == '0'
+                    # 收集术语定义：检查下一个 chunk 是否为同页 text（定义内容）
+                    term_definition = content
+                    next_chunk = chunks_data[i + 1] if i + 1 < len(chunks_data) else None
+                    if (next_chunk and next_chunk.get('page_idx') == page_idx
+                            and next_chunk.get('type') == 'text'):
+                        term_definition = content + '\n' + (next_chunk.get('content') or '').strip()
+                    clause = ClauseSegment(
+                        clause_id=clause_id,
+                        clause_title=clause_title,
+                        content=term_definition,
+                        paragraphs=[],
+                        requirement_type=RequirementType.RECOMMENDED,
+                        applicable_systems=[],
+                        cross_refs=[],
+                        source=source,
+                        page=page_idx,
+                        triplets=[],
+                        clause_items=[],
+                        is_term_definition=True,
+                        terms=[{"term_name": clause_title, "definition": term_definition.split('\n', 1)[-1].strip()}],
+                        formula_content=None,
+                        semantics_enriched=False,
+                        parent_chapter=current_chapter['chapter_number'],
+                        referenced_clauses=[],
+                        referenced_standards=[],
+                        metadata={
+                            "chunk_type": chunk_type,
+                            "chunk_id": chunk_id,
+                            "parent_chapter": current_chapter['chapter_number'],
+                            "parent_chapter_title": current_chapter['title'],
+                            "page_idx": page_idx,
+                            "bbox_viewport": bbox_viewport,
+                            "is_sub_chapter": is_sub_chapter,
+                            "entities": []
+                        }
+                    )
+                    clauses.append(clause)
+                    if is_sub_chapter:
+                        current_chapter['sub_chapters'].append(clause_id)
+                    self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx}) [术语条款]")
+                    current_chapter['end_idx'] = i
+                else:
+                    self.logger.debug(f"[章节构建] 跳过无编号标题: {content[:30]}")
                 continue
 
             # 如果有当前章节，处理条款
