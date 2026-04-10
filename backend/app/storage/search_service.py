@@ -397,7 +397,7 @@ class SearchService:
                 limit=limit,
             )
             return [
-                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
         except Exception as e:
@@ -417,7 +417,7 @@ class SearchService:
                 limit=limit,
             )
             return [
-                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
         except Exception as e:
@@ -477,7 +477,7 @@ class SearchService:
                 min_score=min_score,
             )
             results = [
-                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
             logger.debug(f"Object vector search: {len(results)} results (index available)")
@@ -501,7 +501,7 @@ class SearchService:
                 min_score=min_score,
             )
             results = [
-                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
             if results:
@@ -521,7 +521,7 @@ class SearchService:
                 min_score=min_score,
             )
             results = [
-                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
             if results:
@@ -540,7 +540,7 @@ class SearchService:
                 min_score=min_score,
             )
             results = [
-                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
             logger.debug(f"Object keyword search (contains): '{query}' -> {len(results)} results")
@@ -603,7 +603,7 @@ class SearchService:
                 min_score=min_score,
             )
             results = [
-                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
             logger.debug(f"Term vector search: {len(results)} results (index available)")
@@ -627,7 +627,7 @@ class SearchService:
                 min_score=min_score,
             )
             results = [
-                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
             if results:
@@ -647,7 +647,7 @@ class SearchService:
                 min_score=min_score,
             )
             results = [
-                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
             if results:
@@ -666,7 +666,7 @@ class SearchService:
                 min_score=min_score,
             )
             results = [
-                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"]}
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
             logger.debug(f"Term keyword search (contains): '{query}' -> {len(results)} results")

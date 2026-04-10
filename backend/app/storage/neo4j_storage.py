@@ -1068,6 +1068,47 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             return self._call_with_retry(session.execute_read, _read)
 
+    def get_entity_topic_clause_paths(
+        self,
+        entity_uuids: List[str],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        直接查询 Entity → Topic → Clause 路径。
+
+        路径: (e:Entity)-[:MENTIONS]-(t:Topic)-[:HAS_TOPIC]-(c:Clause)
+        返回格式: { entity_uuid: [ {topic_uuid, clause_uuid}, ... ], ... }
+
+        Args:
+            entity_uuids: Entity 节点 UUID 列表
+
+        Returns:
+            Dict mapping entity_uuid to list of {topic_uuid, clause_uuid} path info
+        """
+        if not entity_uuids:
+            return {}
+
+        def _read(tx):
+            result = tx.run(
+                """
+                MATCH (e:Entity)-[:MENTIONS]-(t:Topic)-[:HAS_TOPIC]-(c:Clause)
+                WHERE e.uuid IN $uuids
+                RETURN e.uuid AS entity_uuid, t.uuid AS topic_uuid, c.uuid AS clause_uuid
+                """,
+                uuids=entity_uuids,
+            )
+            paths_map: Dict[str, List[Dict[str, Any]]] = {uid: [] for uid in entity_uuids}
+            for record in result:
+                entity_uuid = record["entity_uuid"]
+                if entity_uuid in paths_map:
+                    paths_map[entity_uuid].append({
+                        "topic_uuid": record["topic_uuid"],
+                        "clause_uuid": record["clause_uuid"],
+                    })
+            return paths_map
+
+        with self._driver.session() as session:
+            return self._call_with_retry(session.execute_read, _read)
+
     def get_nodes_by_label(self, graph_id: str, label: str) -> List[Dict[str, Any]]:
         def _read(tx):
             # Dynamic label in query (safe — label comes from ontology, not user input)
@@ -1662,6 +1703,8 @@ class Neo4jStorage(GraphStorage):
             "pdf_page_height": props.get("pdf_page_height"),
             # Clause 特有字段
             "clause_id": props.get("clause_id"),
+            # Clause 的多页 bbox 列表
+            "pdf_bboxes": props.get("pdf_bboxes"),
         }
 
     @staticmethod

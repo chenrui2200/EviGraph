@@ -65,18 +65,6 @@
                   </label>
                 </div>
               </span>
-              <span class="depth-label">
-                深度
-                <div class="depth-pills">
-                  <button
-                    v-for="d in [1,2,3,4,5]"
-                    :key="d"
-                    class="depth-pill"
-                    :class="{ active: maxDepth === d }"
-                    @click="maxDepth = d"
-                  >{{ d }}</button>
-                </div>
-              </span>
               <span class="depth-label sim-label">
                 相似度阈值
                 <div class="sim-slider-wrap">
@@ -395,7 +383,7 @@
 import { ref, onMounted, computed, nextTick, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
-import { getProject, searchGraph, searchObjectFirst, getGraphData } from '../api/graph'
+import { getProject, searchGraph, searchEntityTopicClause, getGraphData } from '../api/graph'
 
 const route = useRoute()
 const router = useRouter()
@@ -410,7 +398,6 @@ const searching = ref(false)
 const searchQuery = ref('')
 const filterGraph = ref(true)
 const rootTypes = ref(['Entity', 'Term']) // 根节点类型多选: Entity 和/或 Term
-const maxDepth = ref(3)             // DFS 最大深度
 const similarityThreshold = ref(50) // 相似度阈值 (50-100)，低于此值的结果被丢弃
 
 // 相似度阈值颜色：中=橙，高=绿
@@ -901,20 +888,19 @@ const handleSearch = async () => {
   if (!searchQuery.value.trim() || !graphId.value) return
   searching.value = true
   try {
-    // 并行查询 Object 和 Term，合并时 Term 排在 Object 前面
+    // 并行查询 Entity 和 Term，合并时 Term 排在 Entity 前面
+    // 使用专用路径检索：Entity/Term → Topic → Clause
     const [entityRes, termRes] = await Promise.all([
-      searchObjectFirst({
+      searchEntityTopicClause({
         graph_id: graphId.value,
         query: searchQuery.value,
         limit: 15,
-        max_depth: maxDepth.value,
         root_type: 'Entity'
       }),
-      searchObjectFirst({
+      searchEntityTopicClause({
         graph_id: graphId.value,
         query: searchQuery.value,
         limit: 15,
-        max_depth: maxDepth.value,
         root_type: 'Term'
       })
     ])

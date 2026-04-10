@@ -1614,6 +1614,28 @@ Your response:"""
                         if root_uuid and root_uuid in batch_pdf_info:
                             row.object_node["pdf_info"] = batch_pdf_info[root_uuid]
 
+            # Step 6: 如果根节点没有 PDF 定位信息，但 facts 中有 Clause 的 pdf_bboxes，
+            # 使用第一个 Clause 的 pdf_bboxes 作为根节点的 PDF 定位（用于文档定位）
+            for row in final_rows:
+                pdf_info = row.object_node.get("pdf_info", {})
+                if not pdf_info.get("source") or pdf_info.get("source") == "Graph":
+                    # 查找第一个有 pdf_bboxes 的 fact（通常是 Clause 节点）
+                    for fact in row.facts:
+                        if fact.get("pdf_bboxes") and isinstance(fact["pdf_bboxes"], list) and len(fact["pdf_bboxes"]) > 0:
+                            first_bbox = fact["pdf_bboxes"][0]
+                            if len(first_bbox) >= 5:
+                                pdf_info["source"] = fact.get("source")
+                                pdf_info["page"] = first_bbox[0]
+                                pdf_info["bbox"] = [first_bbox[1], first_bbox[2], first_bbox[3], first_bbox[4]]
+                                pdf_info["page_width"] = fact.get("page_width")
+                                pdf_info["page_height"] = fact.get("page_height")
+                                pdf_info["pdf_bboxes"] = fact["pdf_bboxes"]
+                                row.object_node["pdf_info"] = pdf_info
+                                break
+                    # 如果 still 没有有效 source，清空 pdf_info 避免前端显示无效按钮
+                    if not row.object_node["pdf_info"].get("source") or row.object_node["pdf_info"].get("source") == "Graph":
+                        row.object_node["pdf_info"] = {}
+
             logger.info(
                 f"Root-node DFS search complete: {len(final_rows)} {root_type} rows, "
                 f"{all_facts_count} total facts"
@@ -1628,6 +1650,259 @@ Your response:"""
 
         except Exception as e:
             logger.error(f"Root-node DFS search failed: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return ObjectFirstSearchResult(
+                query=query,
+                rows=[],
+                total_objects=0,
+                total_facts=0,
+            )
+
+    def search_term_entity_to_clause(
+        self,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+        root_type: str = "Entity",
+    ) -> ObjectFirstSearchResult:
+        """
+        专用路径检索：Entity/Term → Topic → Clause。
+
+        检索策略（固定 2 跳路径）：
+        1. 混合检索命中 Entity 或 Term 节点
+        2. 直接查询 Entity → Topic → Clause 路径
+        3. 收集 Clause 的 pdf_bboxes 用于文档定位
+
+        Args:
+            graph_id: 图谱 ID
+            query: 检索查询
+            limit: 最多返回多少个根节点行
+            root_type: 根节点类型，"Entity"（默认）或 "Term"
+
+        Returns:
+            ObjectFirstSearchResult
+        """
+        valid_root_types = ["Entity", "Term"]
+        if root_type not in valid_root_types:
+            root_type = "Entity"
+        logger.info(f"Term/Entity→Clause path search: graph_id={graph_id}, query={query[:50]}..., root_type={root_type}")
+
+        try:
+            # Step 1: 搜索根节点（Entity 或 Term）
+            if root_type == "Term":
+                root_nodes = self.storage.search_term_nodes(
+                    graph_id=graph_id,
+                    query=query,
+                    limit=limit,
+                )
+            else:
+                root_nodes = self.storage.search_object_nodes(
+                    graph_id=graph_id,
+                    query=query,
+                    limit=limit,
+                )
+
+            if not root_nodes:
+                logger.info(f"No {root_type} nodes found for the query")
+                return ObjectFirstSearchResult(
+                    query=query,
+                    rows=[],
+                    total_objects=0,
+                    total_facts=0,
+                )
+
+            # DEBUG: 打印根节点搜索结果
+            logger.info(f"[DEBUG] search_term_entity_to_clause root_nodes: {[{'_score': n.get('_score'), 'name': n.get('name'), 'uuid': n.get('uuid')} for n in root_nodes]}")
+
+            # Step 2: 收集所有根节点 UUID
+            root_uuids = [n.get("uuid") for n in root_nodes if n.get("uuid")]
+
+            # Step 3: 直接查询 Entity → Topic → Clause 路径
+            paths_map = self.storage.get_entity_topic_clause_paths(root_uuids)
+
+            # Step 4: 收集所有 Clause UUID 并批量获取
+            all_clause_uuids: set = set()
+            for entity_uuid, paths in paths_map.items():
+                for path in paths:
+                    if path.get("clause_uuid"):
+                        all_clause_uuids.add(path["clause_uuid"])
+
+            clause_uuids_list = list(all_clause_uuids)
+            clause_nodes_map: Dict[str, Dict[str, Any]] = {}
+            clause_pdf_info: Dict[str, Dict[str, Any]] = {}
+            if clause_uuids_list:
+                clause_nodes_map = self.storage.get_nodes_batch(clause_uuids_list)
+                clause_pdf_info = self._batch_get_node_pdf_info(clause_uuids_list)
+
+            # Step 5: 构建 ObjectFirstRow
+            rows = []
+            seen_fact_texts: set = set()
+
+            for root_node in root_nodes:
+                root_uuid = root_node.get("uuid", "")
+                if not root_uuid:
+                    continue
+
+                # 从根节点获取搜索分数（RRF混合搜索的score，已归一化）
+                root_score = root_node.get("score", 0.0)
+                # 转换为百分制以便与前端阈值（50-100）兼容
+                relevance_score = root_score * 100
+                logger.info(f"[DEBUG] root_node={root_node.get('name')}, score={root_score}, relevance_score={relevance_score}")
+
+                paths = paths_map.get(root_uuid, [])
+                traversal_nodes: List[ObjectPathNode] = []
+                traversal_edges: List[ObjectPathEdge] = []
+                facts: List[Dict[str, Any]] = []
+
+                # 添加根节点
+                traversal_nodes.append(ObjectPathNode(
+                    uuid=root_uuid,
+                    name=root_node.get("name", ""),
+                    labels=root_node.get("labels", []),
+                    summary=root_node.get("summary", ""),
+                    depth=0,
+                ))
+
+                # 按 topic 分组
+                topic_to_clauses_map: Dict[str, List[str]] = {}
+                for path in paths:
+                    topic_uuid = path.get("topic_uuid", "")
+                    clause_uuid = path.get("clause_uuid", "")
+                    if topic_uuid and clause_uuid:
+                        if topic_uuid not in topic_to_clauses_map:
+                            topic_to_clauses_map[topic_uuid] = []
+                        topic_to_clauses_map[topic_uuid].append(clause_uuid)
+
+                # 遍历 Topic → Clause 路径
+                for topic_uuid, clause_list in topic_to_clauses_map.items():
+                    # 添加 Topic 节点
+                    traversal_nodes.append(ObjectPathNode(
+                        uuid=topic_uuid,
+                        name="Topic",
+                        labels=["Topic"],
+                        summary="",
+                        depth=1,
+                    ))
+
+                    for clause_uuid in clause_list:
+                        clause_data = clause_nodes_map.get(clause_uuid, {})
+                        clause_name = clause_data.get("name", "") or f"Clause-{clause_uuid[:8]}"
+                        clause_labels = clause_data.get("labels", [])
+
+                        # 添加 Clause 节点
+                        traversal_nodes.append(ObjectPathNode(
+                            uuid=clause_uuid,
+                            name=clause_name,
+                            labels=clause_labels,
+                            summary=clause_data.get("summary", ""),
+                            depth=2,
+                        ))
+
+                        # 添加 HAS_TOPIC 边 (Clause → Topic)
+                        traversal_edges.append(ObjectPathEdge(
+                            uuid=f"{clause_uuid}-{topic_uuid}",
+                            name="HAS_TOPIC",
+                            fact="条款关联主题",
+                            source_node_uuid=clause_uuid,
+                            target_node_uuid=topic_uuid,
+                            depth=1,
+                        ))
+
+                        # 添加 MENTIONS 边 (Topic → Entity)
+                        traversal_edges.append(ObjectPathEdge(
+                            uuid=f"{topic_uuid}-{root_uuid}",
+                            name="MENTIONS",
+                            fact="提及实体",
+                            source_node_uuid=topic_uuid,
+                            target_node_uuid=root_uuid,
+                            depth=0,
+                        ))
+
+                        # 构建 fact（使用 Clause 的 pdf_bboxes）
+                        pdf_info = clause_pdf_info.get(clause_uuid, {})
+                        pdf_bboxes = pdf_info.get("pdf_bboxes")
+                        page = pdf_info.get("page")
+                        bbox = pdf_info.get("bbox")
+
+                        fact_text = f"条款: {clause_name}"
+                        norm = self.normalize_text(fact_text)
+                        if norm and norm not in seen_fact_texts:
+                            seen_fact_texts.add(norm)
+                            fact_entry: Dict[str, Any] = {
+                                "uuid": clause_uuid,
+                                "text": fact_text,
+                                "original_text": clause_data.get("summary", ""),
+                                "source": pdf_info.get("source") or "Graph",
+                                "page": page,
+                                "bbox": bbox,
+                                "page_width": pdf_info.get("page_width"),
+                                "page_height": pdf_info.get("page_height"),
+                                "graph_id": graph_id,
+                                "source_node_uuid": clause_uuid,
+                                "target_node_uuid": root_uuid,
+                                "relation_name": "HAS_TOPIC",
+                                "traversal_depth": 2,
+                                "similarity_score": 0.0,
+                            }
+                            if pdf_bboxes:
+                                fact_entry["pdf_bboxes"] = pdf_bboxes
+                            facts.append(fact_entry)
+
+                # 构建 object_node（根节点 Entity/Term）
+                obj_detail: Dict[str, Any] = {
+                    "uuid": root_uuid,
+                    "name": root_node.get("name", ""),
+                    "labels": root_node.get("labels", []),
+                    "summary": root_node.get("summary", ""),
+                    "pdf_info": {},
+                    "graph_id": graph_id,
+                }
+
+                row = ObjectFirstRow(
+                    object_node=obj_detail,
+                    traversal_paths=traversal_nodes,
+                    traversal_edges=traversal_edges,
+                    facts=facts,
+                    relevance_score=relevance_score,
+                )
+
+                # 如果根节点没有 PDF 定位，使用第一个 Clause 的 pdf_bboxes
+                if facts:
+                    first_fact = facts[0]
+                    if first_fact.get("pdf_bboxes"):
+                        fb = first_fact["pdf_bboxes"]
+                        first_bbox = fb[0]
+                        if len(first_bbox) >= 5:
+                            obj_detail["pdf_info"] = {
+                                "source": first_fact.get("source"),
+                                "page": first_bbox[0],
+                                "bbox": [first_bbox[1], first_bbox[2], first_bbox[3], first_bbox[4]],
+                                "page_width": first_fact.get("page_width"),
+                                "page_height": first_fact.get("page_height"),
+                                "pdf_bboxes": fb,
+                            }
+
+                rows.append(row)
+
+            # Step 6: 按 facts 数量排序
+            rows.sort(key=lambda r: len(r.facts), reverse=True)
+            final_rows = rows[:limit]
+
+            logger.info(
+                f"Term/Entity→Clause path search complete: {len(final_rows)} rows, "
+                f"total facts={sum(len(r.facts) for r in final_rows)}"
+            )
+
+            return ObjectFirstSearchResult(
+                query=query,
+                rows=final_rows,
+                total_objects=len(final_rows),
+                total_facts=sum(len(r.facts) for r in final_rows),
+            )
+
+        except Exception as e:
+            logger.error(f"Term/Entity→Clause path search failed: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
             return ObjectFirstSearchResult(
@@ -1764,6 +2039,18 @@ Your response:"""
                         page_width = node_data.get("pdf_page_width") if node_data else None
                         page_height = node_data.get("pdf_page_height") if node_data else None
                         original_text = ""
+                        # Clause 节点优先使用 pdf_bboxes（多页 bbox 列表）
+                        pdf_bboxes = None
+                        if node_data:
+                            node_labels = node_data.get("labels", [])
+                            if "Clause" in node_labels:
+                                clause_pdf_bboxes = node_data.get("pdf_bboxes")
+                                if clause_pdf_bboxes and isinstance(clause_pdf_bboxes, list) and len(clause_pdf_bboxes) > 0:
+                                    pdf_bboxes = clause_pdf_bboxes
+                                    first_bbox = clause_pdf_bboxes[0]
+                                    if len(first_bbox) >= 5:
+                                        page = first_bbox[0]
+                                        bbox = [first_bbox[1], first_bbox[2], first_bbox[3], first_bbox[4]]
                         # 查 episode 获取更多信息
                         if ep_ids:
                             try:
@@ -1798,7 +2085,7 @@ Your response:"""
                         if not page_height and object_data:
                             page_height = object_data.get("pdf_page_height")
 
-                        facts.append({
+                        fact_entry = {
                             "uuid": edge_uuid,
                             "text": fact_to_add,
                             "original_text": original_text,
@@ -1813,7 +2100,10 @@ Your response:"""
                             "relation_name": edge_name,
                             "traversal_depth": depth,
                             "similarity_score": root_score,  # Hybrid search score from root node
-                        })
+                        }
+                        if pdf_bboxes:
+                            fact_entry["pdf_bboxes"] = pdf_bboxes
+                        facts.append(fact_entry)
 
                 # Push neighbor onto stack for next iteration
                 if neighbor_uuid and neighbor_uuid not in visited:
@@ -1857,15 +2147,25 @@ Your response:"""
                     seen_fact_texts.add(norm)
                     edge_uuid = edge.get("uuid", "")
                     ep_ids = edge.get("episode_ids", [])
-                    # 优先取 neighbor_data（Clause 实体）的原文和 PDF 信息
+                    # 优先取 neighbor_data（可能是 Clause）的原文和 PDF 信息
                     source = neighbor_data.get("pdf_source") or "Graph"
                     page = neighbor_data.get("pdf_page")
                     bbox = neighbor_data.get("pdf_bbox")
                     page_width = neighbor_data.get("pdf_page_width")
                     page_height = neighbor_data.get("pdf_page_height")
                     original_text = neighbor_data.get("summary", "") or ""
+                    # Clause 节点优先使用 pdf_bboxes（多页 bbox 列表）
+                    pdf_bboxes = None
+                    neighbor_labels = neighbor_data.get("labels", [])
+                    if "Clause" in neighbor_labels:
+                        clause_pdf_bboxes = neighbor_data.get("pdf_bboxes")
+                        if clause_pdf_bboxes and isinstance(clause_pdf_bboxes, list) and len(clause_pdf_bboxes) > 0:
+                            pdf_bboxes = clause_pdf_bboxes
+                            first_bbox = clause_pdf_bboxes[0]  # [page, x0, y0, x1, y1]
+                            if len(first_bbox) >= 5:
+                                page = first_bbox[0]
+                                bbox = [first_bbox[1], first_bbox[2], first_bbox[3], first_bbox[4]]
                     # 回退：查 episode（当原文或 bbox 缺失时）
-                    if ep_ids and (not original_text or not bbox):
                         try:
                             eps = self.storage.get_episodes(
                                 [ep_ids[0]] if isinstance(ep_ids, list) else [ep_ids]
@@ -1887,7 +2187,7 @@ Your response:"""
                         except Exception:
                             pass
 
-                    facts.append({
+                    fact_entry = {
                         "uuid": edge_uuid,
                         "text": fact_to_add,
                         "original_text": original_text,
@@ -1902,7 +2202,10 @@ Your response:"""
                         "relation_name": edge_name,
                         "traversal_depth": n_depth - 1,
                         "similarity_score": root_score,
-                    })
+                    }
+                    if pdf_bboxes:
+                        fact_entry["pdf_bboxes"] = pdf_bboxes
+                    facts.append(fact_entry)
 
         # Build Object node detail (with PDF info added later by caller via batch)
         obj_detail = {
@@ -2030,6 +2333,30 @@ Your response:"""
 
             node = nodes_map.get(node_uuid)
             if node:
+                labels = node.get("labels", [])
+                is_clause = "Clause" in labels
+
+                # Clause 节点优先使用 pdf_bboxes（多页 bbox 列表）
+                if is_clause:
+                    pdf_bboxes = node.get("pdf_bboxes")
+                    if pdf_bboxes and isinstance(pdf_bboxes, list) and len(pdf_bboxes) > 0:
+                        first_bbox = pdf_bboxes[0]  # [page, x0, y0, x1, y1]
+                        if len(first_bbox) >= 5:
+                            pdf_info.update({
+                                "source": node.get("pdf_source") or node.get("source"),
+                                "page": first_bbox[0],
+                                "bbox": [first_bbox[1], first_bbox[2], first_bbox[3], first_bbox[4]],
+                                "page_width": node.get("pdf_page_width"),
+                                "page_height": node.get("pdf_page_height"),
+                                "pdf_bboxes": pdf_bboxes,  # 保留完整多页 bbox 供前端使用
+                            })
+                            result[node_uuid] = pdf_info
+                            complete_uuids.append(node_uuid)
+                            continue
+                    # Clause 但没有 pdf_bboxes，fallthrough to Step 2
+                    partial_uuids.append(node_uuid)
+                    continue
+
                 source = node.get("pdf_source") or node.get("source")
                 page = node.get("pdf_page") or node.get("page")
                 bbox = node.get("pdf_bbox") or node.get("bbox")

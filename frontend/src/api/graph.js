@@ -169,6 +169,20 @@ export function searchObjectFirst(data) {
 }
 
 /**
+ * 专用路径检索：Entity/Term → Topic → Clause
+ * 用于 Hit-Test 视图，固定 2 跳路径
+ * @param {Object} data - Contains graph_id, query, limit, root_type
+ * @returns {Promise}
+ */
+export function searchEntityTopicClause(data) {
+  return service({
+    url: '/api/report/tools/search-entity-topic-clause',
+    method: 'post',
+    data
+  })
+}
+
+/**
  * AI Q&A - retrieval from multiple graphs + LLM answering
  * @param {Object} data - Contains graph_ids, query
  * @returns {Promise}
