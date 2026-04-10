@@ -26,7 +26,7 @@ def search_object_first():
     query = data.get('query', '')
     limit = int(data.get('limit', 10))
     max_depth = int(data.get('max_depth', 3))
-    root_type = data.get('root_type', 'Object')
+    root_type = data.get('root_type', 'Entity')
 
     if not graph_id:
         return jsonify({"success": False, "error": "graph_id is required"}), 400

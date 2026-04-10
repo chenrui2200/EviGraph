@@ -2040,12 +2040,22 @@ Your response:"""
                         page_height = node_data.get("pdf_page_height") if node_data else None
                         original_text = ""
                         # Clause 节点优先使用 pdf_bboxes（多页 bbox 列表）
+                        # 兼容处理：pdf_bboxes 可能是 JSON 字符串或列表
                         pdf_bboxes = None
                         if node_data:
                             node_labels = node_data.get("labels", [])
                             if "Clause" in node_labels:
-                                clause_pdf_bboxes = node_data.get("pdf_bboxes")
-                                if clause_pdf_bboxes and isinstance(clause_pdf_bboxes, list) and len(clause_pdf_bboxes) > 0:
+                                clause_pdf_bboxes_raw = node_data.get("pdf_bboxes")
+                                clause_pdf_bboxes = None
+                                if clause_pdf_bboxes_raw:
+                                    if isinstance(clause_pdf_bboxes_raw, str):
+                                        try:
+                                            clause_pdf_bboxes = json.loads(clause_pdf_bboxes_raw)
+                                        except (json.JSONDecodeError, TypeError):
+                                            clause_pdf_bboxes = None
+                                    elif isinstance(clause_pdf_bboxes_raw, list):
+                                        clause_pdf_bboxes = clause_pdf_bboxes_raw
+                                if clause_pdf_bboxes and len(clause_pdf_bboxes) > 0:
                                     pdf_bboxes = clause_pdf_bboxes
                                     first_bbox = clause_pdf_bboxes[0]
                                     if len(first_bbox) >= 5:
@@ -2155,11 +2165,21 @@ Your response:"""
                     page_height = neighbor_data.get("pdf_page_height")
                     original_text = neighbor_data.get("summary", "") or ""
                     # Clause 节点优先使用 pdf_bboxes（多页 bbox 列表）
+                    # 兼容处理：pdf_bboxes 可能是 JSON 字符串或列表
                     pdf_bboxes = None
                     neighbor_labels = neighbor_data.get("labels", [])
                     if "Clause" in neighbor_labels:
-                        clause_pdf_bboxes = neighbor_data.get("pdf_bboxes")
-                        if clause_pdf_bboxes and isinstance(clause_pdf_bboxes, list) and len(clause_pdf_bboxes) > 0:
+                        clause_pdf_bboxes_raw = neighbor_data.get("pdf_bboxes")
+                        clause_pdf_bboxes = None
+                        if clause_pdf_bboxes_raw:
+                            if isinstance(clause_pdf_bboxes_raw, str):
+                                try:
+                                    clause_pdf_bboxes = json.loads(clause_pdf_bboxes_raw)
+                                except (json.JSONDecodeError, TypeError):
+                                    clause_pdf_bboxes = None
+                            elif isinstance(clause_pdf_bboxes_raw, list):
+                                clause_pdf_bboxes = clause_pdf_bboxes_raw
+                        if clause_pdf_bboxes and len(clause_pdf_bboxes) > 0:
                             pdf_bboxes = clause_pdf_bboxes
                             first_bbox = clause_pdf_bboxes[0]  # [page, x0, y0, x1, y1]
                             if len(first_bbox) >= 5:

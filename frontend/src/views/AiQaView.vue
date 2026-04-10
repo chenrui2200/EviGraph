@@ -93,27 +93,13 @@
                   <span class="option-label">根节点类型</span>
                   <div class="root-type-checks">
                     <label class="checkbox-label root-type-check">
-                      <input type="checkbox" value="Object" v-model="workflowData.rootTypes" />
-                      <span>Object</span>
+                      <input type="checkbox" value="Entity" v-model="workflowData.rootTypes" />
+                      <span>Entity</span>
                     </label>
                     <label class="checkbox-label root-type-check">
                       <input type="checkbox" value="Term" v-model="workflowData.rootTypes" />
                       <span>Term</span>
                     </label>
-                  </div>
-                </div>
-
-                <!-- DFS 深度 -->
-                <div class="search-option-row">
-                  <span class="option-label">深度</span>
-                  <div class="depth-pills">
-                    <button
-                      v-for="d in [1,2,3,4,5]"
-                      :key="d"
-                      class="depth-pill"
-                      :class="{ active: workflowData.maxDepth === d }"
-                      @click="workflowData.maxDepth = d"
-                    >{{ d }}</button>
                   </div>
                 </div>
 
@@ -578,7 +564,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { getProjectList, aiQa, updateProject } from '../api/graph'
+import { getProjectList, aiQa, updateProject, searchEntityTopicClause } from '../api/graph'
 import { saveApp, getApp, publishApp, executeAppApi } from '../api/ai_app'
 
 const props = defineProps({
@@ -911,8 +897,7 @@ const workflowData = ref({
   temperature: 0.7,
   similarityThreshold: 50,   // 相似度阈值：DFS 检索后预过滤，减少 LLM reranking 数量
   filterThreshold: 75,        // 推理阈值：reranking 后过滤，≥此分数才送 LLM 推理
-  maxDepth: 3,               // DFS 最大深度（与 hit-test 对齐）
-  rootTypes: ['Object', 'Term'],  // 根节点类型（与 hit-test 对齐）
+  rootTypes: ['Entity', 'Term'],  // 根节点类型（与 hit-test 对齐）
 })
 
 const results = ref({
@@ -1076,19 +1061,27 @@ const runWorkflow = async () => {
   resetWorkflow()
 
   try {
-    const response = await fetch(`${window.location.origin}/api/graph/ai-qa`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        query: workflowData.value.query,
-        graph_ids: workflowData.value.selectedGraphIds,
-        temperature: workflowData.value.temperature,
-        similarity_threshold: workflowData.value.similarityThreshold,
-        filter_threshold: workflowData.value.filterThreshold,
-        max_depth: workflowData.value.maxDepth,
-        root_types: workflowData.value.rootTypes,
-      })
-    })
+    // 使用与 Hit Test 相同的固定 2 跳路径检索（Entity/Term → Topic → Clause）
+    const allRows = []
+    for (const graphId of workflowData.value.selectedGraphIds) {
+      for (const rootType of workflowData.value.rootTypes) {
+        const res = await searchEntityTopicClause({
+          graph_id: graphId,
+          query: workflowData.value.query,
+          limit: 15,
+          root_type: rootType
+        })
+        if (res.success && res.data.rows) {
+          allRows.push(...res.data.rows.map(r => ({ ...r, root_type: rootType })))
+        }
+      }
+    }
+    // 按相似度阈值过滤
+    const filteredRows = allRows.filter(r => (r.relevance_score || 0) >= workflowData.value.similarityThreshold)
+    // 显示检索结果（不进入 LLM 推理阶段）
+    results.value.rows = filteredRows
+    results.value.facts = filteredRows.flatMap(r => r.facts || [])
+    running.value = false
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
