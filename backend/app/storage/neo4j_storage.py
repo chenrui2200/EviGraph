@@ -1945,9 +1945,10 @@ class Neo4jStorage(GraphStorage):
 
         with self._driver.session() as session:
             def _create_episode_and_entities(tx):
-                # 提取 PDF 定位信息作为直接属性
+                # 提取 PDF 定位信息和 clause_id
                 ep_source = metadata.get("source", "")
                 ep_page = metadata.get("page", 0)
+                ep_clause_id = metadata.get("clause_id", "")
 
                 # 1. 创建Episode节点
                 tx.run(
@@ -1961,14 +1962,16 @@ class Neo4jStorage(GraphStorage):
                         ep.embedding = $embedding,
                         ep.created_at = $created_at,
                         ep.source = $source,
-                        ep.page = $page
+                        ep.page = $page,
+                        ep.clause_id = $clause_id
                     ON MATCH SET
                         ep.graph_id = $graph_id,
                         ep.data = $data,
                         ep.metadata_json = $metadata_json,
                         ep.embedding = $embedding,
                         ep.source = COALESCE(ep.source, $source),
-                        ep.page = COALESCE(ep.page, $page)
+                        ep.page = COALESCE(ep.page, $page),
+                        ep.clause_id = $clause_id
                     """,
                     uuid=episode_id,
                     graph_id=graph_id,
@@ -1978,6 +1981,7 @@ class Neo4jStorage(GraphStorage):
                     created_at=now,
                     source=ep_source,
                     page=ep_page,
+                    clause_id=ep_clause_id,
                 )
 
                 # 2. 添加层级标签
@@ -2042,12 +2046,34 @@ class Neo4jStorage(GraphStorage):
         has_topic_count = 0
         mentions_count = 0
 
+        # DEBUG: 记录传入的 clauses_data 信息
+        logger.info(f"[add_topic_and_entity_nodes] DEBUG: clauses_data length = {len(clauses_data)}, entities_data length = {len(entities_data)}")
+        if clauses_data:
+            sample = clauses_data[0]
+            logger.info(f"[add_topic_and_entity_nodes] DEBUG: first clause has topic={sample.get('topic', 'MISSING')}, entities={sample.get('entities', 'MISSING')}, clause_id={sample.get('clause_id', 'MISSING')}")
+
         with self._driver.session() as session:
             def _create_nodes_and_relations(tx):
                 nonlocal topic_count, entity_count, has_topic_count, mentions_count
 
                 # 预统计
                 clauses_with_topic = [c for c in clauses_data if c.get('topic')]
+                logger.info(f"[add_topic_and_entity_nodes] DEBUG: clauses_with_topic length = {len(clauses_with_topic)}")
+
+                # 检查数据库中是否存在 Episode:Level2 节点
+                check_episodes = tx.run(
+                    """
+                    MATCH (ep:Episode:Level2 {graph_id: $gid})
+                    RETURN count(ep) as total_episodes, head(collect(ep.metadata_json)) as sample_metadata
+                    """,
+                    gid=graph_id
+                )
+                ep_check = check_episodes.single()
+                total_eps = ep_check["total_episodes"] if ep_check else 0
+                sample_meta = ep_check["sample_metadata"] if ep_check else None
+                logger.info(f"[add_topic_and_entity_nodes] DEBUG: Total Episode:Level2 nodes in DB: {total_eps}")
+                if sample_meta:
+                    logger.info(f"[add_topic_and_entity_nodes] DEBUG: Sample metadata_json: {sample_meta[:200] if sample_meta else 'None'}...")
                 entities_by_clause = {}
                 for e in entities_data:
                     src = e.get('source_clause_id', '')
@@ -2086,33 +2112,36 @@ class Neo4jStorage(GraphStorage):
                     topic_count += 1
 
                     # 找到对应的 Episode:Level2 节点并创建 HAS_TOPIC 关系
-                    tx.run(
+                    logger.info(f"[add_topic_and_entity_nodes] DEBUG: clause_id={clause_id}, topic={topic_text[:30] if topic_text else 'EMPTY'}")
+                    # 用 clause_id 直接属性查找（替代 metadata_json CONTAINS，避免误匹配）
+                    check_result = tx.run(
                         """
-                        MATCH (ep:Episode:Level2 {graph_id: $gid})
-                        WHERE ep.metadata_json CONTAINS $clause_id
-                        MERGE (ep)-[r:HAS_TOPIC]->(t:Topic {uuid: $uuid})
-                        ON CREATE SET
-                            r.graph_id = $gid,
-                            r.created_at = datetime()
+                        MATCH (ep:Episode:Level2 {graph_id: $gid, clause_id: $clause_id})
+                        RETURN count(ep) as ep_count
                         """,
                         gid=graph_id,
-                        clause_id=clause_id,
-                        uuid=topic_uuid
+                        clause_id=clause_id
                     )
-                    # 检查是否成功创建了关系
-                    result = tx.run(
-                        """
-                        MATCH (ep:Episode:Level2 {graph_id: $gid})
-                        WHERE ep.metadata_json CONTAINS $clause_id
-                        RETURN count((ep)-[:HAS_TOPIC]->(:Topic {uuid: $uuid})) as cnt
-                        """,
-                        gid=graph_id,
-                        clause_id=clause_id,
-                        uuid=topic_uuid
-                    )
-                    record = result.single()
-                    if record and record["cnt"] > 0:
+                    check_record = check_result.single()
+                    ep_count = check_record["ep_count"] if check_record else 0
+                    logger.info(f"[add_topic_and_entity_nodes] DEBUG: Found {ep_count} Episode:Level2 nodes for clause_id={clause_id}")
+
+                    if ep_count > 0:
+                        tx.run(
+                            """
+                            MATCH (ep:Episode:Level2 {graph_id: $gid, clause_id: $clause_id})
+                            MERGE (ep)-[r:HAS_TOPIC]->(t:Topic {uuid: $uuid})
+                            ON CREATE SET
+                                r.graph_id = $gid,
+                                r.created_at = datetime()
+                            """,
+                            gid=graph_id,
+                            clause_id=clause_id,
+                            uuid=topic_uuid
+                        )
                         has_topic_count += 1
+                    else:
+                        logger.warning(f"[add_topic_and_entity_nodes] WARNING: No Episode:Level2 found for clause_id={clause_id}, skipping HAS_TOPIC relationship")
 
                     # 为该条款的 entities 创建 Entity 节点和 MENTIONS 关系
                     clause_entities = clause.get('entities', [])

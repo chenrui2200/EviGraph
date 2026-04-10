@@ -294,6 +294,30 @@
 
                   <!-- 条文详情 -->
                   <div class="clause-detail" v-if="expandedClauseId === clause.clause_id">
+                    <!-- PDF 位置信息（支持多 bbox） -->
+                    <div class="entity-row" v-if="clause.bboxs?.length || clause.page || clause.pdf_location?.page">
+                      <span class="entity-label" style="color:#6b7280">📍 位置</span>
+                      <template v-if="clause.bboxs?.length">
+                        <span v-for="(item, idx) in clause.bboxs" :key="idx" class="entity-tag" style="background:#f3f4f6;color:#374151;border-color:#d1d5db">
+                          P{{ item.page }}: [
+                          {{ item.bbox.slice(0,2).join(',') }},
+                          {{ item.bbox.slice(2).join(',') }}
+                          ]
+                        </span>
+                      </template>
+                      <template v-else>
+                        <span class="entity-tag" style="background:#f3f4f6;color:#374151;border-color:#d1d5db">
+                          第 {{ clause.pdf_location?.page ?? clause.page }} 页
+                        </span>
+                        <span v-if="clause.pdf_location?.bbox || clause.bbox" class="entity-tag" style="background:#f3f4f6;color:#374151;border-color:#d1d5db;font-family:monospace;font-size:10px">
+                          bbox: [
+                          {{ (clause.pdf_location?.bbox ?? clause.bbox)?.slice(0,2).join(', ') }} ,
+                          {{ (clause.pdf_location?.bbox ?? clause.bbox)?.slice(2).join(', ') }}
+                          ]
+                        </span>
+                      </template>
+                    </div>
+
                     <!-- Term -->
                     <div class="entity-row" v-if="clause.terms?.length || editingClauseId === clause.clause_id">
                       <span class="entity-label term-label">🔵 Term</span>
@@ -560,29 +584,32 @@ const statusDotColor = computed(() => {
   return colorMap[analysisStatus.value] || '#CCC'
 })
 
-// 页码 -> 标注列表 的缓存
+// 页码 -> 标注列表 的缓存（两种模式互斥）
 const pageAnnotationsCache = computed(() => {
   const cache = {}
-  // LLM 分析模式标注
-  for (const ann of allAnnotations.value) {
-    if (!cache[ann.page]) cache[ann.page] = []
-    cache[ann.page].push(ann)
-  }
-  // MinerU 模式标注
-  if (mineruMode.value && mineruChunks.value.length) {
-    for (const c of mineruChunks.value) {
-      const bbox = c.bbox_viewport || c.bbox_pdf
-      if (!bbox || bbox.length < 4) continue  // 跳过无有效 bbox 的块，避免画出默认框
-      const pageNum = (c.page_idx || 0) + 1
-      if (!cache[pageNum]) cache[pageNum] = []
-      cache[pageNum].push({
-        clauseId: c.chunk_id,
-        page: pageNum,
-        bbox,
-        type: c.type || 'text',
-        categoryId: c.category_id || 1,
-        isMineru: true
-      })
+  if (mineruMode.value) {
+    // MinerU 模式：使用 chunks.json 的 bbox_viewport
+    if (mineruChunks.value.length) {
+      for (const c of mineruChunks.value) {
+        const bbox = c.bbox_viewport || c.bbox_pdf
+        if (!bbox || bbox.length < 4) continue
+        const pageNum = (c.page_idx || 0) + 1
+        if (!cache[pageNum]) cache[pageNum] = []
+        cache[pageNum].push({
+          clauseId: c.chunk_id,
+          page: pageNum,
+          bbox,
+          type: c.type || 'text',
+          categoryId: c.category_id || 1,
+          isMineru: true
+        })
+      }
+    }
+  } else {
+    // 智能分析模式：使用 intelligent_chunks.json 的 clause bbox
+    for (const ann of allAnnotations.value) {
+      if (!cache[ann.page]) cache[ann.page] = []
+      cache[ann.page].push(ann)
     }
   }
   return cache
@@ -1121,18 +1148,34 @@ async function loadAnalysis() {
 function buildAnnotations() {
   const anns = []
   for (const c of analysisData.value?.clauses || []) {
-    // 优先使用 pdf_location（来自 Neo4j），否则使用 clauses 顶层的 page_idx/bbox
-    // pdf_location.page 为 1-based；clause.page_idx 为 0-based，需 +1
+    // 优先使用 bboxs（聚合多 bbox），其次使用单 bbox，最后回退到 pdf_location
+    const bboxsList = c.bboxs || []
     const loc = c.pdf_location
-    const page = loc?.page ?? ((c.page_idx != null) ? c.page_idx + 1 : null)
-    const bbox = loc?.bbox ?? c.bbox
-    if (page && bbox && bbox.length >= 4) {
-      anns.push({
-        clauseId: c.clause_id,
-        page,
-        bbox,
-        type: 'clause'
-      })
+
+    if (bboxsList.length > 0) {
+      // 使用聚合的 bboxs [{page, bbox}, ...]
+      for (const item of bboxsList) {
+        if (item.bbox && item.bbox.length >= 4) {
+          anns.push({
+            clauseId: c.clause_id,
+            page: item.page,
+            bbox: item.bbox,
+            type: 'clause'
+          })
+        }
+      }
+    } else {
+      // 回退到单 bbox
+      const page = loc?.page ?? c.page ?? ((c.page_idx != null) ? c.page_idx + 1 : null)
+      const bbox = loc?.bbox ?? c.bbox
+      if (page && bbox && bbox.length >= 4) {
+        anns.push({
+          clauseId: c.clause_id,
+          page,
+          bbox,
+          type: 'clause'
+        })
+      }
     }
   }
   allAnnotations.value = anns
@@ -1162,16 +1205,20 @@ function toggleAllChapters() {
 async function handleClauseClick(clause) {
   if (expandedClauseId.value === clause.clause_id) {
     expandedClauseId.value = null
+    highlightedClauseId.value = null
     return
   }
   expandedClauseId.value = clause.clause_id
   highlightedClauseId.value = clause.clause_id
 
-  const loc = clause.pdf_location
-  // pdf_location.page 为 1-based；clause.page_idx 为 0-based，需 +1
-  const page = loc?.page ?? ((clause.page_idx != null) ? clause.page_idx + 1 : null)
-  if (page) {
-    scrollToPage(page)
+  // 优先使用 bboxs（多 bbox），回退到单 bbox 或 pdf_location
+  const bboxs = clause.bboxs || []
+  if (bboxs.length > 0) {
+    scrollToPage(bboxs[0].page)
+  } else {
+    const loc = clause.pdf_location
+    const page = loc?.page ?? clause.page ?? ((clause.page_idx != null) ? clause.page_idx + 1 : null)
+    if (page) scrollToPage(page)
   }
 }
 
@@ -1425,10 +1472,10 @@ header.ca-header {
 
 .bbox-overlay { position: absolute; pointer-events: auto; overflow: visible; }
 .bbox-rect { fill: transparent; stroke-width: 2; cursor: pointer; transition: all 0.2s; }
-.bbox-clause { stroke: #ea580c; fill: #fff7ed; }
-.bbox-element { stroke: #2563eb; fill: #eff6ff; }
-.bbox-term { stroke: #16a34a; fill: #f0fdf4; }
-.bbox-active { stroke-width: 3; fill: #fef9c3; filter: drop-shadow(0 0 4px #eab308); }
+.bbox-clause { stroke: #ea580c; fill: transparent; }
+.bbox-element { stroke: #2563eb; fill: transparent; }
+.bbox-term { stroke: #16a34a; fill: transparent; }
+.bbox-active { stroke-width: 2.5; stroke-dasharray: 6 3; fill: transparent; filter: drop-shadow(0 0 6px #eab308); }
 .bbox-mineru { stroke-width: 1.5; fill-opacity: 0.15; }
 .bbox-mineru:hover { fill-opacity: 0.35; stroke-width: 2.5; }
 

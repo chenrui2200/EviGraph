@@ -663,6 +663,10 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "page": clause.page,
         "bbox": clause.metadata.get("bbox_viewport") if clause.metadata else None,
         "page_idx": clause.metadata.get("page_idx") if clause.metadata else None,
+        # 所有来源 chunk 的 bbox（按 page 分组，同页合并）
+        "bboxs": clause.metadata.get("bboxs", []) if clause.metadata else [],
+        # 来源 chunks.json 的 chunk_id（可能有多个）
+        "chunks": [clause.metadata.get("chunk_id")] if clause.metadata and clause.metadata.get("chunk_id") else [],
         "requirement_type": clause.requirement_type.value if hasattr(clause.requirement_type, 'value') else str(clause.requirement_type),
         # 优先使用显式字段，空则从 triplets 提取（兼容 LLM 只输出 triplets 的情况）
         "conditions": clause.conditions if clause.conditions else extracted_conditions,
@@ -729,7 +733,6 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
             }
             for ci in clause.clause_items
         ] if clause.clause_items else [],
-        "metadata": clause.metadata or {}
     }
 
 
@@ -2726,7 +2729,49 @@ topic：{topic}
         for plan in chapter_plan:
             plan.end_position = len(chunks_data)  # 简化处理
 
-        self.logger.info(f"[章节构建] 完成: {len(sections)} 章节, {len(clauses)} 条款")
+        # =====================================================================
+        # 聚合所有 chunk 的 bbox 到对应 clause（一个 clause 可能对应多个 chunk）
+        # =====================================================================
+        # 建立 clause_id -> [(page_idx, bbox), ...] 的映射
+        clause_bbox_map: Dict[str, List[tuple]] = {}
+        for chunk in chunks_data:
+            chunk_id = chunk.get('chunk_id', '')
+            page_idx = chunk.get('page_idx', 0)
+            bbox = chunk.get('bbox_viewport') or chunk.get('bbox_pdf') or []
+            if not bbox or len(bbox) < 4:
+                continue
+            # 查找该 chunk 属于哪个 clause（通过 content 中的 clause_id）
+            chunk_content = chunk.get('content', '')
+            m = CLAUSE_PATTERN.match(chunk_content.strip())
+            if m:
+                clause_id = m.group(1)
+                if clause_id not in clause_bbox_map:
+                    clause_bbox_map[clause_id] = []
+                clause_bbox_map[clause_id].append((page_idx, bbox))
+
+        # 将聚合的 bboxs 写入各 clause 的 metadata
+        for clause in clauses:
+            cid = clause.clause_id
+            if cid in clause_bbox_map:
+                # 按 page 分组：同页的多个 bbox 合并为最大矩形
+                page_groups: Dict[int, List[list]] = {}
+                for p_idx, bb in clause_bbox_map[cid]:
+                    if p_idx not in page_groups:
+                        page_groups[p_idx] = []
+                    page_groups[p_idx].append(bb)
+
+                merged_bboxs = []
+                for p_idx, bboxes in page_groups.items():
+                    # 取所有 bbox 的并集（最大覆盖范围）
+                    x0 = min(bb[0] for bb in bboxes)
+                    y0 = min(bb[1] for bb in bboxes)
+                    x1 = max(bb[2] for bb in bboxes)
+                    y1 = max(bb[3] for bb in bboxes)
+                    merged_bboxs.append({"page": p_idx + 1, "bbox": [x0, y0, x1, y1]})
+
+                clause.metadata['bboxs'] = merged_bboxs
+
+        self.logger.info(f"[章节构建] 完成: {len(sections)} 章节, {len(clauses)} 条款，bboxs 聚合完成")
         return sections, clauses, chapter_plan
 
     # =========================================================================

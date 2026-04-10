@@ -98,6 +98,25 @@ def create_app(config_class=Config):
         embedding_service = EmbeddingService()
         embedding_status = "ok" if embedding_service.health_check() else "error"
 
+        # Check LLM
+        llm_status = "ok"
+        llm_error = None
+        llm_provider = None
+        llm_model = None
+        if Config.LLM_API_KEY:
+            try:
+                from .utils.llm_client import LLMClient
+                llm_client = LLMClient()
+                llm_provider = "ollama" if llm_client._is_ollama() else "openai-compatible"
+                llm_model = llm_client.model
+                # Simple test call - just check connectivity, not actual response content
+                llm_client.chat([{"role": "user", "content": "ping"}], max_tokens=5)
+            except Exception as e:
+                llm_status = "error"
+                llm_error = str(e)
+        else:
+            llm_status = "not_configured"
+
         return {
             'status': 'ok',
             'service': 'Knowledge EviGraph Backend',
@@ -112,6 +131,12 @@ def create_app(config_class=Config):
                     'model': Config.EMBEDDING_MODEL,
                     'provider': embedding_service.provider,
                     'url': embedding_service._embed_url
+                },
+                'llm': {
+                    'status': llm_status,
+                    'model': llm_model,
+                    'provider': llm_provider,
+                    'error': llm_error
                 }
             }
         }

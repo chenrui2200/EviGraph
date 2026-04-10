@@ -56,6 +56,12 @@
               <div class="metric-value" :style="s.metricValue">{{ embeddingProvider === 'ollama' ? '本地' : '在线' }}</div>
               <div class="metric-label" :style="s.metricLabel">嵌入模型 ({{ embeddingModel }})</div>
             </div>
+            <div class="metric-card" :style="s.metricCard">
+              <div class="metric-value" :style="s.metricValue">
+                {{ llmStatus === 'ok' ? '就绪' : llmStatus === 'error' ? '异常' : '未知' }}
+              </div>
+              <div class="metric-label" :style="s.metricLabel">LLM ({{ llmModel || '未配置' }})</div>
+            </div>
           </div>
 
           <div class="steps-container" :style="s.stepsContainer">
@@ -157,6 +163,9 @@ const systemStatus = ref('loading')
 const neo4jStatus = ref('unknown')
 const embeddingProvider = ref('unknown')
 const embeddingModel = ref('unknown')
+const llmStatus = ref('unknown')
+const llmModel = ref('unknown')
+const llmProvider = ref('unknown')
 
 const s = reactive({
   navbar: { height: '60px', background: '#000', color: '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 40px' },
@@ -274,6 +283,11 @@ const checkSystemStatus = async () => {
       neo4jStatus.value = res.dependencies.neo4j.status
       embeddingProvider.value = res.dependencies.embedding.provider
       embeddingModel.value = res.dependencies.embedding.model
+      if (res.dependencies.llm) {
+        llmStatus.value = res.dependencies.llm.status
+        llmModel.value = res.dependencies.llm.model
+        llmProvider.value = res.dependencies.llm.provider
+      }
     }
   } catch (err) {
     console.error('Failed to check system status:', err)
