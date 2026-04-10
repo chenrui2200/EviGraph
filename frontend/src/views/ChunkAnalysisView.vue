@@ -262,6 +262,11 @@
           <div class="chapter-tree" v-if="analysisData">
           <div class="tree-header">
             <span>章节树</span>
+            <span class="tree-stats" v-if="analysisData.summary">
+              ({{ analysisData.summary.total_clauses }}条款 ·
+               {{ analysisData.summary.total_terms }}术语 ·
+               {{ analysisData.summary.total_entities }}实体)
+            </span>
             <div class="tree-actions">
               <button class="expand-all-btn" @click="toggleAllChapters">
                 {{ allExpanded ? '全部收起' : '全部展开' }}
@@ -1595,13 +1600,21 @@ header.ca-header {
 .tree-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   padding: 10px 16px;
   background: #ffffff;
   font-size: 13px;
   font-weight: 600;
   color: #1a1a2e;
   border-bottom: 1px solid #e0e0e0;
+}
+.tree-header > span:first-child { flex-shrink: 0; }
+.tree-stats {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 400;
+  color: #6b7280;
+  margin: 0 12px;
 }
 .tree-actions { display: flex; align-items: center; gap: 6px; }
 .expand-all-btn { background: none; border: 1px solid #d0d7de; color: #6b7280; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }

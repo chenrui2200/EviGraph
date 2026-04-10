@@ -166,7 +166,7 @@ class Project:
     chunk_size: int = 500
     chunk_overlap: int = 50
     use_semantic: bool = False
-    entity_label: Optional[str] = None  # 实体节点的额外标签（如 "Term" 或 "Object"），支持 RRF 混合检索
+    entity_label: Optional[str] = None  # 实体节点的额外标签（如 "Term" 或 "Entity"），支持 RRF 混合检索
 
     # Error information
     error: Optional[str] = None
@@ -624,6 +624,18 @@ class ProjectManager:
                     sections = meta.get('sections', [])
                     _edges = meta.get('edges', [])
             edges = _edges
+
+        # 转换 ClauseSegment 对象为字典（确保 .get() 方法可用）
+        from ..models.clause import ClauseSegment
+        normalized_clauses = []
+        for c in clauses:
+            if isinstance(c, ClauseSegment):
+                normalized_clauses.append(asdict(c))
+            elif isinstance(c, dict):
+                normalized_clauses.append(c)
+            else:
+                normalized_clauses.append(c)
+        clauses = normalized_clauses
 
         # 构建章节树
         chapter_tree = {}

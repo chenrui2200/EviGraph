@@ -122,8 +122,8 @@ class GraphStorage(ABC):
         min_score: float = None,
     ) -> List[Dict[str, Any]]:
         """
-        Search Object nodes specifically using hybrid scoring.
-        Only returns nodes with label 'Object'.
+        Search Entity nodes specifically using hybrid scoring.
+        Only returns nodes with label 'Entity'.
 
         Args:
             graph_id: Graph to search in
@@ -132,7 +132,7 @@ class GraphStorage(ABC):
             min_score: Minimum vector similarity score (0-1). Only applies to vector search.
 
         Returns:
-            List of Object node dicts with 'score' field.
+            List of Entity node dicts with 'score' field.
         """
 
     @abstractmethod

@@ -137,7 +137,7 @@ def execute_app(app_id: str):
         similarity_threshold = int(data.get('similarity_threshold', app.workflow_data.get('similarityThreshold', 0)))
         filter_threshold = int(data.get('filter_threshold', app.workflow_data.get('filterThreshold', 75)))
         max_depth = int(data.get('max_depth', app.workflow_data.get('maxDepth', 3)))
-        root_types = data.get('root_types', app.workflow_data.get('rootTypes', ['Object', 'Term']))
+        root_types = data.get('root_types', app.workflow_data.get('rootTypes', ['Entity', 'Term']))
 
         if not graph_ids:
             return jsonify({"success": False, "error": "App has no knowledge base configured"}), 400

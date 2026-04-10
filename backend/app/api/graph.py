@@ -411,17 +411,16 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                             progress=88
                         )
                         clauses_for_topic = intelligent_chunks_data.get('clauses', [])
-                        build_logger.info(f"[{task_id}] 调用 add_topic_and_entity_nodes: clauses={len(clauses_for_topic)}, entity_label={project.entity_label}")
+                        build_logger.info(f"[{task_id}] 调用 add_topic_and_entity_nodes: clauses={len(clauses_for_topic)}")
                         topic_result = storage.add_topic_and_entity_nodes(
                             graph_id,
                             clauses_for_topic,
-                            intelligent_chunks_data.get('elements', []),
-                            entity_label=project.entity_label
+                            intelligent_chunks_data.get('elements', [])
                         )
                         build_logger.info(f"[{task_id}] Topic/Entity 结果: {topic_result}")
                         task_manager.update_task(
                             task_id,
-                            message=f"Created {topic_result.get('topics', 0)} Topics, {topic_result.get('entities', 0)} Entities",
+                            message=f"Created {topic_result.get('clauses', 0)} Clauses, {topic_result.get('topics', 0)} Topics, {topic_result.get('entities', 0)} Entities",
                             progress=89
                         )
                     except Exception as topic_err:
@@ -3341,6 +3340,10 @@ def get_chunk_analysis(project_id: str):
         return (1, str(key))
     sorted_chapters = sorted(chapter_tree.items(), key=_chapter_sort_key)
 
+    # 汇总条款中的术语和实体数量
+    total_terms = sum(len(c.get('terms', [])) for c in clauses)
+    total_entities = sum(len(c.get('entities', [])) for c in clauses)
+
     # 要素统计（支持 LLM 和 MinerU 两种格式）
     element_stats = {}
     for element in elements:
@@ -3439,6 +3442,8 @@ def get_chunk_analysis(project_id: str):
             "summary": {
                 "total_sections": len(sections),
                 "total_clauses": len(clauses),
+                "total_terms": total_terms,
+                "total_entities": total_entities,
                 "total_elements": len(elements),
                 "element_stats": element_stats,
                 "source": chunks.get('source', 'llm')
@@ -3593,7 +3598,7 @@ def update_clause_entity(project_id: str):
 @graph_bp.route('/entity/<graph_id>/<node_uuid>/label', methods=['PUT'])
 def update_node_label(graph_id: str, node_uuid: str):
     """
-    更新节点的额外标签（如添加 Term 或 Object label）
+    更新节点的额外标签（如添加 Term 或 Entity label）
 
     Request (JSON):
         {
@@ -3661,7 +3666,7 @@ def build_graph():
             "graph_name": "Graph name",    // Optional
             "chunk_size": 500,          // Optional, default 500
             "chunk_overlap": 50,        // Optional, default 50
-            "entity_label": "Term"       // Optional: 实体节点的额外标签（如 "Term" 或 "Object"），支持 RRF 混合检索
+            "entity_label": "Term"       // Optional: 实体节点的额外标签（如 "Term" 或 "Entity"），支持 RRF 混合检索
         }
 
     Response:
@@ -4084,7 +4089,7 @@ def ai_qa():
     except (ValueError, TypeError):
         max_depth = 3
 
-    root_types = data.get('root_types', ['Object', 'Term'])
+    root_types = data.get('root_types', ['Entity', 'Term'])
     if isinstance(root_types, str):
         root_types = [root_types]
 

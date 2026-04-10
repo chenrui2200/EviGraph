@@ -798,15 +798,15 @@ Your response:"""
         logger.info(f"Starting search_with_dfs_flow: query={query[:30]}, graphs={len(graph_ids)}, max_depth={max_depth}, root_types={root_types}, limit={limit}")
 
         if root_types is None:
-            root_types = ["Object", "Term"]
+            root_types = ["Entity", "Term"]
 
         all_rows: List[ObjectFirstRow] = []
         seen_fact_texts: set = set()
 
         # Search each graph
         for graph_id in graph_ids:
-            # --- Object root search ---
-            if "Object" in root_types:
+            # --- Entity root search ---
+            if "Entity" in root_types:
                 object_roots = self.storage.search_object_nodes(
                     graph_id=graph_id,
                     query=query,
@@ -912,7 +912,7 @@ Your response:"""
             intent: QueryIntent 实例
             limit: 最大返回行数
             max_depth: DFS 最大深度
-            root_types: 根节点类型，默认 ["Object", "Term"]
+            root_types: 根节点类型，默认 ["Entity", "Term"]
         """
         from .query_intent_parser import QueryIntent
 
@@ -923,7 +923,7 @@ Your response:"""
         )
 
         if root_types is None:
-            root_types = ["Object", "Term"]
+            root_types = ["Entity", "Term"]
 
         # 从 intent 提取搜索关键词
         keywords = intent.to_search_keywords()
@@ -953,8 +953,8 @@ Your response:"""
         # 对每个关键词搜索根节点
         for keyword in keywords:
             for graph_id in graph_ids:
-                # Object 根节点搜索
-                if "Object" in root_types:
+                # Entity 根节点搜索
+                if "Entity" in root_types:
                     object_roots = self.storage.search_object_nodes(
                         graph_id=graph_id,
                         query=keyword,

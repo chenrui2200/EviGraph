@@ -97,22 +97,22 @@ ORDER BY score DESC
 LIMIT $limit
 """
 
-# Cypher for vector search on Object nodes specifically
+# Cypher for vector search on Entity nodes specifically
 _VECTOR_SEARCH_OBJECT_NODES = """
 CALL db.index.vector.queryNodes('entity_embedding', $limit, $query_vector)
 YIELD node, score
-WHERE node.graph_id = $graph_id AND 'Object' IN labels(node)
+WHERE node.graph_id = $graph_id AND 'Entity' IN labels(node)
   AND ($min_score IS NULL OR score >= $min_score)
 RETURN node AS n, score
 ORDER BY score DESC
 LIMIT $limit
 """
 
-# Cypher for fulltext search on Object nodes specifically
+# Cypher for fulltext search on Entity nodes specifically
 _FULLTEXT_SEARCH_OBJECT_NODES = """
 CALL db.index.fulltext.queryNodes('entity_fulltext', $query_text)
 YIELD node, score
-WHERE node.graph_id = $graph_id AND 'Object' IN labels(node)
+WHERE node.graph_id = $graph_id AND 'Entity' IN labels(node)
   AND ($min_score IS NULL OR score >= $min_score)
 RETURN node AS n, score
 ORDER BY score DESC
@@ -122,7 +122,7 @@ LIMIT $limit
 # Fallback: direct CONTAINS search when fulltext index fails or returns empty
 _CONTAINS_SEARCH_OBJECT_NODES = """
 MATCH (n:Entity {graph_id: $graph_id})
-WHERE 'Object' IN labels(n)
+WHERE 'Entity' IN labels(n)
   AND (toLower(n.name) CONTAINS toLower($keyword)
        OR toLower(n.summary) CONTAINS toLower($keyword))
 RETURN n, 1.0 AS score
@@ -433,8 +433,8 @@ class SearchService:
         min_score: float = None,
     ) -> List[Dict[str, Any]]:
         """
-        Search Object nodes specifically using hybrid scoring.
-        Only returns nodes with label 'Object'.
+        Search Entity nodes specifically using hybrid scoring.
+        Only returns nodes with label 'Entity'.
 
         Returns list of dicts with node properties + 'score'.
         """

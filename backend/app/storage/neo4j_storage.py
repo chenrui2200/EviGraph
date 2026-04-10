@@ -933,7 +933,7 @@ class Neo4jStorage(GraphStorage):
         Args:
             graph_id: 图谱ID
             node_uuid: 节点UUID
-            add_labels: 要添加的标签列表（如 ["Term"] 或 ["Object"]）
+            add_labels: 要添加的标签列表（如 ["Term"] 或 ["Entity"]）
             remove_labels: 要移除的标签列表（可选）
 
         Returns:
@@ -958,7 +958,7 @@ class Neo4jStorage(GraphStorage):
                     if add_labels:
                         for label in add_labels:
                             # 标签名只允许特定值，防止注入
-                            if label not in ("Term", "Object", "Component", "Action", "Condition"):
+                            if label not in ("Term", "Entity", "Component", "Action", "Condition"):
                                 continue
                             tx.run(
                                 f"MATCH (n {{uuid: $uuid, graph_id: $gid}}) SET n:`{label}`",
@@ -969,7 +969,7 @@ class Neo4jStorage(GraphStorage):
                     # 移除标签
                     if remove_labels:
                         for label in remove_labels:
-                            if label not in ("Term", "Object", "Component", "Action", "Condition"):
+                            if label not in ("Term", "Entity", "Object", "Component", "Action", "Condition"):
                                 continue
                             tx.run(
                                 f"MATCH (n {{uuid: $uuid, graph_id: $gid}}) REMOVE n:`{label}`",
@@ -1156,8 +1156,13 @@ class Neo4jStorage(GraphStorage):
             return self._call_with_retry(session.execute_read, _read)
 
     def get_term_clause_episodes(self, term_uuid: str, limit: int = 1) -> List[Dict[str, Any]]:
-        """Get episodes for the Clause that a Term DEFINES, for PDF tracing."""
+        """Get episodes for the Clause that a Term DEFINES, for PDF tracing.
+
+        Fallback: If no DEFINES relationship exists (e.g., Term created via add_topic_and_entity_nodes),
+        try to find Episode via Topic path: Term <-MENTIONS- Topic <-HAS_TOPIC- Episode
+        """
         def _read(tx):
+            # Try the standard DEFINES path first
             result = tx.run(
                 """
                 MATCH (t:Entity:Term {uuid: $term_uuid})-[:DEFINES]->(c:Entity)
@@ -1166,7 +1171,7 @@ class Neo4jStorage(GraphStorage):
                 OPTIONAL MATCH (d:Document)-[:HAS_PAGE]->(p)
                 OPTIONAL MATCH (d2:Document)-[:HAS_EPISODE]->(ep)
                 RETURN ep, p.number AS page_num,
-                       coalesce(d.name, d2.name) AS doc_name
+                       coalesce(d.name, d2.name) AS doc_name, 0 AS via_topic
                 LIMIT $limit
                 """,
                 term_uuid=term_uuid,
@@ -1175,29 +1180,71 @@ class Neo4jStorage(GraphStorage):
             episodes = []
             for record in result:
                 ep_node = record.get("ep")
-                if not ep_node:
-                    continue
-                props = dict(ep_node)
-                for k, v in props.items():
-                    if hasattr(v, "isoformat"):
-                        props[k] = v.isoformat()
-                meta_json = props.pop("metadata_json", "{}")
-                try:
-                    metadata = json.loads(meta_json) if meta_json else {}
-                except (json.JSONDecodeError, TypeError):
-                    metadata = {}
-                if record["doc_name"]:
-                    metadata["source"] = record["doc_name"]
-                if record["page_num"]:
-                    metadata["page"] = record["page_num"]
-                episodes.append({
-                    "uuid": props.get("uuid"),
-                    "text": props.get("data"),
-                    "source": props.get("source"),
-                    "page": props.get("page"),
-                    "metadata": metadata,
-                    "created_at": props.get("created_at")
-                })
+                if ep_node:
+                    props = dict(ep_node)
+                    for k, v in props.items():
+                        if hasattr(v, "isoformat"):
+                            props[k] = v.isoformat()
+                    meta_json = props.pop("metadata_json", "{}")
+                    try:
+                        metadata = json.loads(meta_json) if meta_json else {}
+                    except (json.JSONDecodeError, TypeError):
+                        metadata = {}
+                    if record["doc_name"]:
+                        metadata["source"] = record["doc_name"]
+                    if record["page_num"]:
+                        metadata["page"] = record["page_num"]
+                    episodes.append({
+                        "uuid": props.get("uuid"),
+                        "text": props.get("data"),
+                        "source": props.get("source"),
+                        "page": props.get("page"),
+                        "metadata": metadata,
+                        "created_at": props.get("created_at")
+                    })
+
+            # Fallback: if no episodes found via DEFINES, try via Topic path
+            # Path: Term <-MENTIONS- Topic <-HAS_TOPIC- Episode
+            if not episodes:
+                result = tx.run(
+                    """
+                    MATCH (et:Entity:Term {uuid: $term_uuid})<-[:MENTIONS]-(t:Topic)
+                    MATCH (t)<-[:HAS_TOPIC]-(ep:Episode)
+                    OPTIONAL MATCH (p:Page)-[:HAS_EPISODE]->(ep)
+                    OPTIONAL MATCH (d:Document)-[:HAS_PAGE]->(p)
+                    OPTIONAL MATCH (d2:Document)-[:HAS_EPISODE]->(ep)
+                    RETURN ep, p.number AS page_num,
+                           coalesce(d.name, d2.name) AS doc_name
+                    LIMIT $limit
+                    """,
+                    term_uuid=term_uuid,
+                    limit=limit,
+                )
+                for record in result:
+                    ep_node = record.get("ep")
+                    if ep_node:
+                        props = dict(ep_node)
+                        for k, v in props.items():
+                            if hasattr(v, "isoformat"):
+                                props[k] = v.isoformat()
+                        meta_json = props.pop("metadata_json", "{}")
+                        try:
+                            metadata = json.loads(meta_json) if meta_json else {}
+                        except (json.JSONDecodeError, TypeError):
+                            metadata = {}
+                        if record["doc_name"]:
+                            metadata["source"] = record["doc_name"]
+                        if record["page_num"]:
+                            metadata["page"] = record["page_num"]
+                        episodes.append({
+                            "uuid": props.get("uuid"),
+                            "text": props.get("data"),
+                            "source": props.get("source"),
+                            "page": props.get("page"),
+                            "metadata": metadata,
+                            "created_at": props.get("created_at")
+                        })
+
             return episodes
 
         with self._driver.session() as session:
@@ -1306,8 +1353,8 @@ class Neo4jStorage(GraphStorage):
         min_score: float = None,
     ) -> List[Dict[str, Any]]:
         """
-        Search Object nodes specifically using hybrid scoring (vector + BM25).
-        Only returns nodes with label 'Object'.
+        Search Entity nodes specifically using hybrid scoring (vector + BM25).
+        Only returns nodes with label 'Entity'.
 
         Returns list of dicts with node properties + 'score'.
         """
@@ -2105,12 +2152,12 @@ class Neo4jStorage(GraphStorage):
         图谱结构：
             Clause (Episode:Level2) --HAS_TOPIC--> Topic
             Topic --MENTIONS--> Entity:Term (来自 clause.terms)
-            Topic --MENTIONS--> Entity:Object (来自 clause.entities)
+            Topic --MENTIONS--> Entity (来自 clause.entities)
 
         节点类型：
             Topic: 一个 Topic 对应一个 clause 的 topic 摘要
             Entity:Term: 来自 clause.terms，包含术语定义
-            Entity:Object: 来自 clause.entities，包含通用实体
+            Entity: 来自 clause.entities，包含通用实体
 
         Args:
             graph_id: 图谱ID
@@ -2123,22 +2170,25 @@ class Neo4jStorage(GraphStorage):
         now = datetime.now(timezone.utc).isoformat()
         topic_count = 0
         entity_count = 0
+        clause_count = 0  # Clause 节点数量（来自 Episode:Level2）
         has_topic_count = 0
         mentions_count = 0
 
+        # 预统计 clauses 总数（从 Episode:Level2 节点计数）
+        clauses_with_topic = [c for c in clauses_data if c.get('topic')]
+
         # DEBUG: 记录传入的 clauses_data 信息
-        logger.info(f"[add_topic_and_entity_nodes] DEBUG: clauses_data length = {len(clauses_data)}, entities_data length = {len(entities_data)}")
+        logger.info(f"[add_topic_and_entity_nodes] DEBUG: clauses_data length = {len(clauses_data)}, clauses_with_topic length = {len(clauses_with_topic)}, entities_data length = {len(entities_data)}")
         if clauses_data:
             sample = clauses_data[0]
             logger.info(f"[add_topic_and_entity_nodes] DEBUG: first clause has topic={sample.get('topic', 'MISSING')}, entities={sample.get('entities', 'MISSING')}, clause_id={sample.get('clause_id', 'MISSING')}")
 
         with self._driver.session() as session:
             def _create_nodes_and_relations(tx):
-                nonlocal topic_count, entity_count, has_topic_count, mentions_count
+                nonlocal topic_count, entity_count, clause_count, has_topic_count, mentions_count
 
                 # 预统计
                 clauses_with_topic = [c for c in clauses_data if c.get('topic')]
-                logger.info(f"[add_topic_and_entity_nodes] DEBUG: clauses_with_topic length = {len(clauses_with_topic)}")
 
                 # 检查数据库中是否存在 Episode:Level2 节点
                 check_episodes = tx.run(
@@ -2167,7 +2217,8 @@ class Neo4jStorage(GraphStorage):
                 rec = check_with_clause_id.single()
                 cnt = rec["cnt"] if rec else 0
                 sample_pair = rec["sample"] if rec else None
-                logger.info(f"[add_topic_and_entity_nodes] DEBUG: Episode:Level2 有 clause_id 的数量: {cnt}, sample={sample_pair}")
+                clause_count = cnt  # 使用数据库中实际的 Clause 节点数量
+                logger.info(f"[add_topic_and_entity_nodes] DEBUG: Episode:Level2 有 clause_id 的数量: {cnt}, clauses_with_topic length: {len(clauses_with_topic)}")
                 entities_by_clause = {}
                 for e in entities_data:
                     src = e.get('source_clause_id', '')
@@ -2286,7 +2337,7 @@ class Neo4jStorage(GraphStorage):
                             )
                             mentions_count += 1
 
-                    # 为该条款的 entities 创建 Entity:Object 节点和 MENTIONS 关系
+                    # 为该条款的 entities 创建 Entity 节点和 MENTIONS 关系
                     clause_entities = clause.get('entities', [])
                     if isinstance(clause_entities, list):
                         for ent in clause_entities:
@@ -2297,14 +2348,14 @@ class Neo4jStorage(GraphStorage):
 
                             entity_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{entity_name}:entity".encode()).hexdigest()))
 
-                            # 统一使用 Entity:Object 标签，便于检索
+                            # 统一使用 Entity 标签，便于检索
                             tx.run(
                                 """
-                                MERGE (e:Entity:Object {uuid: $uuid})
+                                MERGE (e:Entity {uuid: $uuid})
                                 ON CREATE SET
                                     e.graph_id = $gid,
                                     e.name = $name,
-                                    e.entity_label = 'Object',
+                                    e.entity_label = 'Entity',
                                     e.created_at = $created_at
                                 ON MATCH SET
                                     e.name = $name
@@ -2314,13 +2365,13 @@ class Neo4jStorage(GraphStorage):
                                 name=entity_name,
                                 created_at=now
                             )
-                            logger.info(f"[topic_entity]   Entity:Object: {entity_name} <- Topic({topic_text[:20]}) MENTIONS")
+                            logger.info(f"[topic_entity]   Entity: {entity_name} <- Topic({topic_text[:20]}) MENTIONS")
                             entity_count += 1
 
-                            # 创建 Topic --MENTIONS--> Entity:Object 关系
+                            # 创建 Topic --MENTIONS--> Entity 关系
                             tx.run(
                                 """
-                                MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity:Object {uuid: $entity_uuid})
+                                MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity {uuid: $entity_uuid})
                                 MERGE (t)-[r:MENTIONS]->(e)
                                 SET r.graph_id = $gid, r.created_at = datetime()
                                 """,
@@ -2333,6 +2384,7 @@ class Neo4jStorage(GraphStorage):
                 return {
                     "topics": topic_count,
                     "entities": entity_count,
+                    "clauses": clause_count,
                     "has_topic": has_topic_count,
                     "mentions": mentions_count
                 }
@@ -2367,7 +2419,7 @@ class Neo4jStorage(GraphStorage):
         # 提取 PDF 定位信息
         pdf_source = metadata.get('source')
         pdf_page = metadata.get('page')
-        pdf_bbox = metadata.get('bbox')
+        pdf_bboxes = metadata.get('bboxs', [])  # 跨页 bbox 列表，格式: [[page, x0, y0, x1, y1], ...]
         pdf_page_width = metadata.get('page_width')
         pdf_page_height = metadata.get('page_height')
 
@@ -2384,7 +2436,7 @@ class Neo4jStorage(GraphStorage):
                 e.requirement_type = $req_type,
                 e.pdf_source = $pdf_source,
                 e.pdf_page = $pdf_page,
-                e.pdf_bbox = $pdf_bbox,
+                e.pdf_bboxes = $pdf_bboxes,
                 e.pdf_page_width = $pdf_page_width,
                 e.pdf_page_height = $pdf_page_height,
                 e.created_at = datetime()
@@ -2393,7 +2445,7 @@ class Neo4jStorage(GraphStorage):
                 e.summary = COALESCE(e.summary, $summary),
                 e.pdf_source = COALESCE(e.pdf_source, $pdf_source),
                 e.pdf_page = COALESCE(e.pdf_page, $pdf_page),
-                e.pdf_bbox = COALESCE(e.pdf_bbox, $pdf_bbox),
+                e.pdf_bboxes = COALESCE(e.pdf_bboxes, $pdf_bboxes),
                 e.pdf_page_width = COALESCE(e.pdf_page_width, $pdf_page_width),
                 e.pdf_page_height = COALESCE(e.pdf_page_height, $pdf_page_height)
             """,
@@ -2407,7 +2459,7 @@ class Neo4jStorage(GraphStorage):
             req_type=clause_requirement,
             pdf_source=pdf_source,
             pdf_page=pdf_page,
-            pdf_bbox=pdf_bbox,
+            pdf_bboxes=pdf_bboxes,
             pdf_page_width=pdf_page_width,
             pdf_page_height=pdf_page_height,
         )
@@ -2434,7 +2486,7 @@ class Neo4jStorage(GraphStorage):
                 logger.info(f"[hierarchical] 创建术语定义: {term_name}")
                 term_entity_uuid = self._create_term_entity(
                     tx, graph_id, entity_uuid, term_name, term_definition, clause_id,
-                    pdf_source=pdf_source, pdf_page=pdf_page, pdf_bbox=pdf_bbox,
+                    pdf_source=pdf_source, pdf_page=pdf_page, pdf_bboxes=pdf_bboxes,
                     pdf_page_width=pdf_page_width, pdf_page_height=pdf_page_height
                 )
                 self._create_defines_relation(tx, term_entity_uuid, entity_uuid)
@@ -2470,11 +2522,11 @@ class Neo4jStorage(GraphStorage):
                 if comp_uuid:
                     self._create_applies_to_relation(tx, entity_uuid, comp_uuid)
 
-            # 路径5（部分）: Action --requires--> Object（作为参数要求）
+            # 路径5（部分）: Action --requires--> Entity（作为参数要求）
             obj_uuid = None
             if obj:
                 self._create_object_entity(tx, graph_id, episode_id, obj)
-                obj_uuid = self._find_entity_uuid(tx, graph_id, 'Object', obj)
+                obj_uuid = self._find_entity_uuid(tx, graph_id, 'Entity', obj)
 
             # 路径3: Clause --mandates/recommends/prohibits--> Action
             action_uuid = None
@@ -2487,7 +2539,7 @@ class Neo4jStorage(GraphStorage):
                 else:
                     self._create_recommends_relation(tx, entity_uuid, action_uuid)
 
-                # 路径5（精确配对）: Action --OPERATES_ON--> Object
+                # 路径5（精确配对）: Action --OPERATES_ON--> Entity
                 if obj_uuid:
                     self._create_operates_on_relation(tx, action_uuid, obj_uuid)
 
@@ -2951,7 +3003,7 @@ class Neo4jStorage(GraphStorage):
     def _create_term_entity(self, tx, graph_id: str, clause_uuid: str,
                            term_name: str, definition: str, source_id: str = "",
                            pdf_source: str = None, pdf_page: int = None,
-                           pdf_bbox: list = None, pdf_page_width: int = None,
+                           pdf_bboxes: list = None, pdf_page_width: int = None,
                            pdf_page_height: int = None) -> str:
         """创建 Term（术语）实体"""
         entity_seed = f"{graph_id}:Term:{term_name}".encode('utf-8')
@@ -2969,7 +3021,7 @@ class Neo4jStorage(GraphStorage):
                     e.summary = $summary,
                     e.pdf_source = $pdf_source,
                     e.pdf_page = $pdf_page,
-                    e.pdf_bbox = $pdf_bbox,
+                    e.pdf_bboxes = $pdf_bboxes,
                     e.pdf_page_width = $pdf_page_width,
                     e.pdf_page_height = $pdf_page_height,
                     e.created_at = datetime()
@@ -2978,7 +3030,7 @@ class Neo4jStorage(GraphStorage):
                     e.summary = COALESCE(e.summary, $summary),
                     e.pdf_source = COALESCE(e.pdf_source, $pdf_source),
                     e.pdf_page = COALESCE(e.pdf_page, $pdf_page),
-                    e.pdf_bbox = COALESCE(e.pdf_bbox, $pdf_bbox),
+                    e.pdf_bboxes = COALESCE(e.pdf_bboxes, $pdf_bboxes),
                     e.pdf_page_width = COALESCE(e.pdf_page_width, $pdf_page_width),
                     e.pdf_page_height = COALESCE(e.pdf_page_height, $pdf_page_height)
                 """,
@@ -2991,7 +3043,7 @@ class Neo4jStorage(GraphStorage):
                 summary=f"{term_name}: {definition[:200]}" if definition else term_name,
                 pdf_source=pdf_source,
                 pdf_page=pdf_page,
-                pdf_bbox=pdf_bbox,
+                pdf_bboxes=pdf_bboxes,
                 pdf_page_width=pdf_page_width,
                 pdf_page_height=pdf_page_height,
             )
@@ -3178,14 +3230,14 @@ class Neo4jStorage(GraphStorage):
             logger.debug(f"Failed to create component entity: {e}")
 
     def _create_object_entity(self, tx, graph_id: str, episode_id: str, object_name: str):
-        """创建 Object（操作对象）实体"""
-        entity_seed = f"{graph_id}:Object:{object_name}".encode('utf-8')
+        """创建 Entity（操作对象）实体"""
+        entity_seed = f"{graph_id}:Entity:{object_name}".encode('utf-8')
         entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
 
         try:
             tx.run(
                 """
-                MERGE (e:Entity:Object {graph_id: $gid, name_lower: $name_lower})
+                MERGE (e:Entity {graph_id: $gid, name_lower: $name_lower})
                 ON CREATE SET
                     e.uuid = $uuid,
                     e.name = $name,
@@ -3199,7 +3251,7 @@ class Neo4jStorage(GraphStorage):
                 summary=f"操作对象: {object_name}"
             )
 
-            # 链接Episode -> MENTIONS -> Object
+            # 链接Episode -> MENTIONS -> Entity
             tx.run(
                 """
                 MATCH (ep:Episode {uuid: $ep_uuid}), (o:Entity {uuid: $o_uuid})
@@ -3259,7 +3311,7 @@ class Neo4jStorage(GraphStorage):
             logger.debug(f"Failed to create PROHIBITS relation: {e}")
 
     def _create_operates_on_relation(self, tx, action_uuid: str, object_uuid: str):
-        """创建 Action -OPERATES_ON-> Object 关系"""
+        """创建 Action -OPERATES_ON-> Entity 关系"""
         try:
             tx.run(
                 """
