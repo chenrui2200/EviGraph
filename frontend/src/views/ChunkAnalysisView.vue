@@ -1079,9 +1079,9 @@ function startProgressPolling() {
       if (progRes.success && progRes.data) {
         const prog = progRes.data
         progressPercent.value = Math.round((prog.progress_ratio || 0) * 100)
-        if (prog.completed_clauses_count !== undefined) {
-          realtimeLogs.value.push(`📊 已完成 ${prog.completed_clauses_count} 条文`)
-        }
+        // if (prog.completed_clauses_count !== undefined) {
+        //   realtimeLogs.value.push(`📊 已完成 ${prog.completed_clauses_count} 条文`)
+        // }
       }
 
       // getTaskStatus 仅用于状态判断（completed/failed），不覆盖进度值

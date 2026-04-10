@@ -411,11 +411,12 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                             progress=88
                         )
                         clauses_for_topic = intelligent_chunks_data.get('clauses', [])
-                        build_logger.info(f"[{task_id}] 调用 add_topic_and_entity_nodes: clauses={len(clauses_for_topic)}")
+                        build_logger.info(f"[{task_id}] 调用 add_topic_and_entity_nodes: clauses={len(clauses_for_topic)}, entity_label={project.entity_label}")
                         topic_result = storage.add_topic_and_entity_nodes(
                             graph_id,
                             clauses_for_topic,
-                            intelligent_chunks_data.get('elements', [])
+                            intelligent_chunks_data.get('elements', []),
+                            entity_label=project.entity_label
                         )
                         build_logger.info(f"[{task_id}] Topic/Entity 结果: {topic_result}")
                         task_manager.update_task(
@@ -3297,14 +3298,15 @@ def get_chunk_analysis(project_id: str):
     chapter_tree = {}
     if use_tree_file and chapter_tree_raw is not None:
         for ch in chapter_tree_raw:
-            cn = ch.get('chapter_number')
+            chapter_info = ch.get('chapter', {})
+            cn = chapter_info.get('chapter_number')
             if cn is not None:
                 chapter_tree[cn] = {
                     "chapter_number": cn,
-                    "title": ch.get('title', ''),
-                    "content": ch.get('content', ''),
+                    "title": chapter_info.get('title', ''),
+                    "content": chapter_info.get('content', ''),
                     "clauses": ch.get('clauses', []),
-                    "clause_count": ch.get('clause_count', 0),
+                    "clause_count": chapter_info.get('clause_count', 0),
                     "element_count": 0
                 }
     else:
@@ -3430,22 +3432,10 @@ def get_chunk_analysis(project_id: str):
     # 获取 pdf_file: 查找项目中第一个 PDF 文件
     pdf_file = _get_project_pdf_filename(project)
 
-    # 获取当前任务状态
-    task_id = project.graph_build_task_id
-    current_status = project.status.value
-    task_status_value = None
-    if task_id:
-        task = TaskManager().get_task(task_id)
-        if task:
-            task_status_value = task.status.value
-
     return jsonify({
         "success": True,
         "data": {
             "pdf_file": pdf_file,
-            "status": current_status,
-            "task_id": task_id,
-            "task_status": task_status_value,
             "summary": {
                 "total_sections": len(sections),
                 "total_clauses": len(clauses),
@@ -3598,6 +3588,66 @@ def update_clause_entity(project_id: str):
         }), 500
 
 
+# ============== Entity Label Management ==============
+
+@graph_bp.route('/entity/<graph_id>/<node_uuid>/label', methods=['PUT'])
+def update_node_label(graph_id: str, node_uuid: str):
+    """
+    更新节点的额外标签（如添加 Term 或 Object label）
+
+    Request (JSON):
+        {
+            "add_labels": ["Term"],     // 要添加的标签列表
+            "remove_labels": ["Entity"]  // 要移除的标签列表（可选）
+        }
+
+    Response:
+        {
+            "success": true,
+            "message": "Node label updated",
+            "data": { "uuid": "...", "labels": ["Entity", "Term"] }
+        }
+    """
+    try:
+        data = request.get_json() or {}
+        add_labels = data.get('add_labels', [])
+        remove_labels = data.get('remove_labels', [])
+
+        if not add_labels and not remove_labels:
+            return jsonify({
+                "success": False,
+                "error": "请提供 add_labels 或 remove_labels"
+            }), 400
+
+        storage = _get_storage()
+        success = storage.update_node_labels(graph_id, node_uuid, add_labels, remove_labels)
+
+        if not success:
+            return jsonify({
+                "success": False,
+                "error": f"节点 {node_uuid} 不存在或标签更新失败"
+            }), 404
+
+        # 获取更新后的节点信息
+        node = storage.get_node(node_uuid)
+        return jsonify({
+            "success": True,
+            "message": "Node label updated",
+            "data": {
+                "uuid": node.get("uuid"),
+                "name": node.get("name"),
+                "labels": node.get("labels", [])
+            }
+        })
+
+    except Exception as e:
+        logger.error(f"更新节点标签失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 # ============== Interface 2: Build Graph ==============
 
 @graph_bp.route('/build', methods=['POST'])
@@ -3610,7 +3660,8 @@ def build_graph():
             "project_id": "proj_xxxx",  // Required: from interface 1
             "graph_name": "Graph name",    // Optional
             "chunk_size": 500,          // Optional, default 500
-            "chunk_overlap": 50         // Optional, default 50
+            "chunk_overlap": 50,        // Optional, default 50
+            "entity_label": "Term"       // Optional: 实体节点的额外标签（如 "Term" 或 "Object"），支持 RRF 混合检索
         }
 
     Response:
@@ -3652,6 +3703,7 @@ def build_graph():
         chunk_size = data.get('chunk_size', project.chunk_size or Config.DEFAULT_CHUNK_SIZE)
         chunk_overlap = data.get('chunk_overlap', project.chunk_overlap or Config.DEFAULT_CHUNK_OVERLAP)
         use_semantic = data.get('semantic', False) # New: option for semantic chunking
+        entity_label = data.get('entity_label', project.entity_label)  # 实体节点额外标签
         force = data.get('force', False)  # Force rebuild
 
         # Check project status
@@ -3715,6 +3767,7 @@ def build_graph():
         project.chunk_size = chunk_size
         project.chunk_overlap = chunk_overlap
         project.use_semantic = use_semantic
+        project.entity_label = entity_label
         ProjectManager.save_project(project)
 
         # Get extracted text (legacy) or intelligent chunks (preferred)

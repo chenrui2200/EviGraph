@@ -166,6 +166,7 @@ class Project:
     chunk_size: int = 500
     chunk_overlap: int = 50
     use_semantic: bool = False
+    entity_label: Optional[str] = None  # 实体节点的额外标签（如 "Term" 或 "Object"），支持 RRF 混合检索
 
     # Error information
     error: Optional[str] = None
@@ -190,6 +191,7 @@ class Project:
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
             "use_semantic": self.use_semantic,
+            "entity_label": self.entity_label,
             "error": self.error
         }
 
@@ -218,6 +220,7 @@ class Project:
             chunk_size=data.get('chunk_size', 500),
             chunk_overlap=data.get('chunk_overlap', 50),
             use_semantic=data.get('use_semantic', False),
+            entity_label=data.get('entity_label'),
             error=data.get('error')
         )
 

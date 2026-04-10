@@ -1530,13 +1530,13 @@ Your response:"""
         query: str,
         limit: int = 10,
         max_depth: int = 3,
-        root_type: str = "Object",
+        root_type: str = "Entity",
     ) -> ObjectFirstSearchResult:
         """
         Root-node-first DFS 检索。
 
         检索策略：
-        1. 首轮命中 root_type 节点（Object 或 Term，支持混合向量+关键词搜索）
+        1. 首轮命中 root_type 节点（Entity 或 Term，支持混合向量+关键词搜索）
         2. 从每个根节点出发，深度优先遍历图谱
         3. 每个根节点生成一条结果行（ObjectFirstRow）
         4. 对各行按相关性打分排序
@@ -1546,18 +1546,18 @@ Your response:"""
             query: 检索查询
             limit: 最多返回多少个根节点行
             max_depth: DFS 最大深度（默认 3）
-            root_type: 根节点类型，"Object"（默认）或 "Term"
+            root_type: 根节点类型，"Entity"（默认）或 "Term"
 
         Returns:
             ObjectFirstSearchResult，按根节点分组的 DFS 检索结果
         """
-        valid_root_types = ["Object", "Term"]
+        valid_root_types = ["Entity", "Term"]
         if root_type not in valid_root_types:
-            root_type = "Object"
+            root_type = "Entity"
         logger.info(f"Root-node DFS search: graph_id={graph_id}, query={query[:50]}..., max_depth={max_depth}, root_type={root_type}")
 
         try:
-            # Step 1: 搜索根节点（Object 或 Term）
+            # Step 1: 搜索根节点（Entity 或 Term）
             if root_type == "Term":
                 root_nodes = self.storage.search_term_nodes(
                     graph_id=graph_id,

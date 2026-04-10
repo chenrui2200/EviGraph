@@ -661,7 +661,6 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "content": clause.content,
         "source": clause.source or "",
         "page": clause.page,
-        "bbox": clause.metadata.get("bbox_viewport") if clause.metadata else None,
         "page_idx": clause.metadata.get("page_idx") if clause.metadata else None,
         # 所有来源 chunk 的 bbox（按 page 分组，同页合并）
         "bboxs": clause.metadata.get("bboxs", []) if clause.metadata else [],
@@ -2387,12 +2386,14 @@ topic：{topic}
                 {"chapter_number": s.chapter_number, "title": s.title, "content": s.content}
                 for s in result.sections
             ]
+            # 将 ClauseSegment 对象转换为字典
+            clauses_data_out = [self._clause_to_dict(c) for c in all_clauses]
             from ..models.project import ProjectManager
             ProjectManager.build_intelligent_chunks_tree(
                 project_id,
                 sections=sections_data_out,
                 edges=all_edges or [],
-                clauses=all_clauses
+                clauses=clauses_data_out
             )
             self.logger.info(f"[LLM分块] ✅ intelligent_chunks_tree.json 已生成")
 

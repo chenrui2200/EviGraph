@@ -920,6 +920,69 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             return self._call_with_retry(session.execute_read, _read)
 
+    def update_node_labels(
+        self,
+        graph_id: str,
+        node_uuid: str,
+        add_labels: List[str],
+        remove_labels: Optional[List[str]] = None
+    ) -> bool:
+        """
+        更新节点的标签
+
+        Args:
+            graph_id: 图谱ID
+            node_uuid: 节点UUID
+            add_labels: 要添加的标签列表（如 ["Term"] 或 ["Object"]）
+            remove_labels: 要移除的标签列表（可选）
+
+        Returns:
+            是否成功
+        """
+        if not add_labels and not remove_labels:
+            return True
+
+        try:
+            with self._driver.session() as session:
+                def _update(tx):
+                    # 首先检查节点是否存在
+                    check = tx.run(
+                        "MATCH (n {uuid: $uuid, graph_id: $gid}) RETURN count(n) as cnt",
+                        uuid=node_uuid,
+                        gid=graph_id
+                    ).single()
+                    if not check or check["cnt"] == 0:
+                        return False
+
+                    # 添加标签
+                    if add_labels:
+                        for label in add_labels:
+                            # 标签名只允许特定值，防止注入
+                            if label not in ("Term", "Object", "Component", "Action", "Condition"):
+                                continue
+                            tx.run(
+                                f"MATCH (n {{uuid: $uuid, graph_id: $gid}}) SET n:`{label}`",
+                                uuid=node_uuid,
+                                gid=graph_id
+                            )
+
+                    # 移除标签
+                    if remove_labels:
+                        for label in remove_labels:
+                            if label not in ("Term", "Object", "Component", "Action", "Condition"):
+                                continue
+                            tx.run(
+                                f"MATCH (n {{uuid: $uuid, graph_id: $gid}}) REMOVE n:`{label}`",
+                                uuid=node_uuid,
+                                gid=graph_id
+                            )
+                    return True
+
+                return self._call_with_retry(session.execute_write, _update)
+        except Exception as e:
+            logger.warning(f"[storage] update_node_labels failed: {e}")
+            return False
+
     def get_node_edges(self, node_uuid: str) -> List[Dict[str, Any]]:
         """O(1) Cypher — NOT full scan + filter like the old Zep code."""
         def _read(tx):
@@ -2034,17 +2097,20 @@ class Neo4jStorage(GraphStorage):
         self,
         graph_id: str,
         clauses_data: List[Dict],
-        entities_data: List[Dict]
+        entities_data: List[Dict],
     ) -> Dict[str, int]:
         """
         为图谱添加 Topic 和 Entity 节点及关系
 
         图谱结构：
             Clause (Episode:Level2) --HAS_TOPIC--> Topic
-            Topic --MENTIONS--> Entity
+            Topic --MENTIONS--> Entity:Term (来自 clause.terms)
+            Topic --MENTIONS--> Entity:Object (来自 clause.entities)
 
-        Topic 节点：一个 Topic 对应一个 clause 的 topic 摘要
-        Entity 节点：一个 Entity 对应 clause.entities 中的一个字符串实体
+        节点类型：
+            Topic: 一个 Topic 对应一个 clause 的 topic 摘要
+            Entity:Term: 来自 clause.terms，包含术语定义
+            Entity:Object: 来自 clause.entities，包含通用实体
 
         Args:
             graph_id: 图谱ID
@@ -2174,7 +2240,53 @@ class Neo4jStorage(GraphStorage):
                     else:
                         logger.warning(f"[add_topic_and_entity_nodes] WARNING: No Episode:Level2 found for clause_id={clause_id}, skipping HAS_TOPIC relationship")
 
-                    # 为该条款的 entities 创建 Entity 节点和 MENTIONS 关系
+                    # 为该条款的 terms 创建 Entity:Term 节点和 MENTIONS 关系
+                    clause_terms = clause.get('terms', [])
+                    if isinstance(clause_terms, list):
+                        for term_item in clause_terms:
+                            # term_item 可以是字典 {'term_name': ..., 'definition': ...} 或字符串
+                            term_name = term_item if isinstance(term_item, str) else term_item.get('term_name', '')
+                            term_def = term_item.get('definition', '') if isinstance(term_item, dict) else ''
+                            if not term_name:
+                                continue
+
+                            term_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{term_name}:term".encode()).hexdigest()))
+                            tx.run(
+                                """
+                                MERGE (e:Entity:Term {uuid: $uuid})
+                                ON CREATE SET
+                                    e.graph_id = $gid,
+                                    e.name = $name,
+                                    e.definition = $definition,
+                                    e.entity_label = 'Term',
+                                    e.created_at = $created_at
+                                ON MATCH SET
+                                    e.name = $name,
+                                    e.definition = COALESCE($definition, e.definition)
+                                """,
+                                uuid=term_uuid,
+                                gid=graph_id,
+                                name=term_name,
+                                definition=term_def,
+                                created_at=now
+                            )
+                            entity_count += 1
+                            logger.info(f"[topic_entity]   Entity:Term: {term_name} <- Topic({topic_text[:20]}) MENTIONS")
+
+                            # 创建 Topic --MENTIONS--> Entity:Term 关系
+                            tx.run(
+                                """
+                                MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity:Term {uuid: $entity_uuid})
+                                MERGE (t)-[r:MENTIONS]->(e)
+                                SET r.graph_id = $gid, r.created_at = datetime()
+                                """,
+                                topic_uuid=topic_uuid,
+                                entity_uuid=term_uuid,
+                                gid=graph_id
+                            )
+                            mentions_count += 1
+
+                    # 为该条款的 entities 创建 Entity:Object 节点和 MENTIONS 关系
                     clause_entities = clause.get('entities', [])
                     if isinstance(clause_entities, list):
                         for ent in clause_entities:
@@ -2184,12 +2296,15 @@ class Neo4jStorage(GraphStorage):
                                 continue
 
                             entity_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{entity_name}:entity".encode()).hexdigest()))
+
+                            # 统一使用 Entity:Object 标签，便于检索
                             tx.run(
                                 """
-                                MERGE (e:Entity {uuid: $uuid})
+                                MERGE (e:Entity:Object {uuid: $uuid})
                                 ON CREATE SET
                                     e.graph_id = $gid,
                                     e.name = $name,
+                                    e.entity_label = 'Object',
                                     e.created_at = $created_at
                                 ON MATCH SET
                                     e.name = $name
@@ -2199,14 +2314,13 @@ class Neo4jStorage(GraphStorage):
                                 name=entity_name,
                                 created_at=now
                             )
+                            logger.info(f"[topic_entity]   Entity:Object: {entity_name} <- Topic({topic_text[:20]}) MENTIONS")
                             entity_count += 1
-                            logger.info(f"[topic_entity]   Entity: {entity_name} <- Topic({topic_text[:20]}) MENTIONS")
 
-                            # 创建 Topic --MENTIONS--> Entity 关系
-                            # 使用独立 MATCH 而非 MERGE 模式内嵌，避免 entity_uuid 约束冲突
+                            # 创建 Topic --MENTIONS--> Entity:Object 关系
                             tx.run(
                                 """
-                                MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity {uuid: $entity_uuid})
+                                MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity:Object {uuid: $entity_uuid})
                                 MERGE (t)-[r:MENTIONS]->(e)
                                 SET r.graph_id = $gid, r.created_at = datetime()
                                 """,
