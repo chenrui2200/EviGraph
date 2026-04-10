@@ -400,6 +400,20 @@ class ElementSegment(HierarchicalChunk):
 
     def __post_init__(self):
         self.level = ChunkLevel.LEVEL_3
+
+        # 为 ElementSegment 设置有意义的 content（避免 to_episode_dict 空文本被跳过）
+        if not self.content:
+            parts = []
+            if self.key:
+                parts.append(self.key)
+            if self.value is not None and str(self.value):
+                parts.append(str(self.value))
+            if self.unit:
+                parts.append(self.unit)
+            if not parts and self.definition:
+                parts.append(self.definition[:100])
+            self.content = " ".join(parts) if parts else self.element_type.value
+
         if not self.id:
             prefix = self.element_type.value[:3].upper()
             content_hash = hashlib.md5(self.content.encode()).hexdigest()[:8]
@@ -454,8 +468,16 @@ class HierarchicalChunkResult:
         return [c for c in self.clauses if not c.semantics_enriched]
 
     def to_episode_list(self) -> List[Dict[str, Any]]:
-        """转换为Episode节点列表"""
-        return [chunk.to_episode_dict() for chunk in self.get_all_chunks()]
+        """转换为Episode节点列表（按 content 去重）"""
+        seen = set()
+        result = []
+        for chunk in self.get_all_chunks():
+            ep = chunk.to_episode_dict()
+            key = (ep.get('text', ''), ep.get('metadata', {}).get('clause_id', ''))
+            if key not in seen:
+                seen.add(key)
+                result.append(ep)
+        return result
 
     # ========================================================================
     # 层级关联查询方法 (SOTA 图谱构建支持)

@@ -146,6 +146,19 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                 # 优先使用已保存的智能分块结果（LLM分析结果），避免重复LLM调用
                 intelligent_chunks_data = ProjectManager.get_intelligent_chunks(project_id)
 
+                # DEBUG: 打印数据加载详情
+                tree_path = ProjectManager._get_intelligent_chunks_tree_path(project_id)
+                jsonl_path = ProjectManager._get_intelligent_chunks_jsonl_path(project_id)
+                build_logger.info(f"[{task_id}] DEBUG: tree_file={os.path.exists(tree_path)}, jsonl={os.path.exists(jsonl_path)}")
+                build_logger.info(f"[{task_id}] DEBUG: intelligent_chunks_data={bool(intelligent_chunks_data)}, "
+                    f"sections={len(intelligent_chunks_data.get('sections', [])) if intelligent_chunks_data else 0}, "
+                    f"clauses={len(intelligent_chunks_data.get('clauses', [])) if intelligent_chunks_data else 0}, "
+                    f"elements={len(intelligent_chunks_data.get('elements', [])) if intelligent_chunks_data else 0}")
+                if intelligent_chunks_data and intelligent_chunks_data.get('clauses'):
+                    sample = intelligent_chunks_data['clauses'][0]
+                    build_logger.info(f"[{task_id}] DEBUG: first clause: id={sample.get('clause_id')} "
+                        f"topic={str(sample.get('topic',''))[:30]} entities={sample.get('entities', [])}")
+
                 # 回填 page 信息（旧数据可能缺少 page，从 chunks.json 匹配）
                 if intelligent_chunks_data:
                     _backfill_page_info(project_id, intelligent_chunks_data, build_logger)
@@ -377,6 +390,19 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                     )
 
                 # 创建 Topic + Entity 节点及关系（Clause --HAS_TOPIC--> Topic, Topic --MENTIONS--> Entity）
+                build_logger.info(f"[{task_id}] === Topic/Entity 创建检查 ===")
+                build_logger.info(f"[{task_id}] intelligent_chunks_data: {bool(intelligent_chunks_data)}")
+                if intelligent_chunks_data:
+                    clauses_list = intelligent_chunks_data.get('clauses', [])
+                    build_logger.info(f"[{task_id}] clauses 数量: {len(clauses_list)}")
+                    if clauses_list:
+                        sample = clauses_list[0]
+                        build_logger.info(f"[{task_id}] 第一条 clause: id={sample.get('clause_id')} topic={str(sample.get('topic',''))[:30]} entities={sample.get('entities',[])}")
+                        topics_with_content = [c for c in clauses_list if c.get('topic')]
+                        build_logger.info(f"[{task_id}] 有 topic 的 clauses 数: {len(topics_with_content)}")
+                else:
+                    build_logger.error(f"[{task_id}] intelligent_chunks_data 为空，跳过 Topic/Entity 创建！")
+
                 if intelligent_chunks_data:
                     try:
                         task_manager.update_task(
@@ -384,12 +410,14 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                             message="Creating Topic and Entity nodes...",
                             progress=88
                         )
+                        clauses_for_topic = intelligent_chunks_data.get('clauses', [])
+                        build_logger.info(f"[{task_id}] 调用 add_topic_and_entity_nodes: clauses={len(clauses_for_topic)}")
                         topic_result = storage.add_topic_and_entity_nodes(
                             graph_id,
-                            intelligent_chunks_data.get('clauses', []),
+                            clauses_for_topic,
                             intelligent_chunks_data.get('elements', [])
                         )
-                        build_logger.info(f"[{task_id}] Topic/Entity nodes created: {topic_result}")
+                        build_logger.info(f"[{task_id}] Topic/Entity 结果: {topic_result}")
                         task_manager.update_task(
                             task_id,
                             message=f"Created {topic_result.get('topics', 0)} Topics, {topic_result.get('entities', 0)} Entities",

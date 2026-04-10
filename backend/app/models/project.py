@@ -509,7 +509,29 @@ class ProjectManager:
         if not os.path.exists(jsonl_path):
             return None
 
-        # Read clauses from JSONL
+        # 优先从 tree 文件读取（预生成的完整数据）
+        tree_path = cls._get_intelligent_chunks_tree_path(project_id)
+        if os.path.exists(tree_path):
+            with open(tree_path, 'r', encoding='utf-8') as f:
+                tree_data = json.load(f)
+            clauses = tree_data.get('clauses', [])
+            sections = tree_data.get('sections', [])
+            edges = tree_data.get('edges', [])
+            elements = []
+            # 按章节 + 条文编号排序（并发写入顺序不确定）
+            clauses = sorted(clauses, key=lambda c: (
+                c.get('parent_chapter') or 0,
+                c.get('clause_id') or ''
+            ))
+            return {
+                "source": "llm",
+                "sections": sections,
+                "clauses": clauses,
+                "elements": elements,
+                "edges": edges
+            }
+
+        # Fallback: 从 JSONL + sections JSON 重建
         clauses = []
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             for line in f:
@@ -517,22 +539,16 @@ class ProjectManager:
                 if line:
                     clauses.append(json.loads(line))
 
-        # 按章节 + 条文编号排序（并发写入顺序不确定，读取时统一排序）
+        # 按章节 + 条文编号排序
         clauses = sorted(clauses, key=lambda c: (
             c.get('parent_chapter') or 0,
             c.get('clause_id') or ''
         ))
 
-        # Read sections/edges: 优先从 tree 文件，否则从 sections JSON（向后兼容旧数据）
         sections = []
         elements = []
         edges = []
-        if os.path.exists(tree_path):
-            with open(tree_path, 'r', encoding='utf-8') as f:
-                tree_data = json.load(f)
-                sections = tree_data.get('sections', [])
-                edges = tree_data.get('edges', [])
-        elif os.path.exists(sections_path):
+        if os.path.exists(sections_path):
             with open(sections_path, 'r', encoding='utf-8') as f:
                 meta = json.load(f)
                 sections = meta.get('sections', [])
@@ -560,36 +576,40 @@ class ProjectManager:
             for clause in chunks_result.get('clauses', []):
                 f.write(json.dumps(clause, ensure_ascii=False) + '\n')
 
-        # 生成 tree 文件（sections + edges 直接传入，不写 intermediate 文件）
+        # 生成 tree 文件（sections + edges + clauses 直接传入，不写 intermediate 文件）
         cls.build_intelligent_chunks_tree(
             project_id,
             sections=chunks_result.get('sections', []),
-            edges=chunks_result.get('edges', [])
+            edges=chunks_result.get('edges', []),
+            clauses=chunks_result.get('clauses', [])
         )
 
     @classmethod
     def build_intelligent_chunks_tree(
         cls, project_id: str,
         sections: List[Dict[str, Any]] = None,
-        edges: List[Dict] = None
+        edges: List[Dict] = None,
+        clauses: List[Dict] = None
     ) -> Dict[str, Any]:
         """
-        从 JSONL 组装完整的章节树结构并写入 intelligent_chunks_tree.json
+        组装完整的章节树结构并写入 intelligent_chunks_tree.json
         - 章节树：sections + clauses 按 chapter_number 分组
         - 前端直接读取此文件，无需内存中再分组
-        - sections/edges 优先从参数传入，否则从 sections JSON 读取（向后兼容）
+        - sections/edges/clauses 优先从参数传入（调用方确保完整）
+        - 兼容模式：参数为 None 时从旧文件读取（向后兼容）
         """
         jsonl_path = cls._get_intelligent_chunks_jsonl_path(project_id)
         sections_path = os.path.join(cls._get_project_dir(project_id), 'intelligent_chunks_sections.json')
 
-        # 读取排序后的 clauses
-        clauses = []
-        if os.path.exists(jsonl_path):
-            with open(jsonl_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        clauses.append(json.loads(line))
+        # clauses：优先用参数（调用方传入），否则从 JSONL 读取
+        if clauses is None:
+            clauses = []
+            if os.path.exists(jsonl_path):
+                with open(jsonl_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            clauses.append(json.loads(line))
 
         # sections/edges：优先用参数，否则从 sections JSON 读取
         if sections is None:
@@ -604,18 +624,33 @@ class ProjectManager:
 
         # 构建章节树
         chapter_tree = {}
-        for section in sections:
-            chapter_num = section.get('chapter_number')
-            if chapter_num is None:
-                continue
-            chapter_clauses = [c for c in clauses if c.get('parent_chapter') == chapter_num]
-            chapter_tree[chapter_num] = {
-                "chapter_number": chapter_num,
-                "title": section.get('title', ''),
-                "content": section.get('content', ''),
-                "clauses": chapter_clauses,
-                "clause_count": len(chapter_clauses)
-            }
+
+        if sections:
+            # 有 sections 数据：按 sections 构建章节树
+            for section in sections:
+                chapter_num = section.get('chapter_number')
+                if chapter_num is None:
+                    continue
+                chapter_clauses = [c for c in clauses if c.get('parent_chapter') == chapter_num]
+                chapter_tree[chapter_num] = {
+                    "chapter_number": chapter_num,
+                    "title": section.get('title', ''),
+                    "content": section.get('content', ''),
+                    "clauses": chapter_clauses,
+                    "clause_count": len(chapter_clauses)
+                }
+        else:
+            # 无 sections 数据：从 clauses 的 parent_chapter 聚合推断章节结构
+            chapter_nums = sorted(set(c.get('parent_chapter') for c in clauses if c.get('parent_chapter')))
+            for cn in chapter_nums:
+                chapter_clauses = [c for c in clauses if c.get('parent_chapter') == cn]
+                chapter_tree[cn] = {
+                    "chapter_number": cn,
+                    "title": f"第 {cn} 章",
+                    "content": "",
+                    "clauses": chapter_clauses,
+                    "clause_count": len(chapter_clauses)
+                }
 
         # 按章节号排序
         def _sort_key(item):

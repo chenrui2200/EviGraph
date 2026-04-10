@@ -299,8 +299,11 @@ class GraphBuilderService:
                 log_msg = f"Processed {processed}/{total_chunks} chunks"
                 progress_callback(log_msg, mapped_progress / 100)
 
-        # 批量存储
+        # 批量存储（只存储 Level1/Level2，Level3 elements 由 Topic-Entity 关系处理）
         for idx, chunk_dict in enumerate(all_chunks):
+            # 跳过 Level3 element（不创建 Episode 节点，由 add_topic_and_entity_nodes 处理 Topic-Entity）
+            if chunk_dict.get('level') == 3:
+                continue
             try:
                 # 使用add_hierarchical_chunk_with_entities创建Episode和Entity
                 episode_id = self.storage.add_hierarchical_chunk_with_entities(graph_id, chunk_dict)

@@ -2391,7 +2391,8 @@ topic：{topic}
             ProjectManager.build_intelligent_chunks_tree(
                 project_id,
                 sections=sections_data_out,
-                edges=all_edges or []
+                edges=all_edges or [],
+                clauses=all_clauses
             )
             self.logger.info(f"[LLM分块] ✅ intelligent_chunks_tree.json 已生成")
 

@@ -1949,6 +1949,7 @@ class Neo4jStorage(GraphStorage):
                 ep_source = metadata.get("source", "")
                 ep_page = metadata.get("page", 0)
                 ep_clause_id = metadata.get("clause_id", "")
+                logger.info(f"[hierarchical] Storing Episode: clause_id={repr(ep_clause_id)} content={content[:30] if content else '(empty)'} level={metadata.get('level')} chunk_type={metadata.get('chunk_type')}")
 
                 # 1. 创建Episode节点
                 tx.run(
@@ -2013,7 +2014,7 @@ class Neo4jStorage(GraphStorage):
 
             self._call_with_retry(session.execute_write, _create_episode_and_entities)
 
-        logger.info(f"[hierarchical] Created episode {episode_id[:8]} with entities (Level{level}, {chunk_type})")
+        logger.info(f"[hierarchical] Created episode {episode_id[:8]} (Level{level}, {chunk_type}) clause_id={metadata.get('clause_id','') or metadata.get('key','')}")
         return episode_id
 
     def add_topic_and_entity_nodes(
@@ -2074,6 +2075,20 @@ class Neo4jStorage(GraphStorage):
                 logger.info(f"[add_topic_and_entity_nodes] DEBUG: Total Episode:Level2 nodes in DB: {total_eps}")
                 if sample_meta:
                     logger.info(f"[add_topic_and_entity_nodes] DEBUG: Sample metadata_json: {sample_meta[:200] if sample_meta else 'None'}...")
+
+                # 检查有 clause_id 属性的 Episode 数量
+                check_with_clause_id = tx.run(
+                    """
+                    MATCH (ep:Episode:Level2 {graph_id: $gid})
+                    WHERE ep.clause_id IS NOT NULL
+                    RETURN count(ep) as cnt, head(collect([ep.clause_id, ep.data])) as sample
+                    """,
+                    gid=graph_id
+                )
+                rec = check_with_clause_id.single()
+                cnt = rec["cnt"] if rec else 0
+                sample_pair = rec["sample"] if rec else None
+                logger.info(f"[add_topic_and_entity_nodes] DEBUG: Episode:Level2 有 clause_id 的数量: {cnt}, sample={sample_pair}")
                 entities_by_clause = {}
                 for e in entities_data:
                     src = e.get('source_clause_id', '')
@@ -2110,6 +2125,7 @@ class Neo4jStorage(GraphStorage):
                         created_at=now
                     )
                     topic_count += 1
+                    logger.info(f"[topic_entity] Topic node: clause={clause_id} topic={topic_text[:30]}")
 
                     # 找到对应的 Episode:Level2 节点并创建 HAS_TOPIC 关系
                     logger.info(f"[add_topic_and_entity_nodes] DEBUG: clause_id={clause_id}, topic={topic_text[:30] if topic_text else 'EMPTY'}")
@@ -2169,6 +2185,7 @@ class Neo4jStorage(GraphStorage):
                                 created_at=now
                             )
                             entity_count += 1
+                            logger.info(f"[topic_entity]   Entity: {entity_name} <- Topic({topic_text[:20]}) MENTIONS")
 
                             # 创建 Topic --MENTIONS--> Entity 关系
                             tx.run(
