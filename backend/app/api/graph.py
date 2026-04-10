@@ -1196,8 +1196,31 @@ def _backfill_page_info(project_id: str, intelligent_chunks_data: Dict, logger) 
             clause['metadata']['source'] = source_val
             clause['metadata']['page_width'] = page_width_val
             clause['metadata']['page_height'] = page_height_val
+            # 回填 bboxs（跨页 bbox 列表，格式: [[page, x0, y0, x1, y1], ...]）
+            # 同时设置到顶层（to_episode_dict 通过 metadata.get('bboxs') 读取）
+            if bbox_val:
+                # 将单个 bbox 转换为 bboxs 列表格式 [page, x0, y0, x1, y1]
+                if isinstance(bbox_val, dict):
+                    # bbox_viewport 格式: {x0, y0, x1, y1, page}
+                    clause['metadata']['bboxs'] = [[
+                        page_val,
+                        bbox_val.get('x0', 0),
+                        bbox_val.get('y0', 0),
+                        bbox_val.get('x1', 0),
+                        bbox_val.get('y1', 0)
+                    ]]
+                elif isinstance(bbox_val, list) and len(bbox_val) == 4:
+                    # 简单 [x0, y0, x1, y1] 格式
+                    clause['metadata']['bboxs'] = [[page_val] + bbox_val]
+                else:
+                    clause['metadata']['bboxs'] = []
+            else:
+                clause['metadata']['bboxs'] = []
+            # 设置到顶层（to_episode_dict 读取 self.metadata.get('bboxs')）
+            clause['bboxs'] = clause['metadata']['bboxs']
+            clause['bbox'] = bbox_val
             filled_count += 1
-            logger.debug(f"[{project_id}] 回填: clause={clause_id} → page={page_val}, source={source_val}, bbox={bbox_val}")
+            logger.debug(f"[{project_id}] 回填: clause={clause_id} → page={page_val}, source={source_val}, bbox={bbox_val}, bboxs={clause['bboxs']}")
         else:
             skipped_not_in_map += 1
 

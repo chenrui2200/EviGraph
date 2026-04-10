@@ -157,10 +157,10 @@ class HierarchicalChunk:
         }
         # 先合并其他metadata
         episode_metadata.update(self.metadata)
-        # 然后确保 base class 的 source/page 优先级更高（覆盖可能错误的值）
-        if self.source is not None:
+        # 然后确保 base class 的 source/page 有值时才覆盖（避免空字符串覆盖有效值）
+        if self.source:
             episode_metadata["source"] = self.source
-        if self.page is not None:
+        if self.page:
             episode_metadata["page"] = self.page
 
         return {

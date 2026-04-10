@@ -1547,7 +1547,8 @@ class Neo4jStorage(GraphStorage):
                     RETURN e.uuid AS entity_uuid,
                            ep.uuid AS episode_uuid,
                            ep.data AS episode_text,
-                           ep.metadata_json AS episode_metadata
+                           ep.metadata_json AS episode_metadata,
+                           ep.pdf_bboxes AS pdf_bboxes
                     """,
                     gid=graph_id,
                     uuids=node_uuids,
@@ -1560,10 +1561,19 @@ class Neo4jStorage(GraphStorage):
                         metadata = record["episode_metadata"] or {}
                         # Only store if we have PDF location info
                         if metadata.get("source") or metadata.get("page"):
+                            # 解析 pdf_bboxes（存储为 JSON 字符串）
+                            pdf_bboxes_raw = record.get("pdf_bboxes")
+                            pdf_bboxes = []
+                            if pdf_bboxes_raw:
+                                try:
+                                    pdf_bboxes = json.loads(pdf_bboxes_raw) if isinstance(pdf_bboxes_raw, str) else pdf_bboxes_raw
+                                except (json.JSONDecodeError, TypeError):
+                                    pdf_bboxes = []
                             node_pdf_info[entity_uuid] = {
                                 "source": metadata.get("source", ""),
                                 "page": metadata.get("page"),
                                 "bbox": metadata.get("bbox"),
+                                "pdf_bboxes": pdf_bboxes,
                                 "page_width": metadata.get("page_width"),
                                 "page_height": metadata.get("page_height"),
                                 "episode_uuid": record["episode_uuid"],
@@ -2197,9 +2207,29 @@ class Neo4jStorage(GraphStorage):
                 ep_source = metadata.get("source", "")
                 ep_page = metadata.get("page", 0)
                 ep_clause_id = metadata.get("clause_id", "")
-                logger.info(f"[hierarchical] Storing Episode: clause_id={repr(ep_clause_id)} content={content[:30] if content else '(empty)'} level={metadata.get('level')} chunk_type={metadata.get('chunk_type')}")
+                # 提取 PDF 定位信息（优先 bboxs，回退 bbox）
+                # 注意：Neo4j 不支持嵌套集合，直接存储会报错
+                # 转换为 JSON 字符串存储，读取时需解析
+                ep_pdf_bboxes_raw = metadata.get("bboxs", [])
+                if not ep_pdf_bboxes_raw:
+                    single_bbox = metadata.get("bbox")
+                    if single_bbox:
+                        if isinstance(single_bbox, list) and len(single_bbox) >= 4:
+                            ep_pdf_bboxes_raw = [[ep_page or 1] + single_bbox[:4]]
+                        elif isinstance(single_bbox, dict):
+                            ep_pdf_bboxes_raw = [[ep_page or 1,
+                                              single_bbox.get('x0', 0), single_bbox.get('y0', 0),
+                                              single_bbox.get('x1', 0), single_bbox.get('y1', 0)]]
+                # 转换为 JSON 字符串以兼容 Neo4j 属性限制
+                ep_pdf_bboxes = json.dumps(ep_pdf_bboxes_raw, ensure_ascii=False) if ep_pdf_bboxes_raw else "[]"
+                ep_pdf_page_width = metadata.get("page_width")
+                ep_pdf_page_height = metadata.get("page_height")
+                # DEBUG: 打印 metadata 中 PDF 相关字段的实际值
+                logger.info(f"[hierarchical] Storing Episode: clause_id={repr(ep_clause_id)} content={content[:30] if content else '(empty)'}")
+                logger.info(f"[hierarchical] DEBUG metadata: source={repr(metadata.get('source'))}, page={repr(metadata.get('page'))}, bboxs={metadata.get('bboxs')}, bbox={metadata.get('bbox')}")
+                logger.info(f"[hierarchical] DEBUG ep_*: source={repr(ep_source)}, page={repr(ep_page)}, bboxs={ep_pdf_bboxes}")
 
-                # 1. 创建Episode节点
+                # 1. 创建Episode/Clause节点，同时设置 PDF 定位信息
                 tx.run(
                     """
                     MERGE (ep:Episode {uuid: $uuid})
@@ -2212,7 +2242,12 @@ class Neo4jStorage(GraphStorage):
                         ep.created_at = $created_at,
                         ep.source = $source,
                         ep.page = $page,
-                        ep.clause_id = $clause_id
+                        ep.clause_id = $clause_id,
+                        ep.pdf_source = $pdf_source,
+                        ep.pdf_page = $pdf_page,
+                        ep.pdf_bboxes = $pdf_bboxes,
+                        ep.pdf_page_width = $pdf_page_width,
+                        ep.pdf_page_height = $pdf_page_height
                     ON MATCH SET
                         ep.graph_id = $graph_id,
                         ep.data = $data,
@@ -2220,7 +2255,12 @@ class Neo4jStorage(GraphStorage):
                         ep.embedding = $embedding,
                         ep.source = COALESCE(ep.source, $source),
                         ep.page = COALESCE(ep.page, $page),
-                        ep.clause_id = $clause_id
+                        ep.clause_id = $clause_id,
+                        ep.pdf_source = COALESCE(ep.pdf_source, $pdf_source),
+                        ep.pdf_page = COALESCE(ep.pdf_page, $pdf_page),
+                        ep.pdf_bboxes = COALESCE(ep.pdf_bboxes, $pdf_bboxes),
+                        ep.pdf_page_width = COALESCE(ep.pdf_page_width, $pdf_page_width),
+                        ep.pdf_page_height = COALESCE(ep.pdf_page_height, $pdf_page_height)
                     """,
                     uuid=episode_id,
                     graph_id=graph_id,
@@ -2231,6 +2271,11 @@ class Neo4jStorage(GraphStorage):
                     source=ep_source,
                     page=ep_page,
                     clause_id=ep_clause_id,
+                    pdf_source=ep_source,
+                    pdf_page=ep_page,
+                    pdf_bboxes=ep_pdf_bboxes,
+                    pdf_page_width=ep_pdf_page_width,
+                    pdf_page_height=ep_pdf_page_height,
                 )
 
                 # 2. 移除 Episode 标签，设置为 Clause（统一为 Clause 标签，不含 Episode 前缀）
@@ -2547,7 +2592,21 @@ class Neo4jStorage(GraphStorage):
         # 提取 PDF 定位信息
         pdf_source = metadata.get('source')
         pdf_page = metadata.get('page')
-        pdf_bboxes = metadata.get('bboxs', [])  # 跨页 bbox 列表，格式: [[page, x0, y0, x1, y1], ...]
+        # 优先读取 bboxs（跨页 bbox 列表），回退读取 bbox（单个 bbox）
+        # 注意：Neo4j 不支持嵌套集合，存储时转为 JSON 字符串
+        pdf_bboxes_raw = metadata.get('bboxs', [])
+        if not pdf_bboxes_raw:
+            # 兼容 bbox 单个边框格式: [x0, y0, x1, y1] 或 {x0, y0, x1, y1}
+            single_bbox = metadata.get('bbox')
+            if single_bbox:
+                if isinstance(single_bbox, list) and len(single_bbox) >= 4:
+                    pdf_bboxes_raw = [[pdf_page or 1] + single_bbox[:4]]
+                elif isinstance(single_bbox, dict):
+                    pdf_bboxes_raw = [[pdf_page or 1,
+                                   single_bbox.get('x0', 0), single_bbox.get('y0', 0),
+                                   single_bbox.get('x1', 0), single_bbox.get('y1', 0)]]
+        # 转换为 JSON 字符串以兼容 Neo4j 属性限制
+        pdf_bboxes = json.dumps(pdf_bboxes_raw, ensure_ascii=False) if pdf_bboxes_raw else "[]"
         pdf_page_width = metadata.get('page_width')
         pdf_page_height = metadata.get('page_height')
 

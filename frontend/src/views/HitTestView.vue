@@ -327,14 +327,27 @@
               <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
 
               <!-- Highlight SVG Overlay (Locate mode only) -->
-              <svg v-if="!isSupplementMode && currentDoc.bbox && currentDoc.bbox.length === 4" class="pdf-highlight-overlay" :viewBox="`0 0 ${currentDoc.pageWidth || 600} ${currentDoc.pageHeight || 800}`">
-                <rect
+              <!-- 支持单 bbox 和多页 bbox (pdfBboxes: [[page, x0, y0, x1, y1], ...]) -->
+              <svg v-if="!isSupplementMode && (currentDoc.bbox || currentDoc.pdfBboxes)" class="pdf-highlight-overlay" :viewBox="`0 0 ${currentDoc.pageWidth || 600} ${currentDoc.pageHeight || 800}`">
+                <!-- 单 bbox 渲染 -->
+                <rect v-if="currentDoc.bbox && currentDoc.bbox.length === 4"
                   :x="currentDoc.bbox[0]"
                   :y="currentDoc.bbox[1]"
                   :width="currentDoc.bbox[2] - currentDoc.bbox[0]"
                   :height="currentDoc.bbox[3] - currentDoc.bbox[1]"
                   class="highlight-rect"
                 />
+                <!-- 多页 bbox 渲染：当前页对应的高亮框 -->
+                <template v-if="currentDoc.pdfBboxes && Array.isArray(currentDoc.pdfBboxes)">
+                  <rect v-for="(bb, idx) in currentDoc.pdfBboxes.filter(b => b && b.length >= 5 && b[0] === currentDoc.page)"
+                    :key="'multi-bbox-' + idx"
+                    :x="bb[1]"
+                    :y="bb[2]"
+                    :width="bb[3] - bb[1]"
+                    :height="bb[4] - bb[2]"
+                    class="highlight-rect multi-page-highlight"
+                  />
+                </template>
               </svg>
 
               <!-- Active Drawing Rect -->
@@ -1073,6 +1086,8 @@ const viewDocument = async (fact) => {
   const bbox = fact.bbox || null
   const pageWidth = fact.page_width || 0
   const pageHeight = fact.page_height || 0
+  // 支持多页 bbox: [[page, x0, y0, x1, y1], ...]
+  const pdfBboxes = fact.pdf_bboxes || null
 
   try {
     showDocViewer.value = true
@@ -1088,7 +1103,8 @@ const viewDocument = async (fact) => {
       bbox,
       url: apiUrl,
       pageWidth,
-      pageHeight
+      pageHeight,
+      pdfBboxes
     }
 
     nextTick(() => {
@@ -1698,6 +1714,21 @@ onMounted(async () => {
   stroke-width: 1.5px;
   stroke-dasharray: 2;
   animation: pulse-highlight 2s infinite;
+}
+
+/* 多页 bbox 高亮样式 */
+.multi-page-highlight {
+  fill: rgba(0, 200, 255, 0.25);
+  stroke: #00aaff;
+  stroke-width: 2px;
+  stroke-dasharray: 4 2;
+  animation: pulse-highlight-multi 2s infinite;
+}
+
+@keyframes pulse-highlight-multi {
+  0% { fill: rgba(0, 200, 255, 0.2); }
+  50% { fill: rgba(0, 200, 255, 0.4); }
+  100% { fill: rgba(0, 200, 255, 0.2); }
 }
 
 @keyframes pulse-highlight {
