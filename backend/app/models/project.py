@@ -493,19 +493,6 @@ class ProjectManager:
         return os.path.join(project_dir, 'intelligent_chunks_tree.json')
 
     @classmethod
-    def _get_intelligent_sections_path(cls, project_id: str) -> str:
-        """Get path for sections metadata (written separately)"""
-        project_dir = cls._get_project_dir(project_id)
-        return os.path.join(project_dir, 'intelligent_chunks_sections.json')
-
-    @classmethod
-    def save_intelligent_chunks(cls, project_id: str, chunks: Dict[str, Any]) -> None:
-        """Save LLM intelligent chunks result"""
-        path = cls._get_intelligent_chunks_path(project_id)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(chunks, f, ensure_ascii=False, indent=2)
-
-    @classmethod
     def append_clause_to_jsonl(cls, project_id: str, clause_dict: Dict[str, Any]) -> None:
         """Append a single clause as one line in JSONL file"""
         path = cls._get_intelligent_chunks_jsonl_path(project_id)
@@ -513,23 +500,11 @@ class ProjectManager:
             f.write(json.dumps(clause_dict, ensure_ascii=False) + '\n')
 
     @classmethod
-    def write_sections_json(cls, project_id: str, sections: List[Dict[str, Any]], edges: List[Dict] = None) -> None:
-        """Write sections + edges metadata to separate JSON file"""
-        path = cls._get_intelligent_sections_path(project_id)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump({
-                "source": "llm",
-                "sections": sections,
-                "clauses": [],
-                "elements": [],
-                "edges": edges or []
-            }, f, ensure_ascii=False, indent=2)
-
-    @classmethod
     def assemble_intelligent_chunks_from_jsonl(cls, project_id: str) -> Dict[str, Any]:
         """Read all JSONL lines and assemble into final intelligent_chunks.json structure"""
         jsonl_path = cls._get_intelligent_chunks_jsonl_path(project_id)
-        sections_path = cls._get_intelligent_sections_path(project_id)
+        tree_path = cls._get_intelligent_chunks_tree_path(project_id)
+        sections_path = os.path.join(cls._get_project_dir(project_id), 'intelligent_chunks_sections.json')
 
         if not os.path.exists(jsonl_path):
             return None
@@ -548,11 +523,16 @@ class ProjectManager:
             c.get('clause_id') or ''
         ))
 
-        # Read sections
+        # Read sections/edges: 优先从 tree 文件，否则从 sections JSON（向后兼容旧数据）
         sections = []
         elements = []
         edges = []
-        if os.path.exists(sections_path):
+        if os.path.exists(tree_path):
+            with open(tree_path, 'r', encoding='utf-8') as f:
+                tree_data = json.load(f)
+                sections = tree_data.get('sections', [])
+                edges = tree_data.get('edges', [])
+        elif os.path.exists(sections_path):
             with open(sections_path, 'r', encoding='utf-8') as f:
                 meta = json.load(f)
                 sections = meta.get('sections', [])
@@ -572,7 +552,7 @@ class ProjectManager:
         """
         将 chunk() 返回的结果写入 JSONL + sections JSON（替代一次性写 JSON）
         - clauses 逐条写入 JSONL（覆盖已有内容）
-        - sections + edges 写入 sections JSON
+        - sections + edges 直接生成 intelligent_chunks_tree.json
         """
         # 清空并写入 clauses 到 JSONL
         jsonl_path = cls._get_intelligent_chunks_jsonl_path(project_id)
@@ -580,22 +560,27 @@ class ProjectManager:
             for clause in chunks_result.get('clauses', []):
                 f.write(json.dumps(clause, ensure_ascii=False) + '\n')
 
-        # 写入 sections + edges
-        cls.write_sections_json(
+        # 生成 tree 文件（sections + edges 直接传入，不写 intermediate 文件）
+        cls.build_intelligent_chunks_tree(
             project_id,
-            chunks_result.get('sections', []),
+            sections=chunks_result.get('sections', []),
             edges=chunks_result.get('edges', [])
         )
 
     @classmethod
-    def build_intelligent_chunks_tree(cls, project_id: str) -> Dict[str, Any]:
+    def build_intelligent_chunks_tree(
+        cls, project_id: str,
+        sections: List[Dict[str, Any]] = None,
+        edges: List[Dict] = None
+    ) -> Dict[str, Any]:
         """
         从 JSONL 组装完整的章节树结构并写入 intelligent_chunks_tree.json
         - 章节树：sections + clauses 按 chapter_number 分组
         - 前端直接读取此文件，无需内存中再分组
+        - sections/edges 优先从参数传入，否则从 sections JSON 读取（向后兼容）
         """
         jsonl_path = cls._get_intelligent_chunks_jsonl_path(project_id)
-        sections_path = cls._get_intelligent_sections_path(project_id)
+        sections_path = os.path.join(cls._get_project_dir(project_id), 'intelligent_chunks_sections.json')
 
         # 读取排序后的 clauses
         clauses = []
@@ -606,14 +591,16 @@ class ProjectManager:
                     if line:
                         clauses.append(json.loads(line))
 
-        # 读取 sections
-        sections = []
-        edges = []
-        if os.path.exists(sections_path):
-            with open(sections_path, 'r', encoding='utf-8') as f:
-                meta = json.load(f)
-                sections = meta.get('sections', [])
-                edges = meta.get('edges', [])
+        # sections/edges：优先用参数，否则从 sections JSON 读取
+        if sections is None:
+            sections = []
+            _edges = edges or []
+            if os.path.exists(sections_path):
+                with open(sections_path, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+                    sections = meta.get('sections', [])
+                    _edges = meta.get('edges', [])
+            edges = _edges
 
         # 构建章节树
         chapter_tree = {}

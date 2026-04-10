@@ -2802,8 +2802,8 @@ def intelligent_chunk():
 
         # 如果需要重置，删除所有检查点和旧的智能分块结果
         if reset:
-            # 删除旧的 intelligent_chunks.json + JSONL + sections JSON
-            for path_attr in ('_get_intelligent_chunks_path', '_get_intelligent_chunks_jsonl_path', '_get_intelligent_sections_path'):
+            # 删除旧的 intelligent_chunks.json + JSONL + tree JSON
+            for path_attr in ('_get_intelligent_chunks_path', '_get_intelligent_chunks_jsonl_path', '_get_intelligent_chunks_tree_path'):
                 path = getattr(ProjectManager, path_attr)(project_id)
                 if os.path.exists(path):
                     os.remove(path)

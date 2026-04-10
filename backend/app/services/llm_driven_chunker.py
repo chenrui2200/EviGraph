@@ -665,8 +665,8 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "page_idx": clause.metadata.get("page_idx") if clause.metadata else None,
         # 所有来源 chunk 的 bbox（按 page 分组，同页合并）
         "bboxs": clause.metadata.get("bboxs", []) if clause.metadata else [],
-        # 来源 chunks.json 的 chunk_id（可能有多个）
-        "chunks": [clause.metadata.get("chunk_id")] if clause.metadata and clause.metadata.get("chunk_id") else [],
+        # 来源 chunks.json 的 chunk_id（可能有多个，聚合跟踪）
+        "chunks": clause.metadata.get("chunks", []) if clause.metadata else [],
         "requirement_type": clause.requirement_type.value if hasattr(clause.requirement_type, 'value') else str(clause.requirement_type),
         # 优先使用显式字段，空则从 triplets 提取（兼容 LLM 只输出 triplets 的情况）
         "conditions": clause.conditions if clause.conditions else extracted_conditions,
@@ -2388,9 +2388,11 @@ topic：{topic}
                 for s in result.sections
             ]
             from ..models.project import ProjectManager
-            ProjectManager.write_sections_json(project_id, sections_data_out, edges=all_edges or [])
-            # 生成前端可直接使用的章节树文件
-            ProjectManager.build_intelligent_chunks_tree(project_id)
+            ProjectManager.build_intelligent_chunks_tree(
+                project_id,
+                sections=sections_data_out,
+                edges=all_edges or []
+            )
             self.logger.info(f"[LLM分块] ✅ intelligent_chunks_tree.json 已生成")
 
         # =====================================================================
@@ -2788,24 +2790,33 @@ topic：{topic}
             plan.end_position = len(chunks_data)  # 简化处理
 
         # =====================================================================
-        # 聚合所有 chunk 的 bbox 到对应 clause（一个 clause 可能对应多个 chunk）
+        # 聚合所有 chunk 的 bbox + chunk_id 到对应 clause
+        # （一个 clause 可能跨多个 chunk，需要扫描所有 chunk 归属到对应条款）
         # =====================================================================
-        # 建立 clause_id -> [(page_idx, bbox), ...] 的映射
         clause_bbox_map: Dict[str, List[tuple]] = {}
+        clause_chunk_map: Dict[str, List[str]] = {}
+        current_clause_id: Optional[str] = None
         for chunk in chunks_data:
             chunk_id = chunk.get('chunk_id', '')
             page_idx = chunk.get('page_idx', 0)
             bbox = chunk.get('bbox_viewport') or chunk.get('bbox_pdf') or []
-            if not bbox or len(bbox) < 4:
-                continue
-            # 查找该 chunk 属于哪个 clause（通过 content 中的 clause_id）
+            # 查找该 chunk 的 clause_id（通过 content 中的条款编号）
             chunk_content = chunk.get('content', '')
             m = CLAUSE_PATTERN.match(chunk_content.strip())
             if m:
-                clause_id = m.group(1)
-                if clause_id not in clause_bbox_map:
-                    clause_bbox_map[clause_id] = []
-                clause_bbox_map[clause_id].append((page_idx, bbox))
+                current_clause_id = m.group(1)
+            # 当前 chunk 归属到 current_clause_id（直到遇到新的条款编号）
+            if current_clause_id is not None:
+                # bbox
+                if bbox and len(bbox) >= 4:
+                    if current_clause_id not in clause_bbox_map:
+                        clause_bbox_map[current_clause_id] = []
+                    clause_bbox_map[current_clause_id].append((page_idx, bbox))
+                # chunk_id
+                if current_clause_id not in clause_chunk_map:
+                    clause_chunk_map[current_clause_id] = []
+                if chunk_id:
+                    clause_chunk_map[current_clause_id].append(chunk_id)
 
         # 将聚合的 bboxs 写入各 clause 的 metadata
         for clause in clauses:
@@ -2829,6 +2840,8 @@ topic：{topic}
                     merged_bboxs.append([p_idx + 1, x0, y0, x1, y1])
 
                 clause.metadata['bboxs'] = merged_bboxs
+                # 同时记录所有来源 chunk_id（去重）
+                clause.metadata['chunks'] = list(dict.fromkeys(clause_chunk_map.get(cid, [])))
 
         self.logger.info(f"[章节构建] 完成: {len(sections)} 章节, {len(clauses)} 条款，bboxs 聚合完成")
         return sections, clauses, chapter_plan
