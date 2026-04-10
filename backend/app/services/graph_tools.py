@@ -2338,8 +2338,18 @@ Your response:"""
 
                 # Clause 节点优先使用 pdf_bboxes（多页 bbox 列表）
                 if is_clause:
-                    pdf_bboxes = node.get("pdf_bboxes")
-                    if pdf_bboxes and isinstance(pdf_bboxes, list) and len(pdf_bboxes) > 0:
+                    pdf_bboxes_raw = node.get("pdf_bboxes")
+                    # 兼容处理：pdf_bboxes 可能是 JSON 字符串或列表
+                    pdf_bboxes = None
+                    if pdf_bboxes_raw:
+                        if isinstance(pdf_bboxes_raw, str):
+                            try:
+                                pdf_bboxes = json.loads(pdf_bboxes_raw)
+                            except (json.JSONDecodeError, TypeError):
+                                pdf_bboxes = None
+                        elif isinstance(pdf_bboxes_raw, list):
+                            pdf_bboxes = pdf_bboxes_raw
+                    if pdf_bboxes and len(pdf_bboxes) > 0:
                         first_bbox = pdf_bboxes[0]  # [page, x0, y0, x1, y1]
                         if len(first_bbox) >= 5:
                             pdf_info.update({
