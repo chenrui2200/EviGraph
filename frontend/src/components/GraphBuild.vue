@@ -46,16 +46,28 @@
           <!-- Stats Cards -->
           <div class="stats-grid">
             <div class="stat-card">
-              <span class="stat-value">{{ graphStats.nodes }}</span>
-              <span class="stat-label">实体节点</span>
+              <span class="stat-value">{{ nodeTypeStats.Clause }}</span>
+              <span class="stat-label">Clause 条款</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-value">{{ nodeTypeStats.Term }}</span>
+              <span class="stat-label">Term 术语</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-value">{{ nodeTypeStats.Entity }}</span>
+              <span class="stat-label">Entity 实体</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-value">{{ nodeTypeStats.Topic }}</span>
+              <span class="stat-label">Topic 主题</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-value">{{ edgeTypeStats.length }}</span>
+              <span class="stat-label">关系类型数</span>
             </div>
             <div class="stat-card">
               <span class="stat-value">{{ graphStats.edges }}</span>
-              <span class="stat-label">关系事实</span>
-            </div>
-            <div class="stat-card">
-              <span class="stat-value">{{ graphStats.types }}</span>
-              <span class="stat-label">图谱 Schema 类型</span>
+              <span class="stat-label">关系总数</span>
             </div>
           </div>
         </div>
@@ -141,10 +153,32 @@ const logContent = ref(null)
 const creatingSimulation = ref(false)
 
 const graphStats = computed(() => {
-  const nodes = props.graphData?.node_count || props.graphData?.nodes?.length || 0
   const edges = props.graphData?.edge_count || props.graphData?.edges?.length || 0
-  const types = props.projectData?.ontology?.entity_types?.length || 0
-  return { nodes, edges, types }
+  return { edges }
+})
+
+const nodeTypeStats = computed(() => {
+  const stats = { Clause: 0, Term: 0, Entity: 0, Topic: 0 }
+  const nodes = props.graphData?.nodes || []
+  nodes.forEach(node => {
+    const labels = node.labels || []
+    if (labels.includes('Clause')) stats.Clause++
+    else if (labels.includes('Term')) stats.Term++
+    else if (labels.includes('Entity')) stats.Entity++
+    else if (labels.includes('Topic')) stats.Topic++
+  })
+  return stats
+})
+
+const edgeTypeStats = computed(() => {
+  const typeMap = {}
+  const edges = props.graphData?.edges || []
+  edges.forEach(edge => {
+    const type = edge.type || 'RELATED'
+    if (!typeMap[type]) typeMap[type] = 0
+    typeMap[type]++
+  })
+  return Object.entries(typeMap).map(([type, count]) => ({ type, count }))
 })
 
 const formatDate = (dateStr) => {

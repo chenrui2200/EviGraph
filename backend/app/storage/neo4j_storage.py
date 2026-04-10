@@ -1330,10 +1330,13 @@ class Neo4jStorage(GraphStorage):
         Structural nodes (Document, Page, Episode) are included only as context.
         """
         def _read(tx):
-            # 1. Get semantic nodes (Entities) and their labels
+            # 1. Get semantic nodes (Entities AND Topics) and their labels
             node_result = tx.run(
                 """
                 MATCH (n:Entity {graph_id: $gid})
+                RETURN n, labels(n) AS labels
+                UNION
+                MATCH (n:Topic {graph_id: $gid})
                 RETURN n, labels(n) AS labels
                 """,
                 gid=graph_id,
@@ -1356,8 +1359,8 @@ class Neo4jStorage(GraphStorage):
                     WHERE e.uuid IN $uuids
                     RETURN e.uuid AS entity_uuid,
                            ep.uuid AS episode_uuid,
-                           ep.text AS episode_text,
-                           ep.metadata AS episode_metadata
+                           ep.data AS episode_text,
+                           ep.metadata_json AS episode_metadata
                     """,
                     gid=graph_id,
                     uuids=node_uuids,
@@ -1384,7 +1387,7 @@ class Neo4jStorage(GraphStorage):
                     node["pdf_info"] = node_pdf_info.get(node["uuid"], {})
 
             # 3. Get semantic relationships between entities
-            # 匹配所有语义关系类型（5条核心路径全覆盖）
+            # 匹配所有语义关系类型（Entity-Entity + Topic关系）
             edge_result = tx.run(
                 """
                 MATCH (src:Entity {graph_id: $gid})-[r]->(tgt:Entity {graph_id: $gid})
@@ -1395,6 +1398,16 @@ class Neo4jStorage(GraphStorage):
                                    'HAS_DOCUMENT', 'HAS_PAGE', 'HAS_EPISODE']
                 RETURN r, src.uuid AS src_uuid, tgt.uuid AS tgt_uuid,
                        src.name AS src_name, tgt.name AS tgt_name,
+                       type(r) AS rel_type
+                UNION
+                MATCH (ep:Episode {graph_id: $gid})-[r:HAS_TOPIC]->(t:Topic {graph_id: $gid})
+                RETURN r, ep.uuid AS src_uuid, t.uuid AS tgt_uuid,
+                       ep.data AS src_name, t.name AS tgt_name,
+                       type(r) AS rel_type
+                UNION
+                MATCH (t:Topic {graph_id: $gid})-[r:MENTIONS]->(e:Entity {graph_id: $gid})
+                RETURN r, t.uuid AS src_uuid, e.uuid AS tgt_uuid,
+                       t.name AS src_name, e.name AS tgt_name,
                        type(r) AS rel_type
                 """,
                 gid=graph_id,
@@ -2104,7 +2117,7 @@ class Neo4jStorage(GraphStorage):
                     if not clause_id or not topic_text:
                         continue
 
-                    # 创建 Topic 节点
+                    # 创建 Topic 节点（纯 Topic 标签，不加 :Entity 避免 entity_uuid 约束冲突）
                     topic_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{clause_id}:topic".encode()).hexdigest()))
                     tx.run(
                         """
@@ -2113,10 +2126,12 @@ class Neo4jStorage(GraphStorage):
                             t.graph_id = $gid,
                             t.topic = $topic,
                             t.clause_id = $clause_id,
-                            t.created_at = $created_at
+                            t.created_at = $created_at,
+                            t.name = $topic
                         ON MATCH SET
                             t.topic = $topic,
-                            t.clause_id = $clause_id
+                            t.clause_id = $clause_id,
+                            t.name = $topic
                         """,
                         uuid=topic_uuid,
                         gid=graph_id,
@@ -2128,14 +2143,14 @@ class Neo4jStorage(GraphStorage):
                     logger.info(f"[topic_entity] Topic node: clause={clause_id} topic={topic_text[:30]}")
 
                     # 找到对应的 Episode:Level2 节点并创建 HAS_TOPIC 关系
+                    # 注意：Episode:Level2 节点的 graph_id 可能与当前不同（早期重建遗留），
+                    # 因此仅通过 clause_id 匹配（clause_id 在重建间保持稳定）
                     logger.info(f"[add_topic_and_entity_nodes] DEBUG: clause_id={clause_id}, topic={topic_text[:30] if topic_text else 'EMPTY'}")
-                    # 用 clause_id 直接属性查找（替代 metadata_json CONTAINS，避免误匹配）
                     check_result = tx.run(
                         """
-                        MATCH (ep:Episode:Level2 {graph_id: $gid, clause_id: $clause_id})
+                        MATCH (ep:Episode:Level2 {clause_id: $clause_id})
                         RETURN count(ep) as ep_count
                         """,
-                        gid=graph_id,
                         clause_id=clause_id
                     )
                     check_record = check_result.single()
@@ -2143,17 +2158,17 @@ class Neo4jStorage(GraphStorage):
                     logger.info(f"[add_topic_and_entity_nodes] DEBUG: Found {ep_count} Episode:Level2 nodes for clause_id={clause_id}")
 
                     if ep_count > 0:
+                        # 使用独立 MATCH 模式，并通过 USING INDEX 提示加速
                         tx.run(
                             """
-                            MATCH (ep:Episode:Level2 {graph_id: $gid, clause_id: $clause_id})
-                            MERGE (ep)-[r:HAS_TOPIC]->(t:Topic {uuid: $uuid})
-                            ON CREATE SET
-                                r.graph_id = $gid,
-                                r.created_at = datetime()
+                            MATCH (ep:Episode:Level2 {clause_id: $clause_id})
+                            MATCH (t:Topic {uuid: $uuid})
+                            MERGE (ep)-[r:HAS_TOPIC]->(t)
+                            SET r.graph_id = $gid, r.created_at = datetime()
                             """,
-                            gid=graph_id,
                             clause_id=clause_id,
-                            uuid=topic_uuid
+                            uuid=topic_uuid,
+                            gid=graph_id
                         )
                         has_topic_count += 1
                     else:
@@ -2188,13 +2203,12 @@ class Neo4jStorage(GraphStorage):
                             logger.info(f"[topic_entity]   Entity: {entity_name} <- Topic({topic_text[:20]}) MENTIONS")
 
                             # 创建 Topic --MENTIONS--> Entity 关系
+                            # 使用独立 MATCH 而非 MERGE 模式内嵌，避免 entity_uuid 约束冲突
                             tx.run(
                                 """
-                                MATCH (t:Topic {uuid: $topic_uuid})
-                                MERGE (t)-[r:MENTIONS]->(e:Entity {uuid: $entity_uuid})
-                                ON CREATE SET
-                                    r.graph_id = $gid,
-                                    r.created_at = datetime()
+                                MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity {uuid: $entity_uuid})
+                                MERGE (t)-[r:MENTIONS]->(e)
+                                SET r.graph_id = $gid, r.created_at = datetime()
                                 """,
                                 topic_uuid=topic_uuid,
                                 entity_uuid=entity_uuid,

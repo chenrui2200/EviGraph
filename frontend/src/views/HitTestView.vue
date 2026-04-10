@@ -56,8 +56,8 @@
                 根节点类型
                 <div class="root-type-checks">
                   <label class="checkbox-label root-type-check">
-                    <input type="checkbox" value="Object" v-model="rootTypes" />
-                    <span>Object</span>
+                    <input type="checkbox" value="Entity" v-model="rootTypes" />
+                    <span>Entity</span>
                   </label>
                   <label class="checkbox-label root-type-check">
                     <input type="checkbox" value="Term" v-model="rootTypes" />
@@ -116,14 +116,14 @@
             <!-- ===== Object-first DFS 检索结果 ===== -->
             <div v-if="filteredObjectFirstRows.length > 0" class="results-list">
               <div class="results-header">
-                <span>Root-first DFS 命中 (Term: {{ allObjectFirstRows.filter(r => r.root_type === 'Term').length }}, Object: {{ allObjectFirstRows.filter(r => r.root_type === 'Object').length }})</span>
+                <span>Root-first DFS 命中 (Term: {{ allObjectFirstRows.filter(r => r.root_type === 'Term').length }}, Entity: {{ allObjectFirstRows.filter(r => r.root_type === 'Entity').length }})</span>
                 <button class="reset-filter-btn" @click="resetFilter">重置视图</button>
               </div>
 
               <div class="results-summary-card">
                 <div class="summary-title">💡 检索分析</div>
                 <p class="summary-content">
-                  本次检索命中了 {{ allObjectFirstRows.length }} 个根节点（Term: {{ allObjectFirstRows.filter(r => r.root_type === 'Term').length }}, Object: {{ allObjectFirstRows.filter(r => r.root_type === 'Object').length }}），
+                  本次检索命中了 {{ allObjectFirstRows.length }} 个根节点（Term: {{ allObjectFirstRows.filter(r => r.root_type === 'Term').length }}, Entity: {{ allObjectFirstRows.filter(r => r.root_type === 'Entity').length }}），
                   共 {{ allObjectFirstRows.reduce((s, r) => s + (r.facts?.length || 0), 0) }} 条关联事实。Term 优先排在前面。
                   <template v-if="searchTimings.object_s || searchTimings.term_s">
                     耗时：Object搜索 {{ searchTimings.object_s.toFixed(2) }}s，Term搜索 {{ searchTimings.term_s.toFixed(2) }}s。
@@ -409,7 +409,7 @@ const graphLoading = ref(false)
 const searching = ref(false)
 const searchQuery = ref('')
 const filterGraph = ref(true)
-const rootTypes = ref(['Object', 'Term']) // 根节点类型多选: Object 和/或 Term
+const rootTypes = ref(['Entity', 'Term']) // 根节点类型多选: Entity 和/或 Term
 const maxDepth = ref(3)             // DFS 最大深度
 const similarityThreshold = ref(50) // 相似度阈值 (50-100)，低于此值的结果被丢弃
 
@@ -902,13 +902,13 @@ const handleSearch = async () => {
   searching.value = true
   try {
     // 并行查询 Object 和 Term，合并时 Term 排在 Object 前面
-    const [objectRes, termRes] = await Promise.all([
+    const [entityRes, termRes] = await Promise.all([
       searchObjectFirst({
         graph_id: graphId.value,
         query: searchQuery.value,
         limit: 15,
         max_depth: maxDepth.value,
-        root_type: 'Object'
+        root_type: 'Entity'
       }),
       searchObjectFirst({
         graph_id: graphId.value,
@@ -918,15 +918,15 @@ const handleSearch = async () => {
         root_type: 'Term'
       })
     ])
-    searchTimings.value.object_s = (objectRes.duration_ms || 0) / 1000
+    searchTimings.value.object_s = (entityRes.duration_ms || 0) / 1000
     searchTimings.value.term_s = (termRes.duration_ms || 0) / 1000
 
     const termRows = (termRes.success ? termRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= similarityThreshold.value).map(r => ({ ...r, root_type: 'Term' }))
-    const objectRows = (objectRes.success ? objectRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= similarityThreshold.value).map(r => ({ ...r, root_type: 'Object' }))
+    const entityRows = (entityRes.success ? entityRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= similarityThreshold.value).map(r => ({ ...r, root_type: 'Entity' }))
     // similarityThreshold 范围 50-100
 
-    // 合并: Term 排前，Object 排后
-    allObjectFirstRows.value = [...termRows, ...objectRows]
+    // 合并: Term 排前，Entity 排后
+    allObjectFirstRows.value = [...termRows, ...entityRows]
     results.value = { facts: [], nodes: [], edges: [] }
   } catch (err) {
     console.error('Search failed:', err)
@@ -939,7 +939,7 @@ const handleSearch = async () => {
 const resetFilter = () => {
   results.value = { facts: [], nodes: [], edges: [] }
   allObjectFirstRows.value = []
-  rootTypes.value = ['Object', 'Term']
+  rootTypes.value = ['Entity', 'Term']
   searchTimings.value.object_s = 0
   searchTimings.value.term_s = 0
 }

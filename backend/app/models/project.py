@@ -633,11 +633,13 @@ class ProjectManager:
                     continue
                 chapter_clauses = [c for c in clauses if c.get('parent_chapter') == chapter_num]
                 chapter_tree[chapter_num] = {
-                    "chapter_number": chapter_num,
-                    "title": section.get('title', ''),
-                    "content": section.get('content', ''),
-                    "clauses": chapter_clauses,
-                    "clause_count": len(chapter_clauses)
+                    "chapter": {
+                        "chapter_number": chapter_num,
+                        "title": section.get('title', ''),
+                        "content": section.get('content', ''),
+                        "clause_count": len(chapter_clauses)
+                    },
+                    "clauses": chapter_clauses
                 }
         else:
             # 无 sections 数据：从 clauses 的 parent_chapter 聚合推断章节结构
@@ -645,11 +647,13 @@ class ProjectManager:
             for cn in chapter_nums:
                 chapter_clauses = [c for c in clauses if c.get('parent_chapter') == cn]
                 chapter_tree[cn] = {
-                    "chapter_number": cn,
-                    "title": f"第 {cn} 章",
-                    "content": "",
-                    "clauses": chapter_clauses,
-                    "clause_count": len(chapter_clauses)
+                    "chapter": {
+                        "chapter_number": cn,
+                        "title": f"第 {cn} 章",
+                        "content": "",
+                        "clause_count": len(chapter_clauses)
+                    },
+                    "clauses": chapter_clauses
                 }
 
         # 按章节号排序

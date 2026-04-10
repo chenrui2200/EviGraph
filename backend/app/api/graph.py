@@ -267,10 +267,10 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                     hierarchical_result = HierarchicalChunkResult(
                         sections=sections,
                         clauses=clauses,
-                        elements=elements
+                        elements=[]  # 不传 elements！Topic-Entity 关系已由 add_topic_and_entity_nodes 创建
                     )
                     total_chunks = hierarchical_result.total_chunks
-                    build_logger.info(f"Using intelligent chunks: {len(sections)} sections, {len(clauses)} clauses, {len(elements)} elements")
+                    build_logger.info(f"Using intelligent chunks: {len(sections)} sections, {len(clauses)} clauses, 0 elements (Topic-Entity via add_topic_and_entity_nodes)")
                 else:
                     # 降级方案：使用普通 chunks 进行正则分块
                     build_logger.warning("intelligent_chunks.json not found, falling back to regular chunking")
