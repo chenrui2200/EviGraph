@@ -1428,10 +1428,33 @@ class Neo4jStorage(GraphStorage):
                 "node_count": node_count,
                 "edge_count": edge_count,
                 "entity_types": entity_types,
+                "has_topic_count": 0,  # placeholder, computed below
+                "mentions_count": 0,   # placeholder, computed below
             }
 
+        def _read_relation_stats(tx):
+            # HAS_TOPIC: Clause(Episode:Level2) → Topic
+            has_topic_result = tx.run(
+                "MATCH (e:Episode:Level2)-[r:HAS_TOPIC]->(t:Topic) WHERE e.graph_id = $gid RETURN count(r) AS cnt",
+                gid=graph_id,
+            )
+            has_topic_count = has_topic_result.single()["cnt"]
+
+            # MENTIONS: Topic → Entity 或 Topic → Entity:Term
+            mentions_result = tx.run(
+                "MATCH (t:Topic)-[r:MENTIONS]->(e) WHERE t.graph_id = $gid AND (e:Entity OR e:Entity:Term) RETURN count(r) AS cnt",
+                gid=graph_id,
+            )
+            mentions_count = mentions_result.single()["cnt"]
+
+            return has_topic_count, mentions_count
+
         with self._driver.session() as session:
-            return self._call_with_retry(session.execute_read, _read)
+            base_info = self._call_with_retry(session.execute_read, _read)
+            has_topic_count, mentions_count = self._call_with_retry(session.execute_read, _read_relation_stats)
+            base_info["has_topic_count"] = has_topic_count
+            base_info["mentions_count"] = mentions_count
+            return base_info
 
     def get_graph_data(self, graph_id: str) -> Dict[str, Any]:
         """
@@ -1441,12 +1464,16 @@ class Neo4jStorage(GraphStorage):
         """
         def _read(tx):
             # 1. Get semantic nodes (Entities AND Topics) and their labels
+            # Include Episode:Level2 nodes as Clause nodes for frontend stats
             node_result = tx.run(
                 """
                 MATCH (n:Entity {graph_id: $gid})
                 RETURN n, labels(n) AS labels
                 UNION
                 MATCH (n:Topic {graph_id: $gid})
+                RETURN n, labels(n) AS labels
+                UNION
+                MATCH (n:Episode:Level2 {graph_id: $gid})
                 RETURN n, labels(n) AS labels
                 """,
                 gid=graph_id,
@@ -1537,10 +1564,33 @@ class Neo4jStorage(GraphStorage):
                 "edges": edges,
                 "node_count": len(nodes),
                 "edge_count": len(edges),
+                "has_topic_count": 0,  # placeholder
+                "mentions_count": 0,    # placeholder
             }
 
+        def _read_relation_stats(tx):
+            # HAS_TOPIC: Episode:Level2(Clause) → Topic
+            has_topic_result = tx.run(
+                "MATCH (e:Episode:Level2)-[r:HAS_TOPIC]->(t:Topic) WHERE e.graph_id = $gid RETURN count(r) AS cnt",
+                gid=graph_id,
+            )
+            has_topic_count = has_topic_result.single()["cnt"]
+
+            # MENTIONS: Topic → Entity 或 Topic → Entity:Term
+            mentions_result = tx.run(
+                "MATCH (t:Topic)-[r:MENTIONS]->(e) WHERE t.graph_id = $gid AND (e:Entity OR e:Entity:Term) RETURN count(r) AS cnt",
+                gid=graph_id,
+            )
+            mentions_count = mentions_result.single()["cnt"]
+
+            return has_topic_count, mentions_count
+
         with self._driver.session() as session:
-            return self._call_with_retry(session.execute_read, _read)
+            result = self._call_with_retry(session.execute_read, _read)
+            has_topic_count, mentions_count = self._call_with_retry(session.execute_read, _read_relation_stats)
+            result["has_topic_count"] = has_topic_count
+            result["mentions_count"] = mentions_count
+            return result
 
     # ----------------------------------------------------------------
     # Dict conversion helpers
@@ -1566,10 +1616,31 @@ class Neo4jStorage(GraphStorage):
         props.pop("embedding", None)
         props.pop("name_lower", None)
 
+        # Handle Episode:Level2 nodes as Clause nodes for frontend stats
+        if "Level2" in labels:
+            display_labels = ["Clause"]
+            # For Episode:Level2 nodes, use clause_id or data as name
+            data_val = props.get("data")
+            if props.get("clause_id"):
+                display_name = props.get("clause_id")
+            elif data_val:
+                display_name = data_val[:50]
+            else:
+                display_name = ""
+        else:
+            # Keep all labels including Entity for frontend stats
+            # Convert to list in case Neo4j returns special iterable type
+            labels_list = list(labels) if labels else []
+            display_labels = labels_list
+            display_name = props.get("name", "")
+            # Debug: log Entity nodes with their labels
+            if "Entity" in labels_list and not any(l in labels_list for l in ["Term", "Clause", "Section", "Component", "Action", "Condition", "Parameter", "Formula", "ExternalStandard"]):
+                logger.info(f"[DEBUG] Entity node: uuid={props.get('uuid')}, name={props.get('name')}, labels={display_labels}")
+
         return {
             "uuid": props.get("uuid", ""),
-            "name": props.get("name", ""),
-            "labels": [l for l in labels if l != "Entity"] if labels else [],
+            "name": display_name,
+            "labels": display_labels,
             "summary": props.get("summary", ""),
             "definition": props.get("definition", ""),
             "attributes": attributes,
@@ -1580,6 +1651,8 @@ class Neo4jStorage(GraphStorage):
             "pdf_bbox": props.get("pdf_bbox"),
             "pdf_page_width": props.get("pdf_page_width"),
             "pdf_page_height": props.get("pdf_page_height"),
+            # Clause 特有字段
+            "clause_id": props.get("clause_id"),
         }
 
     @staticmethod

@@ -62,12 +62,12 @@
               <span class="stat-label">Topic 主题</span>
             </div>
             <div class="stat-card">
-              <span class="stat-value">{{ edgeTypeStats.length }}</span>
-              <span class="stat-label">关系类型数</span>
+              <span class="stat-value">{{ graphData?.has_topic_count || 0 }}</span>
+              <span class="stat-label">HAS_TOPIC 关系</span>
             </div>
             <div class="stat-card">
-              <span class="stat-value">{{ graphStats.edges }}</span>
-              <span class="stat-label">关系总数</span>
+              <span class="stat-value">{{ graphData?.mentions_count || 0 }}</span>
+              <span class="stat-label">MENTIONS 关系</span>
             </div>
           </div>
         </div>
@@ -174,7 +174,7 @@ const edgeTypeStats = computed(() => {
   const typeMap = {}
   const edges = props.graphData?.edges || []
   edges.forEach(edge => {
-    const type = edge.type || 'RELATED'
+    const type = edge.name || edge.rel_type || 'RELATED'
     if (!typeMap[type]) typeMap[type] = 0
     typeMap[type]++
   })
