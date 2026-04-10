@@ -909,7 +909,10 @@ class Neo4jStorage(GraphStorage):
     def get_node(self, uuid: str) -> Optional[Dict[str, Any]]:
         def _read(tx):
             result = tx.run(
-                "MATCH (n:Entity {uuid: $uuid}) RETURN n, labels(n) AS labels",
+                """
+                MATCH (n) WHERE n.uuid = $uuid AND (n:Entity OR n:Topic OR n:Clause)
+                RETURN n, labels(n) AS labels
+                """,
                 uuid=uuid,
             )
             record = result.single()
@@ -988,7 +991,8 @@ class Neo4jStorage(GraphStorage):
         def _read(tx):
             result = tx.run(
                 """
-                MATCH (n:Entity {uuid: $uuid})-[r]-(m:Entity)
+                MATCH (n {uuid: $uuid})-[r]-(m)
+                WHERE n:Entity OR n:Topic OR n:Clause
                 RETURN r, startNode(r).uuid AS src_uuid, endNode(r).uuid AS tgt_uuid
                 """,
                 uuid=node_uuid,
@@ -1006,7 +1010,8 @@ class Neo4jStorage(GraphStorage):
         def _read(tx):
             result = tx.run(
                 """
-                MATCH (n:Entity {uuid: $uuid})-[r]->(m:Entity)
+                MATCH (n {uuid: $uuid})-[r]->(m)
+                WHERE n:Entity OR n:Topic OR n:Clause
                 RETURN r, startNode(r).uuid AS src_uuid, endNode(r).uuid AS tgt_uuid
                 """,
                 uuid=node_uuid,
@@ -1020,15 +1025,15 @@ class Neo4jStorage(GraphStorage):
             return self._call_with_retry(session.execute_read, _read)
 
     def get_edges_for_nodes_batch(self, node_uuids: List[str], bidirectional: bool = True) -> Dict[str, List[Dict[str, Any]]]:
-        """批量获取多个节点的所有边（一次性 Cypher 查询）"""
+        """批量获取多个节点的所有边（一次性 Cypher 查询，支持 Entity/Topic/Clause）"""
         if not node_uuids:
             return {}
         def _read(tx):
             rel_type = "[r]-(m)" if bidirectional else "[r]->(m)"
             result = tx.run(
                 f"""
-                MATCH (n:Entity)-{rel_type}
-                WHERE n.uuid IN $uuids AND m:Entity
+                MATCH (n)-{rel_type}
+                WHERE n.uuid IN $uuids AND (n:Entity OR n:Topic OR n:Clause)
                 RETURN n.uuid AS node_uuid, r, startNode(r).uuid AS src_uuid, endNode(r).uuid AS tgt_uuid
                 """,
                 uuids=node_uuids,
@@ -1044,12 +1049,16 @@ class Neo4jStorage(GraphStorage):
             return self._call_with_retry(session.execute_read, _read)
 
     def get_nodes_batch(self, node_uuids: List[str]) -> Dict[str, Dict[str, Any]]:
-        """批量获取多个节点数据"""
+        """批量获取多个节点数据（Entity, Topic, Clause）"""
         if not node_uuids:
             return {}
         def _read(tx):
             result = tx.run(
-                "MATCH (n:Entity) WHERE n.uuid IN $uuids RETURN n, labels(n) AS labels",
+                """
+                MATCH (n) WHERE n.uuid IN $uuids
+                AND (n:Entity OR n:Topic OR n:Clause)
+                RETURN n, labels(n) AS labels
+                """,
                 uuids=node_uuids,
             )
             return {
@@ -1433,9 +1442,9 @@ class Neo4jStorage(GraphStorage):
             }
 
         def _read_relation_stats(tx):
-            # HAS_TOPIC: Clause(Episode:Level2) → Topic
+            # HAS_TOPIC: Clause(Clause) → Topic
             has_topic_result = tx.run(
-                "MATCH (e:Episode:Level2)-[r:HAS_TOPIC]->(t:Topic) WHERE e.graph_id = $gid RETURN count(r) AS cnt",
+                "MATCH (e:Clause)-[r:HAS_TOPIC]->(t:Topic) WHERE e.graph_id = $gid RETURN count(r) AS cnt",
                 gid=graph_id,
             )
             has_topic_count = has_topic_result.single()["cnt"]
@@ -1464,7 +1473,7 @@ class Neo4jStorage(GraphStorage):
         """
         def _read(tx):
             # 1. Get semantic nodes (Entities AND Topics) and their labels
-            # Include Episode:Level2 nodes as Clause nodes for frontend stats
+            # Include Clause nodes as Clause nodes for frontend stats
             node_result = tx.run(
                 """
                 MATCH (n:Entity {graph_id: $gid})
@@ -1473,7 +1482,7 @@ class Neo4jStorage(GraphStorage):
                 MATCH (n:Topic {graph_id: $gid})
                 RETURN n, labels(n) AS labels
                 UNION
-                MATCH (n:Episode:Level2 {graph_id: $gid})
+                MATCH (n:Clause {graph_id: $gid})
                 RETURN n, labels(n) AS labels
                 """,
                 gid=graph_id,
@@ -1569,9 +1578,9 @@ class Neo4jStorage(GraphStorage):
             }
 
         def _read_relation_stats(tx):
-            # HAS_TOPIC: Episode:Level2(Clause) → Topic
+            # HAS_TOPIC: Clause(Clause) → Topic
             has_topic_result = tx.run(
-                "MATCH (e:Episode:Level2)-[r:HAS_TOPIC]->(t:Topic) WHERE e.graph_id = $gid RETURN count(r) AS cnt",
+                "MATCH (e:Clause)-[r:HAS_TOPIC]->(t:Topic) WHERE e.graph_id = $gid RETURN count(r) AS cnt",
                 gid=graph_id,
             )
             has_topic_count = has_topic_result.single()["cnt"]
@@ -1616,10 +1625,10 @@ class Neo4jStorage(GraphStorage):
         props.pop("embedding", None)
         props.pop("name_lower", None)
 
-        # Handle Episode:Level2 nodes as Clause nodes for frontend stats
-        if "Level2" in labels:
+        # Handle Clause nodes as Clause nodes for frontend stats
+        if "Clause" in labels:
             display_labels = ["Clause"]
-            # For Episode:Level2 nodes, use clause_id or data as name
+            # For Clause nodes, use clause_id or data as name
             data_val = props.get("data")
             if props.get("clause_id"):
                 display_name = props.get("clause_id")
@@ -1932,7 +1941,7 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             result = session.run(
                 """
-                MATCH (ep:Episode:Level2 {graph_id: $gid})
+                MATCH (ep:Clause {graph_id: $gid})
                 WHERE ep.semantics_enriched <> true
                 RETURN ep.uuid AS uuid,
                        ep.clause_id AS clause_id,
@@ -1979,7 +1988,7 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             result = session.run(
                 """
-                MATCH (ep:Episode:Level2 {graph_id: $gid})
+                MATCH (ep:Clause {graph_id: $gid})
                 RETURN ep.uuid AS uuid,
                        ep.clause_id AS clause_id,
                        ep.data AS content,
@@ -2039,7 +2048,7 @@ class Neo4jStorage(GraphStorage):
             # 获取所有条文
             result = session.run(
                 """
-                MATCH (ep:Episode:Level2 {graph_id: $gid})
+                MATCH (ep:Clause {graph_id: $gid})
                 WHERE ep.clause_id IS NOT NULL
                 RETURN ep.uuid AS uuid, ep.clause_id AS clause_id
                 """,
@@ -2181,10 +2190,13 @@ class Neo4jStorage(GraphStorage):
                     clause_id=ep_clause_id,
                 )
 
-                # 2. 添加层级标签
-                level_label = f"Level{level}"
+                # 2. 移除 Episode 标签，设置为 Clause（统一为 Clause 标签，不含 Episode 前缀）
                 tx.run(
-                    f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{level_label}`",
+                    """
+                    MATCH (ep:Episode {uuid: $uuid})
+                    REMOVE ep:Episode
+                    SET ep:Clause
+                    """,
                     uuid=episode_id
                 )
 
@@ -2223,7 +2235,7 @@ class Neo4jStorage(GraphStorage):
         为图谱添加 Topic 和 Entity 节点及关系
 
         图谱结构：
-            Clause (Episode:Level2) --HAS_TOPIC--> Topic
+            Clause (Clause) --HAS_TOPIC--> Topic
             Topic --MENTIONS--> Entity:Term (来自 clause.terms)
             Topic --MENTIONS--> Entity (来自 clause.entities)
 
@@ -2243,11 +2255,11 @@ class Neo4jStorage(GraphStorage):
         now = datetime.now(timezone.utc).isoformat()
         topic_count = 0
         entity_count = 0
-        clause_count = 0  # Clause 节点数量（来自 Episode:Level2）
+        clause_count = 0  # Clause 节点数量（来自 Clause）
         has_topic_count = 0
         mentions_count = 0
 
-        # 预统计 clauses 总数（从 Episode:Level2 节点计数）
+        # 预统计 clauses 总数（从 Clause 节点计数）
         clauses_with_topic = [c for c in clauses_data if c.get('topic')]
 
         # DEBUG: 记录传入的 clauses_data 信息
@@ -2263,10 +2275,10 @@ class Neo4jStorage(GraphStorage):
                 # 预统计
                 clauses_with_topic = [c for c in clauses_data if c.get('topic')]
 
-                # 检查数据库中是否存在 Episode:Level2 节点
+                # 检查数据库中是否存在 Clause 节点
                 check_episodes = tx.run(
                     """
-                    MATCH (ep:Episode:Level2 {graph_id: $gid})
+                    MATCH (ep:Clause {graph_id: $gid})
                     RETURN count(ep) as total_episodes, head(collect(ep.metadata_json)) as sample_metadata
                     """,
                     gid=graph_id
@@ -2274,14 +2286,14 @@ class Neo4jStorage(GraphStorage):
                 ep_check = check_episodes.single()
                 total_eps = ep_check["total_episodes"] if ep_check else 0
                 sample_meta = ep_check["sample_metadata"] if ep_check else None
-                logger.info(f"[add_topic_and_entity_nodes] DEBUG: Total Episode:Level2 nodes in DB: {total_eps}")
+                logger.info(f"[add_topic_and_entity_nodes] DEBUG: Total Clause nodes in DB: {total_eps}")
                 if sample_meta:
                     logger.info(f"[add_topic_and_entity_nodes] DEBUG: Sample metadata_json: {sample_meta[:200] if sample_meta else 'None'}...")
 
                 # 检查有 clause_id 属性的 Episode 数量
                 check_with_clause_id = tx.run(
                     """
-                    MATCH (ep:Episode:Level2 {graph_id: $gid})
+                    MATCH (ep:Clause {graph_id: $gid})
                     WHERE ep.clause_id IS NOT NULL
                     RETURN count(ep) as cnt, head(collect([ep.clause_id, ep.data])) as sample
                     """,
@@ -2291,7 +2303,7 @@ class Neo4jStorage(GraphStorage):
                 cnt = rec["cnt"] if rec else 0
                 sample_pair = rec["sample"] if rec else None
                 clause_count = cnt  # 使用数据库中实际的 Clause 节点数量
-                logger.info(f"[add_topic_and_entity_nodes] DEBUG: Episode:Level2 有 clause_id 的数量: {cnt}, clauses_with_topic length: {len(clauses_with_topic)}")
+                logger.info(f"[add_topic_and_entity_nodes] DEBUG: Clause 有 clause_id 的数量: {cnt}, clauses_with_topic length: {len(clauses_with_topic)}")
                 entities_by_clause = {}
                 for e in entities_data:
                     src = e.get('source_clause_id', '')
@@ -2332,26 +2344,26 @@ class Neo4jStorage(GraphStorage):
                     topic_count += 1
                     logger.info(f"[topic_entity] Topic node: clause={clause_id} topic={topic_text[:30]}")
 
-                    # 找到对应的 Episode:Level2 节点并创建 HAS_TOPIC 关系
-                    # 注意：Episode:Level2 节点的 graph_id 可能与当前不同（早期重建遗留），
+                    # 找到对应的 Clause 节点并创建 HAS_TOPIC 关系
+                    # 注意：Clause 节点的 graph_id 可能与当前不同（早期重建遗留），
                     # 因此仅通过 clause_id 匹配（clause_id 在重建间保持稳定）
                     logger.info(f"[add_topic_and_entity_nodes] DEBUG: clause_id={clause_id}, topic={topic_text[:30] if topic_text else 'EMPTY'}")
                     check_result = tx.run(
                         """
-                        MATCH (ep:Episode:Level2 {clause_id: $clause_id})
+                        MATCH (ep:Clause {clause_id: $clause_id})
                         RETURN count(ep) as ep_count
                         """,
                         clause_id=clause_id
                     )
                     check_record = check_result.single()
                     ep_count = check_record["ep_count"] if check_record else 0
-                    logger.info(f"[add_topic_and_entity_nodes] DEBUG: Found {ep_count} Episode:Level2 nodes for clause_id={clause_id}")
+                    logger.info(f"[add_topic_and_entity_nodes] DEBUG: Found {ep_count} Clause nodes for clause_id={clause_id}")
 
                     if ep_count > 0:
                         # 使用独立 MATCH 模式，并通过 USING INDEX 提示加速
                         tx.run(
                             """
-                            MATCH (ep:Episode:Level2 {clause_id: $clause_id})
+                            MATCH (ep:Clause {clause_id: $clause_id})
                             MATCH (t:Topic {uuid: $uuid})
                             MERGE (ep)-[r:HAS_TOPIC]->(t)
                             SET r.graph_id = $gid, r.created_at = datetime()
@@ -2362,7 +2374,7 @@ class Neo4jStorage(GraphStorage):
                         )
                         has_topic_count += 1
                     else:
-                        logger.warning(f"[add_topic_and_entity_nodes] WARNING: No Episode:Level2 found for clause_id={clause_id}, skipping HAS_TOPIC relationship")
+                        logger.warning(f"[add_topic_and_entity_nodes] WARNING: No Clause found for clause_id={clause_id}, skipping HAS_TOPIC relationship")
 
                     # 为该条款的 terms 创建 Entity:Term 节点和 MENTIONS 关系
                     clause_terms = clause.get('terms', [])
@@ -2499,7 +2511,7 @@ class Neo4jStorage(GraphStorage):
         # 创建Clause Entity节点
         tx.run(
             """
-            MERGE (e:Entity:Clause {graph_id: $gid, name_lower: $name_lower})
+            MERGE (e:Clause {graph_id: $gid, name_lower: $name_lower})
             ON CREATE SET
                 e.uuid = $uuid,
                 e.name = $name,
@@ -2650,7 +2662,7 @@ class Neo4jStorage(GraphStorage):
             ref_entity_uuid = str(uuid.UUID(hashlib.md5(ref_entity_seed).hexdigest()))
             # 查找被引用条款的实际 UUID（MATCH）
             lookup = tx.run(
-                "MATCH (e:Entity:Clause {graph_id: $gid, clause_id: $cid}) RETURN e.uuid AS uuid LIMIT 1",
+                "MATCH (e:Clause {graph_id: $gid, clause_id: $cid}) RETURN e.uuid AS uuid LIMIT 1",
                 gid=graph_id, cid=ref_clause_id
             ).single()
             if lookup:
@@ -3432,7 +3444,7 @@ class Neo4jStorage(GraphStorage):
             # 获取所有Clause实体
             result = session.run(
                 """
-                MATCH (c:Entity:Clause {graph_id: $gid})
+                MATCH (c:Clause {graph_id: $gid})
                 WHERE c.name_lower STARTS WITH '条款'
                 RETURN c.uuid AS uuid, c.name AS name
                 """,
@@ -3544,7 +3556,7 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             result = session.run(
                 """
-                MATCH (ep:Episode:Level2 {graph_id: $gid})
+                MATCH (ep:Clause {graph_id: $gid})
                 WHERE ep.clause_id = $clause_id
                    OR ep.clause_id = $clause_id_full
                 RETURN ep.uuid AS uuid, ep.data AS content

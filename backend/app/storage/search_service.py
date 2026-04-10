@@ -101,7 +101,7 @@ LIMIT $limit
 _VECTOR_SEARCH_OBJECT_NODES = """
 CALL db.index.vector.queryNodes('entity_embedding', $limit, $query_vector)
 YIELD node, score
-WHERE node.graph_id = $graph_id AND 'Entity' IN labels(node)
+WHERE node.graph_id = $graph_id AND 'Entity' IN labels(node) AND NOT 'Term' IN labels(node)
   AND ($min_score IS NULL OR score >= $min_score)
 RETURN node AS n, score
 ORDER BY score DESC
@@ -112,7 +112,7 @@ LIMIT $limit
 _FULLTEXT_SEARCH_OBJECT_NODES = """
 CALL db.index.fulltext.queryNodes('entity_fulltext', $query_text)
 YIELD node, score
-WHERE node.graph_id = $graph_id AND 'Entity' IN labels(node)
+WHERE node.graph_id = $graph_id AND 'Entity' IN labels(node) AND NOT 'Term' IN labels(node)
   AND ($min_score IS NULL OR score >= $min_score)
 RETURN node AS n, score
 ORDER BY score DESC
@@ -122,7 +122,7 @@ LIMIT $limit
 # Fallback: direct CONTAINS search when fulltext index fails or returns empty
 _CONTAINS_SEARCH_OBJECT_NODES = """
 MATCH (n:Entity {graph_id: $graph_id})
-WHERE 'Entity' IN labels(n)
+WHERE 'Entity' IN labels(n) AND NOT 'Term' IN labels(n)
   AND (toLower(n.name) CONTAINS toLower($keyword)
        OR toLower(n.summary) CONTAINS toLower($keyword))
 RETURN n, 1.0 AS score
