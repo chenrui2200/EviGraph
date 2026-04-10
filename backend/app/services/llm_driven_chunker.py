@@ -2101,6 +2101,47 @@ topic：{topic}
 
         raise LLMChunkerError(f"LLM 调用失败，重试 {self.MAX_RETRIES} 次后仍失败: {last_error}")
 
+    # =========================================================================
+    # 并行处理工具（用于章节内 clause 并行 LLM 调用）
+    # =========================================================================
+
+    def _process_single_clause(self, clause) -> None:
+        """处理单个 clause 的 topic + entities 提取（串行两阶段 LLM）"""
+        if not clause.content:
+            clause.metadata['topic'] = ""
+            clause.metadata['entities'] = []
+            clause.metadata['semantics_enriched'] = True
+            return
+
+        topic = self._extract_topic_from_text(clause.content)
+        clause.metadata['topic'] = topic
+
+        entities = self._extract_entities_by_topic(clause.content, topic)
+        clause.metadata['entities'] = entities
+        clause.metadata['semantics_enriched'] = True
+
+    # =========================================================================
+    # JSONL 增量写入工具
+    # =========================================================================
+
+    def _append_clause_to_jsonl(self, project_id: Optional[str], clause) -> None:
+        """将单个 clause 追加写入 JSONL 文件"""
+        if not project_id:
+            return
+        from ..models.project import ProjectManager
+        clause_dict = self._clause_to_dict(clause)
+        # clause_to_dict 已包含 bboxs 和 chunks，直接写入
+        ProjectManager.append_clause_to_jsonl(project_id, clause_dict)
+
+    def _init_jsonl_file(self, project_id: Optional[str]) -> None:
+        """初始化/清空 JSONL 文件（每轮任务从头写）"""
+        if not project_id:
+            return
+        from ..models.project import ProjectManager
+        path = ProjectManager._get_intelligent_chunks_jsonl_path(project_id)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('')  # 清空文件
+
     def chunk(
         self,
         text_chunks: List[TextChunk],
@@ -2202,19 +2243,39 @@ topic：{topic}
             self.logger.info(f"[LLM分块] 从章节 {start_index} 恢复，跳过前 {start_index} 个章节")
 
         all_edges: List[Dict] = []
+        chapter_results = []  # [(section, chapter_clauses), ...]
 
         # =====================================================================
         # Step 2: 逐章 LLM 提取实体
         # =====================================================================
         self.logger.info(f"[LLM分块] Step 2/4: 逐章 LLM 提取实体（共 {chapter_count} 章）")
 
+        # 初始化 JSONL 文件（每轮任务从头写）
+        if project_id:
+            self._init_jsonl_file(project_id)
+
+        # 线程池：用于章节内 clause 并行 LLM 调用
+        # max_workers 控制最大并发 LLM 请求数，避免压垮 LLM 服务
+        max_workers = min(8, len(sections_data))
+
         for i, section_data in enumerate(sections_data):
             chapter_num = section_data['chapter_number']
             chapter_title = section_data['title']
 
-            # 跳过已完成的章节
+            # 跳过已完成的章节（all_clauses 已通过 checkpoint 恢复包含了所有已完成 clauses）
             if i < start_index:
                 self.logger.info(f"[LLM分块] 跳过章节 {chapter_num} (已处理)")
+                section = SectionSegment(
+                    chapter_number=chapter_num,
+                    title=chapter_title,
+                    content=""
+                )
+                # 从 checkpoint.completed_clauses 恢复该章节的 clauses（作为 dict）
+                skipped_clauses = [
+                    c for c in (checkpoint.completed_clauses if checkpoint else [])
+                    if c.get('parent_chapter') == chapter_num
+                ]
+                chapter_results.append((section, skipped_clauses))
                 continue
 
             # 更新检查点
@@ -2247,37 +2308,26 @@ topic：{topic}
             # 获取该章节的条款
             chapter_clauses = [c for c in clauses_data if c.parent_chapter == chapter_num]
 
-            # 逐条款提取 topic + 实体（两阶段 LLM 提取）
+            # 并行执行：章节内所有 clause 的 LLM 调用同时进行
             para_start = time.time()
-            chapter_topics = []
-            chapter_entities_count = 0
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(self._process_single_clause, clause): clause for clause in chapter_clauses}
+                for future in as_completed(futures):
+                    # 等待所有 clause 完成（结果在 clause.metadata 中直接修改）
+                    pass
 
-            for clause_idx, clause in enumerate(chapter_clauses):
-                if not clause.content:
-                    clause.metadata['topic'] = ""
-                    clause.metadata['entities'] = []
-                    continue
+            # JSONL 增量写入：每 clause 处理完立即落盘
+            if project_id:
+                for clause in chapter_clauses:
+                    self._append_clause_to_jsonl(project_id, clause)
 
-                # 阶段 A: 提取 topic
-                topic_start = time.time()
-                topic = self._extract_topic_from_text(clause.content)
-                topic_time = time.time() - topic_start
-                clause.metadata['topic'] = topic
-                chapter_topics.append(topic)
-
-                # 阶段 B: 基于 topic 提取实体
-                entity_start = time.time()
-                entities = self._extract_entities_by_topic(clause.content, topic)
-                entity_time = time.time() - entity_start
-                clause.metadata['entities'] = entities
-                chapter_entities_count += len(entities)
-                clause.metadata['semantics_enriched'] = True
-
-                # 每条款处理完记录进度
-                self.logger.info(f"[LLM分块]   → 条款 {clause_idx + 1}/{len(chapter_clauses)} 完成, topic={topic[:20] if topic else '(空)'}, entities={len(entities)} 个 (topic提取:{topic_time:.1f}s entity提取:{entity_time:.1f}s)")
-
+            chapter_entities_count = sum(len(c.metadata.get("entities", [])) for c in chapter_clauses)
             para_time = time.time() - para_start
-            self.logger.info(f"[LLM分块]   ← 章节 {chapter_num} 条款分析完成: {len(chapter_clauses)} 条文, {chapter_entities_count} 实体 (总耗时 {para_time:.1f}s)")
+
+            self.logger.info(
+                f"[LLM分块]   ← 章节 {chapter_num} 条款分析完成: {len(chapter_clauses)} 条文, "
+                f"{chapter_entities_count} 实体 (并行耗时 {para_time:.1f}s)"
+            )
 
             # 构建该章节的文本（用于 section.content）
             chapter_texts = []
@@ -2292,7 +2342,6 @@ topic：{topic}
                 title=chapter_title,
                 content=chapter_text[:500] if chapter_text else ""
             )
-            result.sections.append(section)
 
             # 更新检查点
             current_checkpoint.current_chapter_index = i
@@ -2301,10 +2350,6 @@ topic：{topic}
                 current_checkpoint.chapter_plan[i].completed_at = datetime.now().isoformat()
                 current_checkpoint.chapter_plan[i].clauses_count = len(chapter_clauses)
                 current_checkpoint.chapter_plan[i].elements_count = chapter_entities_count
-
-            # 将条款添加到检查点
-            for clause in chapter_clauses:
-                current_checkpoint.completed_clauses.append(self._clause_to_dict(clause))
 
             if project_id:
                 self._save_checkpoint(project_id, current_checkpoint)
@@ -2316,24 +2361,37 @@ topic：{topic}
                 checkpoint_info={
                     "current_chapter": chapter_num,
                     "total_chapters": chapter_count,
-                    "completed_chapters": i + 1,
                     "completed_clauses_count": len(all_clauses) + len(chapter_clauses),
                     "chapter_completed": True
                 }
             )
-            self.logger.info(f"[LLM分块] ✅ 章节 {chapter_num} 处理完成，检查点已保存")
+            self.logger.info(f"[LLM分块] ✅ 章节 {chapter_num} 处理完成，JSONL 已增量写入")
 
-            # 记录结果
+            chapter_results.append((section, list(chapter_clauses)))
             all_clauses.extend(chapter_clauses)
 
         # =====================================================================
-        # Step 3: 保存结果
+        # Step 3: 保存结果（JSONL 已增量写入，sections + edges 最后写入）
         # =====================================================================
-        self.logger.info(f"[LLM分块] Step 3/4: 保存分析结果")
-        self._report_progress(0.80, "💾 保存 intelligent_chunks.json...")
+        self.logger.info(f"[LLM分块] Step 3/4: 保存 sections + edges 元数据")
+        self._report_progress(0.80, "💾 保存 sections + edges 元数据...")
 
+        # 从 chapter_results 构建 sections
+        result.sections = [cr[0] for cr in chapter_results]
         result.clauses = all_clauses
         result.edges = all_edges
+
+        # 将 sections + edges 写入 sections JSON（供 get_intelligent_chunks 读取）
+        if project_id:
+            sections_data_out = [
+                {"chapter_number": s.chapter_number, "title": s.title, "content": s.content}
+                for s in result.sections
+            ]
+            from ..models.project import ProjectManager
+            ProjectManager.write_sections_json(project_id, sections_data_out, edges=all_edges or [])
+            # 生成前端可直接使用的章节树文件
+            ProjectManager.build_intelligent_chunks_tree(project_id)
+            self.logger.info(f"[LLM分块] ✅ intelligent_chunks_tree.json 已生成")
 
         # =====================================================================
         # Step 4: 汇总报告
@@ -2441,7 +2499,7 @@ topic：{topic}
             return []
 
         try:
-            self.logger.info(f"[LLM 实体提取] 开始, clause_text长度={len(clause_text)}, topic={topic[:20] if topic else '(空)'}")
+            self.logger.info(f"[LLM 实体提取] 开始, clause_text长度={len(clause_text)}, topic={topic if topic else '(空)'}")
             response = self._call_llm_with_retry(
                 messages=[
                     {"role": "system", "content": self.ENTITY_SYSTEM_PROMPT},
@@ -2767,7 +2825,8 @@ topic：{topic}
                     y0 = min(bb[1] for bb in bboxes)
                     x1 = max(bb[2] for bb in bboxes)
                     y1 = max(bb[3] for bb in bboxes)
-                    merged_bboxs.append({"page": p_idx + 1, "bbox": [x0, y0, x1, y1]})
+                    # 简化格式: [page, x0, y0, x1, y1]
+                    merged_bboxs.append([p_idx + 1, x0, y0, x1, y1])
 
                 clause.metadata['bboxs'] = merged_bboxs
 

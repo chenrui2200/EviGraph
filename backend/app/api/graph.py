@@ -718,8 +718,8 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
                     "elements": extracted_elements,
                     "edges": getattr(result, 'edges', []) or []
                 }
-                ProjectManager.save_intelligent_chunks(project_id, chunks_result)
-                build_logger.info(f"[{recovery_task_id}] ✅ intelligent_chunks.json 保存成功")
+                ProjectManager.save_chunks_result(project_id, chunks_result)
+                build_logger.info(f"[{recovery_task_id}] ✅ intelligent_chunks.jsonl 保存成功")
                 save_success = True
             except Exception as save_err:
                 build_logger.error(f"[{recovery_task_id}] 序列化 intelligent_chunks.json 失败: {save_err}，尝试检查点兜底...")
@@ -750,8 +750,8 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
                             ] if fallback_checkpoint.completed_clauses else [],
                             "edges": [],
                         }
-                        ProjectManager.save_intelligent_chunks(project_id, chunks_result)
-                        build_logger.info(f"[{recovery_task_id}] ✅ 检查点兜底保存成功")
+                        ProjectManager.save_chunks_result(project_id, chunks_result)
+                        build_logger.info(f"[{recovery_task_id}] ✅ 检查点兜底保存成功（JSONL）")
                         save_success = True
                     else:
                         build_logger.error(f"[{recovery_task_id}] 无法兜底：检查点数据也不存在")
@@ -1178,8 +1178,8 @@ def _backfill_page_info(project_id: str, intelligent_chunks_data: Dict, logger) 
 
     if filled_count > 0:
         # 保存回填后的数据
-        ProjectManager.save_intelligent_chunks(project_id, intelligent_chunks_data)
-        logger.info(f"[{project_id}] 回填 page: 成功保存 {filled_count} 个条款的 page 信息到 intelligent_chunks.json")
+        ProjectManager.save_chunks_result(project_id, intelligent_chunks_data)
+        logger.info(f"[{project_id}] 回填 page: 成功保存 {filled_count} 个条款的 page 信息到 intelligent_chunks.jsonl")
 
 
 # ============== Interface 1: Upload Files and Generate Ontology ==============
@@ -2802,13 +2802,12 @@ def intelligent_chunk():
 
         # 如果需要重置，删除所有检查点和旧的智能分块结果
         if reset:
-            # 删除旧的 intelligent_chunks.json（确保下次重新分析时生成新数据）
-            existing_chunks = ProjectManager.get_intelligent_chunks(project_id)
-            if existing_chunks:
-                chunks_path = ProjectManager._get_intelligent_chunks_path(project_id)
-                if os.path.exists(chunks_path):
-                    os.remove(chunks_path)
-                    logger.info(f"[{project_id}] 旧的 intelligent_chunks.json 已删除（重置）")
+            # 删除旧的 intelligent_chunks.json + JSONL + sections JSON
+            for path_attr in ('_get_intelligent_chunks_path', '_get_intelligent_chunks_jsonl_path', '_get_intelligent_sections_path'):
+                path = getattr(ProjectManager, path_attr)(project_id)
+                if os.path.exists(path):
+                    os.remove(path)
+                    logger.info(f"[{project_id}] 旧文件已删除（重置）: {os.path.basename(path)}")
 
             if checkpoint_v2:
                 ProjectManager.delete_chunk_checkpoint_v2(project_id)
@@ -2968,8 +2967,8 @@ def intelligent_chunk():
                         # 保存边关系
                         "edges": getattr(result, 'edges', []) or []
                     }
-                    ProjectManager.save_intelligent_chunks(project_id, chunks_result)
-                    chunker_logger.info(f"[{task_id}] ✅ intelligent_chunks.json 保存成功: "
+                    ProjectManager.save_chunks_result(project_id, chunks_result)
+                    chunker_logger.info(f"[{task_id}] ✅ intelligent_chunks.jsonl 保存成功: "
                                         f"{len(chunks_result['sections'])} 章节, "
                                         f"{len(chunks_result['clauses'])} 条文, "
                                         f"{len(chunks_result['elements'])} 要素, "
@@ -3008,8 +3007,8 @@ def intelligent_chunk():
                                 "elements": fallback_elements,
                                 "edges": [],
                             }
-                            ProjectManager.save_intelligent_chunks(project_id, chunks_result)
-                            chunker_logger.info(f"[{task_id}] ✅ 检查点兜底保存成功: "
+                            ProjectManager.save_chunks_result(project_id, chunks_result)
+                            chunker_logger.info(f"[{task_id}] ✅ 检查点兜底保存成功（JSONL）: "
                                                 f"{len(chunks_result['sections'])} 章节, "
                                                 f"{len(chunks_result['clauses'])} 条文, "
                                                 f"{len(chunks_result['elements'])} 要素")
@@ -3256,30 +3255,53 @@ def get_chunk_analysis(project_id: str):
     clauses = chunks.get('clauses', [])
     elements = chunks.get('elements', [])
 
-    # 构建章节树形结构
+    # 尝试直接从 tree 文件读取章节树（预生成，无需内存中再分组）
+    tree_path = ProjectManager._get_intelligent_chunks_tree_path(project_id)
+    use_tree_file = os.path.exists(tree_path)
+    if use_tree_file:
+        with open(tree_path, 'r', encoding='utf-8') as f:
+            tree_data = json.load(f)
+        chapter_tree_raw = tree_data.get('chapter_tree', [])
+    else:
+        chapter_tree_raw = None
+
+    # 构建章节树形结构（优先从预生成文件读取，否则内存中构建）
     chapter_tree = {}
-    for section in sections:
-        chapter_num = section.get('chapter_number')
-        if chapter_num:
-            # 获取该章节下的条文
-            chapter_clauses = [
-                c for c in clauses
-                if c.get('parent_chapter') == chapter_num
-            ]
-            # 获取该章节下的要素
-            chapter_elements = [
-                e for e in elements
-                if _get_element_parent_chapter(e) == chapter_num
-            ]
-            chapter_tree[chapter_num] = {
-                "chapter_number": chapter_num,
-                "title": section.get('title', ''),
-                "content": section.get('content', ''),
-                "clauses": chapter_clauses,
-                "elements": chapter_elements,
-                "clause_count": len(chapter_clauses),
-                "element_count": len(chapter_elements)
-            }
+    if use_tree_file and chapter_tree_raw is not None:
+        for ch in chapter_tree_raw:
+            cn = ch.get('chapter_number')
+            if cn is not None:
+                chapter_tree[cn] = {
+                    "chapter_number": cn,
+                    "title": ch.get('title', ''),
+                    "content": ch.get('content', ''),
+                    "clauses": ch.get('clauses', []),
+                    "clause_count": ch.get('clause_count', 0),
+                    "element_count": 0
+                }
+    else:
+        for section in sections:
+            chapter_num = section.get('chapter_number')
+            if chapter_num:
+                # 获取该章节下的条文
+                chapter_clauses = [
+                    c for c in clauses
+                    if c.get('parent_chapter') == chapter_num
+                ]
+                # 获取该章节下的要素
+                chapter_elements = [
+                    e for e in elements
+                    if _get_element_parent_chapter(e) == chapter_num
+                ]
+                chapter_tree[chapter_num] = {
+                    "chapter_number": chapter_num,
+                    "title": section.get('title', ''),
+                    "content": section.get('content', ''),
+                    "clauses": chapter_clauses,
+                    "elements": chapter_elements,
+                    "clause_count": len(chapter_clauses),
+                    "element_count": len(chapter_elements)
+                }
 
     # 按章节号排序（数字章节按数值排，appendix/other 等非数字章节排在末尾）
     def _chapter_sort_key(item):
@@ -3299,9 +3321,7 @@ def get_chunk_analysis(project_id: str):
             elem_type = element.get('type', 'noun_entity')
         element_stats[elem_type] = element_stats.get(elem_type, 0) + 1
 
-    # 构建完整的条文详情列表（带要素关联 + PDF定位）
-    storage = _get_storage()
-    chapters = [v for _, v in sorted_chapters]  # 转为列表供 _get_clause_pdf_location 使用
+    # 构建完整的条文详情列表（带要素关联）
     clause_details = []
     for clause in clauses:
         clause_id = clause.get('clause_id', '')
@@ -3310,11 +3330,6 @@ def get_chunk_analysis(project_id: str):
             e for e in elements
             if e.get('source_clause_id') == clause_id or e.get('chunk_id', '').startswith(f"chunk_{clause.get('page_idx', '')}")
         ]
-        # 尝试从 Neo4j 获取 PDF 定位信息（episode 的 page/bbox/source）
-        pdf_location = _get_clause_pdf_location(
-            storage, project_id, clause_id,
-            clause.get('parent_chapter'), chapters
-        )
         clause_details.append({
             "clause_id": clause_id,
             "clause_title": clause.get('clause_title', ''),
@@ -3348,9 +3363,10 @@ def get_chunk_analysis(project_id: str):
                 }
                 for e in clause.get('entities', [])
             ],
-            "metadata": clause.get('metadata', {}),
-            # PDF 定位信息
-            "pdf_location": pdf_location
+            # bboxs 和 page 已在 clause 顶层直接提供
+            "bboxs": clause.get('bboxs', []),
+            "page": clause.get('page'),
+            "page_idx": clause.get('page_idx'),
         })
 
     # 要素详情列表（支持 LLM 和 MinerU 两种格式）
@@ -3454,50 +3470,6 @@ def _get_project_pdf_filename(project) -> Optional[str]:
     return None
 
 
-def _get_clause_pdf_location(
-    storage, project_id: str, clause_id: str,
-    parent_chapter: Optional[int], chapters: list
-) -> Optional[Dict]:
-    """
-    尝试从 Neo4j 获取 clause 对应的 PDF 定位信息（page, bbox, source）。
-    如果 graph 尚未构建，则基于章节结构估算位置。
-    """
-    try:
-        graph_id = ProjectManager.get_project(project_id).graph_id
-        if graph_id:
-            # 从 Neo4j 查找该 clause 对应的 episode
-            episodes = storage.get_all_clauses_with_metadata(graph_id, limit=1000)
-            for ep in episodes:
-                if ep.get('clause_id') == clause_id:
-                    metadata = ep.get('metadata', {})
-                    bbox = metadata.get('bbox') or ep.get('bbox')
-                    page = metadata.get('page') or ep.get('page')
-                    source = metadata.get('source') or ep.get('source') or ep.get('doc_name', '')
-                    if page or bbox:
-                        return {
-                            "page": page or 1,
-                            "bbox": bbox,
-                            "source": source
-                        }
-    except Exception:
-        pass
-
-    # 回退：基于章节估算 PDF 位置
-    if parent_chapter and chapters and str(parent_chapter).isdigit():
-        # 按章节平均分配 PDF 页码（假设每个章节约 20 页）
-        est_page = max(1, (int(parent_chapter) - 1) * 20 + 1)
-        for ch in chapters:
-            if ch.get('chapter_number') == parent_chapter:
-                return {
-                    "page": est_page,
-                    "bbox": None,
-                    "source": _get_project_pdf_filename(
-                        ProjectManager.get_project(project_id)
-                    ) or ''
-                }
-    return None
-
-
 @graph_bp.route('/chunk/<project_id>/entity', methods=['PATCH'])
 def update_clause_entity(project_id: str):
     """
@@ -3575,7 +3547,7 @@ def update_clause_entity(project_id: str):
                     updated_clause[field] = data[field]
 
         # 保存 JSON 更新
-        ProjectManager.save_intelligent_chunks(project_id, chunks)
+        ProjectManager.save_chunks_result(project_id, chunks)
 
         # 同步 Term 实体到 Neo4j
         if 'terms' in data and data['terms']:

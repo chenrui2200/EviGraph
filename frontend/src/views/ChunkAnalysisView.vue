@@ -299,9 +299,9 @@
                       <span class="entity-label" style="color:#6b7280">📍 位置</span>
                       <template v-if="clause.bboxs?.length">
                         <span v-for="(item, idx) in clause.bboxs" :key="idx" class="entity-tag" style="background:#f3f4f6;color:#374151;border-color:#d1d5db">
-                          P{{ item.page }}: [
-                          {{ item.bbox.slice(0,2).join(',') }},
-                          {{ item.bbox.slice(2).join(',') }}
+                          P{{ item[0] }}: [
+                          {{ item.slice(1,3).join(',') }},
+                          {{ item.slice(3).join(',') }}
                           ]
                         </span>
                       </template>
@@ -1153,13 +1153,13 @@ function buildAnnotations() {
     const loc = c.pdf_location
 
     if (bboxsList.length > 0) {
-      // 使用聚合的 bboxs [{page, bbox}, ...]
+      // 使用聚合的 bboxs [[page, x0,y0,x1,y1], ...]
       for (const item of bboxsList) {
-        if (item.bbox && item.bbox.length >= 4) {
+        if (item.length >= 5) {
           anns.push({
             clauseId: c.clause_id,
-            page: item.page,
-            bbox: item.bbox,
+            page: item[0],
+            bbox: item.slice(1),
             type: 'clause'
           })
         }
@@ -1214,7 +1214,7 @@ async function handleClauseClick(clause) {
   // 优先使用 bboxs（多 bbox），回退到单 bbox 或 pdf_location
   const bboxs = clause.bboxs || []
   if (bboxs.length > 0) {
-    scrollToPage(bboxs[0].page)
+    scrollToPage(bboxs[0][0])
   } else {
     const loc = clause.pdf_location
     const page = loc?.page ?? clause.page ?? ((clause.page_idx != null) ? clause.page_idx + 1 : null)
@@ -1609,7 +1609,7 @@ header.ca-header {
 .reset-chunks-btn { background: none; border: 1px solid #d97706; color: #d97706; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
 .reset-chunks-btn:hover:not(:disabled) { background: #fff7ed; }
 .reset-chunks-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.tree-body { overflow-y: auto; max-height: calc(60vh - 80px); }
+.tree-body { overflow-y: auto; }
 
 .chapter-item { border-bottom: 1px solid #f0f0f0; }
 .chapter-header { display: flex; align-items: center; gap: 8px; padding: 8px 16px; cursor: pointer; font-size: 13px; color: #1a1a2e; }

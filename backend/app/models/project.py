@@ -481,6 +481,24 @@ class ProjectManager:
         return os.path.join(project_dir, 'intelligent_chunks.json')
 
     @classmethod
+    def _get_intelligent_chunks_jsonl_path(cls, project_id: str) -> str:
+        """Get path for LLM intelligent chunks JSONL (incremental per-clause write)"""
+        project_dir = cls._get_project_dir(project_id)
+        return os.path.join(project_dir, 'intelligent_chunks.jsonl')
+
+    @classmethod
+    def _get_intelligent_chunks_tree_path(cls, project_id: str) -> str:
+        """Get path for the complete chapter tree (used by frontend)"""
+        project_dir = cls._get_project_dir(project_id)
+        return os.path.join(project_dir, 'intelligent_chunks_tree.json')
+
+    @classmethod
+    def _get_intelligent_sections_path(cls, project_id: str) -> str:
+        """Get path for sections metadata (written separately)"""
+        project_dir = cls._get_project_dir(project_id)
+        return os.path.join(project_dir, 'intelligent_chunks_sections.json')
+
+    @classmethod
     def save_intelligent_chunks(cls, project_id: str, chunks: Dict[str, Any]) -> None:
         """Save LLM intelligent chunks result"""
         path = cls._get_intelligent_chunks_path(project_id)
@@ -488,13 +506,193 @@ class ProjectManager:
             json.dump(chunks, f, ensure_ascii=False, indent=2)
 
     @classmethod
-    def get_intelligent_chunks(cls, project_id: str) -> Optional[Dict[str, Any]]:
-        """Get LLM intelligent chunks result"""
-        path = cls._get_intelligent_chunks_path(project_id)
-        if not os.path.exists(path):
+    def append_clause_to_jsonl(cls, project_id: str, clause_dict: Dict[str, Any]) -> None:
+        """Append a single clause as one line in JSONL file"""
+        path = cls._get_intelligent_chunks_jsonl_path(project_id)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(clause_dict, ensure_ascii=False) + '\n')
+
+    @classmethod
+    def write_sections_json(cls, project_id: str, sections: List[Dict[str, Any]], edges: List[Dict] = None) -> None:
+        """Write sections + edges metadata to separate JSON file"""
+        path = cls._get_intelligent_sections_path(project_id)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "source": "llm",
+                "sections": sections,
+                "clauses": [],
+                "elements": [],
+                "edges": edges or []
+            }, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def assemble_intelligent_chunks_from_jsonl(cls, project_id: str) -> Dict[str, Any]:
+        """Read all JSONL lines and assemble into final intelligent_chunks.json structure"""
+        jsonl_path = cls._get_intelligent_chunks_jsonl_path(project_id)
+        sections_path = cls._get_intelligent_sections_path(project_id)
+
+        if not os.path.exists(jsonl_path):
             return None
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+
+        # Read clauses from JSONL
+        clauses = []
+        with open(jsonl_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    clauses.append(json.loads(line))
+
+        # 按章节 + 条文编号排序（并发写入顺序不确定，读取时统一排序）
+        clauses = sorted(clauses, key=lambda c: (
+            c.get('parent_chapter') or 0,
+            c.get('clause_id') or ''
+        ))
+
+        # Read sections
+        sections = []
+        elements = []
+        edges = []
+        if os.path.exists(sections_path):
+            with open(sections_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+                sections = meta.get('sections', [])
+                elements = meta.get('elements', [])
+                edges = meta.get('edges', [])
+
+        return {
+            "source": "llm",
+            "sections": sections,
+            "clauses": clauses,
+            "elements": elements,
+            "edges": edges
+        }
+
+    @classmethod
+    def save_chunks_result(cls, project_id: str, chunks_result: Dict[str, Any]) -> None:
+        """
+        将 chunk() 返回的结果写入 JSONL + sections JSON（替代一次性写 JSON）
+        - clauses 逐条写入 JSONL（覆盖已有内容）
+        - sections + edges 写入 sections JSON
+        """
+        # 清空并写入 clauses 到 JSONL
+        jsonl_path = cls._get_intelligent_chunks_jsonl_path(project_id)
+        with open(jsonl_path, 'w', encoding='utf-8') as f:
+            for clause in chunks_result.get('clauses', []):
+                f.write(json.dumps(clause, ensure_ascii=False) + '\n')
+
+        # 写入 sections + edges
+        cls.write_sections_json(
+            project_id,
+            chunks_result.get('sections', []),
+            edges=chunks_result.get('edges', [])
+        )
+
+    @classmethod
+    def build_intelligent_chunks_tree(cls, project_id: str) -> Dict[str, Any]:
+        """
+        从 JSONL 组装完整的章节树结构并写入 intelligent_chunks_tree.json
+        - 章节树：sections + clauses 按 chapter_number 分组
+        - 前端直接读取此文件，无需内存中再分组
+        """
+        jsonl_path = cls._get_intelligent_chunks_jsonl_path(project_id)
+        sections_path = cls._get_intelligent_sections_path(project_id)
+
+        # 读取排序后的 clauses
+        clauses = []
+        if os.path.exists(jsonl_path):
+            with open(jsonl_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        clauses.append(json.loads(line))
+
+        # 读取 sections
+        sections = []
+        edges = []
+        if os.path.exists(sections_path):
+            with open(sections_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+                sections = meta.get('sections', [])
+                edges = meta.get('edges', [])
+
+        # 构建章节树
+        chapter_tree = {}
+        for section in sections:
+            chapter_num = section.get('chapter_number')
+            if chapter_num is None:
+                continue
+            chapter_clauses = [c for c in clauses if c.get('parent_chapter') == chapter_num]
+            chapter_tree[chapter_num] = {
+                "chapter_number": chapter_num,
+                "title": section.get('title', ''),
+                "content": section.get('content', ''),
+                "clauses": chapter_clauses,
+                "clause_count": len(chapter_clauses)
+            }
+
+        # 按章节号排序
+        def _sort_key(item):
+            k = item[0]
+            return (0, int(k)) if str(k).isdigit() else (1, str(k))
+        sorted_chapters = sorted(chapter_tree.items(), key=_sort_key)
+
+        tree = {
+            "source": "llm",
+            "sections": sections,
+            "clauses": clauses,
+            "chapter_tree": [v for _, v in sorted_chapters],
+            "summary": {
+                "total_chapters": len(sorted_chapters),
+                "total_clauses": len(clauses)
+            },
+            "edges": edges
+        }
+
+        # 写入文件
+        tree_path = cls._get_intelligent_chunks_tree_path(project_id)
+        with open(tree_path, 'w', encoding='utf-8') as f:
+            json.dump(tree, f, ensure_ascii=False, indent=2)
+
+        return tree
+
+    @classmethod
+    def get_intelligent_chunks(cls, project_id: str) -> Optional[Dict[str, Any]]:
+        """Get LLM intelligent chunks result - 优先从 JSONL 组装，fallback 到 JSON"""
+        jsonl_path = cls._get_intelligent_chunks_jsonl_path(project_id)
+
+        # 优先从 JSONL 组装
+        if os.path.exists(jsonl_path):
+            result = cls.assemble_intelligent_chunks_from_jsonl(project_id)
+            if result:
+                # 从 clauses 提取 elements（get_intelligent_chunks 需要完整 elements）
+                clauses = result.get('clauses', [])
+                elements = []
+                seen_keys = set()
+                for c in clauses:
+                    for ent in c.get('entities', []):
+                        key = str(ent) + "|" + c.get('clause_id', '')
+                        if key not in seen_keys:
+                            seen_keys.add(key)
+                            elements.append({
+                                "element_type": "noun_entity",
+                                "key": ent if isinstance(ent, str) else "",
+                                "value": "",
+                                "unit": "",
+                                "source_clause_id": c.get('clause_id', ''),
+                                "scope_prefix": c.get('scope_prefix'),
+                                "chapter": c.get('chapter'),
+                                "metadata": {}
+                            })
+                result['elements'] = elements
+                return result
+
+        # Fallback: 旧 JSON 格式
+        path = cls._get_intelligent_chunks_path(project_id)
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+
+        return None
 
     # =========================================================================
     # MinerU 原始解析结果
