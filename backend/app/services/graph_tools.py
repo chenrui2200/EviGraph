@@ -574,8 +574,8 @@ class GraphToolsService:
         fact_list_str = ""
         facts_to_process = facts[:30]
         for i, f in enumerate(facts_to_process):
-            # 优先使用 original_text（真实条款内容），否则用 text
-            raw_text = f.get('original_text', '').strip() or f.get('text', '')
+            # 优先使用 original_text（条款完整内容），否则用 text（也包含摘要）
+            raw_text = f.get('original_text', '').strip() or f.get('text', '').strip()
             relation = f.get('relation_name', '')
             source = f.get('source', 'Graph')
             page = f.get('page', '')
@@ -610,11 +610,13 @@ class GraphToolsService:
 请输出打分后的结果 JSON："""
 
         logger.info(f"[Rerank Prompt] facts_count={len(facts_to_process)}, prompt_length={len(rerank_prompt)}")
-        logger.debug(f"[Rerank Prompt Full]\n{rerank_prompt}")
+        logger.info(f"[Rerank Prompt Full]\n{rerank_prompt}")
 
         try:
             response = self.llm.chat_json(messages=[{"role": "user", "content": rerank_prompt}], temperature=0.1)
+            logger.info(f"[Rerank LLM Raw Response] {response}")
             rerank_results = response.get("rerank_results", [])
+            logger.info(f"[Rerank LLM] returned {len(rerank_results)} scored items")
 
             # Map results
             scored_facts = []
@@ -1076,13 +1078,25 @@ Your response:"""
                 f_with_idx['_row_idx'] = row_idx
                 all_facts.append(f_with_idx)
 
+        # 日志：每个 fact 的原文和所属 row
+        for i, f in enumerate(all_facts):
+            text_full = f.get('text', '') or ''
+            logger.info(f"[Rerank] input fact[{i}] row={f.get('_row_idx')}: score={f.get('relevance_score', 'N/A')}, text={text_full}")
+
         # Stage 2: LLM 重排
         scored_facts = []
         rows_with_scored = []
         if all_facts:
-            logger.info(f"[Stage 2] LLM 重排: input=facts:{len(all_facts)}")
+            logger.info(f"[Stage 2] LLM 重排: input=facts:{len(all_facts)}, query={query[:60]}")
             scored_facts = self.rerank_facts(query, all_facts)
             scored_facts_sorted = sorted(scored_facts, key=lambda f: f.get('relevance_score', 0), reverse=True)
+            # 日志：LLM 打分后每个 fact 的分数和理由
+            for i, f in enumerate(scored_facts_sorted):
+                score = f.get('relevance_score', 0)
+                reason = f.get('relevance_reasoning', '')
+                text_preview = (f.get('text', '') or '')[:80]
+                pass_mark = 'PASS' if (score or 0) >= filter_threshold else 'FAIL'
+                logger.info(f"[Rerank] scored fact[{i}] score={score} ({pass_mark}, thresh={filter_threshold}): {text_preview}... | reason={reason}")
             logger.info(f"[Stage 2] LLM 重排: output=facts:{len(scored_facts_sorted)}")
 
             # 将打分 facts 挂回 rows（全部打分结果）
@@ -1743,6 +1757,10 @@ Your response:"""
             if clause_uuids_list:
                 clause_nodes_map = self.storage.get_nodes_batch(clause_uuids_list)
                 clause_pdf_info = self._batch_get_node_pdf_info(clause_uuids_list)
+                # 日志：Clause 节点的 summary 长度，确认内容是否为空
+                for cuid, cdata in clause_nodes_map.items():
+                    summary_len = len(cdata.get("summary", "") or "")
+                    logger.info(f"[Clause] uuid={cuid[:8]}, name={cdata.get('name')}, summary_len={summary_len}, labels={cdata.get('labels')}")
 
             # Step 5: 构建 ObjectFirstRow
             rows = []
@@ -1834,14 +1852,16 @@ Your response:"""
                         page = pdf_info.get("page")
                         bbox = pdf_info.get("bbox")
 
-                        fact_text = f"条款: {clause_name}"
+                        clause_summary = clause_data.get("summary", "") or clause_data.get("data", "")
+                        # text 包含完整条款内容，用于 rerank 和 LLM 推理
+                        fact_text = f"条款: {clause_name}\n{clause_summary}" if clause_summary else f"条款: {clause_name}"
                         norm = self.normalize_text(fact_text)
                         if norm and norm not in seen_fact_texts:
                             seen_fact_texts.add(norm)
                             fact_entry: Dict[str, Any] = {
                                 "uuid": clause_uuid,
                                 "text": fact_text,
-                                "original_text": clause_data.get("summary", ""),
+                                "original_text": clause_summary,  # summary 或 data 的完整内容
                                 "source": pdf_info.get("source") or "Graph",
                                 "page": page,
                                 "bbox": bbox,

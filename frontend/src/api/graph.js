@@ -196,6 +196,19 @@ export function rerankFacts(data) {
 }
 
 /**
+ * LLM 推理问答：基于过滤后的 facts 生成回答
+ * @param {Object} data - Contains facts, query, temperature
+ * @returns {Promise}
+ */
+export function llmAnswer(data) {
+  return service({
+    url: '/api/report/tools/llm-answer',
+    method: 'post',
+    data
+  })
+}
+
+/**
  * AI Q&A - retrieval from multiple graphs + LLM answering
  * @param {Object} data - Contains graph_ids, query
  * @returns {Promise}

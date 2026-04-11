@@ -1702,6 +1702,7 @@ class Neo4jStorage(GraphStorage):
             "name": display_name,
             "labels": display_labels,
             "summary": props.get("summary", ""),
+            "data": props.get("data", ""),
             "definition": props.get("definition", ""),
             "attributes": attributes,
             "created_at": props.get("created_at"),

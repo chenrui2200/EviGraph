@@ -226,7 +226,7 @@
                 <div class="thermometer-container">
                   <input type="range" v-model="workflowData.filterThreshold" min="50" max="100" step="5" class="thermometer-input" />
                   <div class="thermometer-track">
-                    <div class="thermometer-fill" :style="{ width: workflowData.filterThreshold + '%', background: getThresholdColor(workflowData.filterThreshold) }"></div>
+                    <div class="thermometer-fill" :style="{ width: ((workflowData.filterThreshold - 50) / 50 * 100) + '%', background: getThresholdColor(workflowData.filterThreshold) }"></div>
                   </div>
                 </div>
                 <p class="config-hint">仅将高于此分数的检索事实发送给大模型推理</p>
@@ -564,7 +564,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { getProjectList, updateProject, rerankFacts } from '../api/graph'
+import { getProjectList, updateProject, rerankFacts, llmAnswer } from '../api/graph'
 import { hitTestSearch } from '../composables/useHitTestSearch'
 import { saveApp, getApp, publishApp, executeAppApi } from '../api/ai_app'
 
@@ -1060,13 +1060,13 @@ const runWorkflow = async () => {
 
   running.value = true
   resetWorkflow()
+  const workflowStart = Date.now()
 
   try {
-    // 检索阶段 - 设置 retrieval 节点为 running
+    // ===== Stage 1: 知识库检索 =====
     const retrievalNode = nodes.value.find(n => n.type === 'retrieval')
     if (retrievalNode) retrievalNode.status = 'running'
 
-    // 使用公共检索方法（与 Hit Test 完全一致）
     const { rows, durationMs } = await hitTestSearch({
       graphId: workflowData.value.selectedGraphIds,
       query: workflowData.value.query,
@@ -1075,7 +1075,6 @@ const runWorkflow = async () => {
       rootTypes: workflowData.value.rootTypes,
     })
 
-    // 检索完成
     const retrievalDuration = (durationMs / 1000).toFixed(2)
     if (retrievalNode) {
       retrievalNode.status = 'completed'
@@ -1089,40 +1088,75 @@ const runWorkflow = async () => {
     const rerankNode = nodes.value.find(n => n.type === 'rerank')
     if (rerankNode) rerankNode.status = 'running'
 
+    const rerankStart = Date.now()
     const rerankRes = await rerankFacts({
       rows: rows,
       query: workflowData.value.query,
       filter_threshold: workflowData.value.filterThreshold,
     })
 
+    // fallback: 使用原始 facts
+    let filteredFacts = results.value.facts
+
     if (rerankRes.success && rerankRes.data) {
+      const rerankDuration = ((Date.now() - rerankStart) / 1000).toFixed(2)
       if (rerankNode) {
         rerankNode.status = 'completed'
-        const rerankDuration = ((Date.now() - durationMs) / 1000 - parseFloat(retrievalDuration)).toFixed(2)
         rerankNode.duration = rerankDuration
       }
-      // 更新重排结果
       results.value.rerank_results = rerankRes.data.scored_facts || []
       results.value.facts = rerankRes.data.filtered_facts || rerankRes.data.scored_facts || []
+      filteredFacts = rerankRes.data.filtered_facts || rerankRes.data.scored_facts || []
       if (rerankRes.data.rows && rerankRes.data.rows.length > 0) {
         results.value.rows = rerankRes.data.rows
       }
     } else {
-      if (rerankNode) rerankNode.status = 'completed'
+      if (rerankNode) {
+        rerankNode.status = 'completed'
+        rerankNode.duration = ((Date.now() - rerankStart) / 1000).toFixed(2)
+      }
     }
 
-    // output 节点状态
+    // ===== Stage 3: LLM 推理 =====
+    const llmNode = nodes.value.find(n => n.type === 'llm')
+    if (llmNode) llmNode.status = 'running'
+
+    const llmStart = Date.now()
+    const llmRes = await llmAnswer({
+      facts: filteredFacts,
+      query: workflowData.value.query,
+      temperature: workflowData.value.temperature,
+    })
+
+    if (llmRes.success && llmRes.data) {
+      const llmDuration = ((Date.now() - llmStart) / 1000).toFixed(2)
+      if (llmNode) {
+        llmNode.status = 'completed'
+        llmNode.duration = llmDuration
+      }
+      results.value.answer = llmRes.data.answer || ''
+      if (llmRes.data.prompts) {
+        results.value.prompts = llmRes.data.prompts
+      }
+    } else {
+      if (llmNode) {
+        llmNode.status = 'completed'
+        llmNode.duration = ((Date.now() - llmStart) / 1000).toFixed(2)
+      }
+    }
+
+    // ===== Stage 4: 输出 =====
     const outputNode = nodes.value.find(n => n.type === 'output')
     if (outputNode) {
       outputNode.status = 'completed'
-      outputNode.duration = (durationMs / 1000 + parseFloat(rerankNode?.duration || 0)).toFixed(2)
+      outputNode.duration = ((Date.now() - workflowStart) / 1000).toFixed(2)
       nextTick(() => {
         renderEvidenceScreenshots('node')
       })
     }
   } catch (err) {
     console.error('Workflow error:', err)
-    alert('流程执行出错')
+    alert('流程执行出错: ' + (err.message || err))
     nodes.value.forEach(n => { if (n.status === 'running') n.status = 'failed' })
   } finally {
     running.value = false

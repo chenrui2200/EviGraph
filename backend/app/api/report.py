@@ -189,6 +189,80 @@ def rerank_facts():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@report_bp.route('/tools/llm-answer', methods=['POST'])
+def llm_answer():
+    """
+    LLM 推理问答：接收过滤后的 facts + query，构建 prompt 并调用 LLM 生成回答。
+
+    POST body:
+        facts: List[Dict] - 过滤后的 fact 列表（含 text, source, page 等）
+        query: str - 用户问题
+        temperature: float (default 0.7)
+    """
+    data = request.get_json() or {}
+    facts = data.get('facts', [])
+    query = data.get('query', '')
+    temperature = float(data.get('temperature', 0.7))
+
+    if not query:
+        return jsonify({"success": False, "error": "query is required"}), 400
+
+    try:
+        from ..utils.llm_client import LLMClient
+        llm = LLMClient()
+
+        # 构建 facts 文本（带来源标注）
+        facts_text_parts = []
+        for i, f in enumerate(facts):
+            text = f.get('text', '')
+            source = f.get('source', '')
+            page = f.get('page', '')
+            source_str = f"（来源: {source}" + (f", 页码: {page}" if page else "") + "）" if source else ""
+            facts_text_parts.append(f"[{i + 1}] {text}{source_str}")
+
+        facts_text = "\n".join(facts_text_parts) if facts_text_parts else "未找到高于阈值的相关事实。"
+
+        system_prompt = (
+            "你是一个专业的工程标准知识助手。你的任务是基于提供的多跳检索到的【知识参考详情】深度回答用户问题。\n\n"
+            "回答要求：\n"
+            "1. 请先在 <thought> 标签内分析所有检索到的条文关联，确保引用的完整性。\n"
+            "2. 给出最终结论，必须引用具体的条款编号（如：根据 7.6.49 条规定...）。\n"
+            "3. 如果知识涉及多个关联条款，请理清它们的逻辑先后关系。\n"
+            "4. 若信息不足，请如实告知缺失的具体标准名称或编号。"
+        )
+        user_prompt = (
+            f"### 多跳检索结果汇总 (Context from Knowledge Graph):\n{facts_text}\n\n"
+            f"### 用户当前问题 (User Query):\n{query}\n\n"
+            f"请进行深度推理并回答："
+        )
+
+        logger.info(f"LLM Answer: facts={len(facts)}, query={query[:50]}...")
+
+        answer = llm.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+        )
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "answer": answer,
+                "prompts": {
+                    "system": system_prompt,
+                    "user": user_prompt,
+                },
+            },
+        })
+    except Exception as e:
+        logger.error(f"LLM Answer failed: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @report_bp.route('/tasks/cleanup', methods=['POST'])
 def cleanup_tasks():
     """
