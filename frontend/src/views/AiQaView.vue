@@ -128,7 +128,7 @@
                   本次检索命中了 <strong>{{ results.rows.length }}</strong> 个根节点
                   <span v-if="results.rows.length > 0">
                     （Term: {{ results.rows.filter(r => r.object_node?.labels?.includes('Term')).length }},
-                    Object: {{ results.rows.filter(r => r.object_node?.labels?.includes('Object')).length }}），
+                    Entity: {{ results.rows.filter(r => r.object_node?.labels?.includes('Entity')).length }}），
                     共 <strong>{{ results.rows.reduce((s, r) => s + (r.facts?.length || 0), 0) }}</strong> 条关联事实。
                   </span>
                   <template v-if="results.searchTimings.object_s || results.searchTimings.term_s">
@@ -564,7 +564,8 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { getProjectList, aiQa, updateProject, searchEntityTopicClause } from '../api/graph'
+import { getProjectList, updateProject, rerankFacts } from '../api/graph'
+import { hitTestSearch } from '../composables/useHitTestSearch'
 import { saveApp, getApp, publishApp, executeAppApi } from '../api/ai_app'
 
 const props = defineProps({
@@ -1061,95 +1062,63 @@ const runWorkflow = async () => {
   resetWorkflow()
 
   try {
-    // 使用与 Hit Test 相同的固定 2 跳路径检索（Entity/Term → Topic → Clause）
-    const allRows = []
-    for (const graphId of workflowData.value.selectedGraphIds) {
-      for (const rootType of workflowData.value.rootTypes) {
-        const res = await searchEntityTopicClause({
-          graph_id: graphId,
-          query: workflowData.value.query,
-          limit: 15,
-          root_type: rootType
-        })
-        if (res.success && res.data.rows) {
-          allRows.push(...res.data.rows.map(r => ({ ...r, root_type: rootType })))
-        }
-      }
+    // 检索阶段 - 设置 retrieval 节点为 running
+    const retrievalNode = nodes.value.find(n => n.type === 'retrieval')
+    if (retrievalNode) retrievalNode.status = 'running'
+
+    // 使用公共检索方法（与 Hit Test 完全一致）
+    const { rows, durationMs } = await hitTestSearch({
+      graphId: workflowData.value.selectedGraphIds,
+      query: workflowData.value.query,
+      limit: 15,
+      similarityThreshold: workflowData.value.similarityThreshold,
+      rootTypes: workflowData.value.rootTypes,
+    })
+
+    // 检索完成
+    const retrievalDuration = (durationMs / 1000).toFixed(2)
+    if (retrievalNode) {
+      retrievalNode.status = 'completed'
+      retrievalNode.duration = retrievalDuration
     }
-    // 按相似度阈值过滤
-    const filteredRows = allRows.filter(r => (r.relevance_score || 0) >= workflowData.value.similarityThreshold)
-    // 显示检索结果（不进入 LLM 推理阶段）
-    results.value.rows = filteredRows
-    results.value.facts = filteredRows.flatMap(r => r.facts || [])
-    running.value = false
 
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
+    results.value.rows = rows
+    results.value.facts = rows.flatMap(r => r.facts || [])
 
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
+    // ===== Stage 2: LLM 相关性重排 =====
+    const rerankNode = nodes.value.find(n => n.type === 'rerank')
+    if (rerankNode) rerankNode.status = 'running'
 
-      const chunk = decoder.decode(value)
-      const lines = chunk.split('\n')
+    const rerankRes = await rerankFacts({
+      rows: rows,
+      query: workflowData.value.query,
+      filter_threshold: workflowData.value.filterThreshold,
+    })
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        try {
-          const event = JSON.parse(line.slice(6))
-          const { type, data } = event
-
-          if (type === 'retrieval_start') {
-            nodes.value.find(n => n.id === 'n1').status = 'completed'
-            nodes.value.find(n => n.id === 'n1').duration = '0.01'
-            nodes.value.find(n => n.id === 'n2').status = 'running'
-          } else if (type === 'retrieval_complete') {
-            const node = nodes.value.find(n => n.id === 'n2')
-            node.status = 'completed'
-            node.duration = data.duration
-            results.value.rows = data.rows || []
-            if (data.timings) {
-              results.value.searchTimings = data.timings
-            }
-          } else if (type === 'rerank_start') {
-            // Stage 2 开始：LLM 正在打分
-            const rerankNode = nodes.value.find(n => n.id === 'n_rerank')
-            rerankNode.status = 'running'
-          } else if (type === 'rerank_results') {
-            // Stage 2 完成：存储打分结果，按 filterThreshold 过滤后用于后续
-            const rerankNode = nodes.value.find(n => n.id === 'n_rerank')
-            rerankNode.status = 'completed'
-            rerankNode.duration = data.duration
-            // 保存所有打分 facts（供卡片展示）
-            results.value.facts = data.facts || []
-            results.value.rerank_results = data.facts || []
-          } else if (type === 'prompts_ready') {
-            results.value.prompts = data
-            // 保存过滤后的 facts（用于 Output 节点展示）
-            if (data.filtered_facts) {
-              results.value.facts = data.filtered_facts
-            }
-          } else if (type === 'llm_start') {
-            const llmNode = nodes.value.find(n => n.id === 'n3')
-            if (llmNode) llmNode.status = 'running'
-          } else if (type === 'llm_complete') {
-            const node = nodes.value.find(n => n.id === 'n3')
-            node.status = 'completed'
-            node.duration = data.duration
-            results.value.answer = data.answer
-
-            // Output node
-            const outNode = nodes.value.find(n => n.id === 'n4')
-            outNode.status = 'completed'
-            outNode.duration = data.total_duration
-            nextTick(() => {
-              renderEvidenceScreenshots('node')
-            })
-          }
-        } catch (e) {
-          console.error('Error parsing SSE event:', e)
-        }
+    if (rerankRes.success && rerankRes.data) {
+      if (rerankNode) {
+        rerankNode.status = 'completed'
+        const rerankDuration = ((Date.now() - durationMs) / 1000 - parseFloat(retrievalDuration)).toFixed(2)
+        rerankNode.duration = rerankDuration
       }
+      // 更新重排结果
+      results.value.rerank_results = rerankRes.data.scored_facts || []
+      results.value.facts = rerankRes.data.filtered_facts || rerankRes.data.scored_facts || []
+      if (rerankRes.data.rows && rerankRes.data.rows.length > 0) {
+        results.value.rows = rerankRes.data.rows
+      }
+    } else {
+      if (rerankNode) rerankNode.status = 'completed'
+    }
+
+    // output 节点状态
+    const outputNode = nodes.value.find(n => n.type === 'output')
+    if (outputNode) {
+      outputNode.status = 'completed'
+      outputNode.duration = (durationMs / 1000 + parseFloat(rerankNode?.duration || 0)).toFixed(2)
+      nextTick(() => {
+        renderEvidenceScreenshots('node')
+      })
     }
   } catch (err) {
     console.error('Workflow error:', err)

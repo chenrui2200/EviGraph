@@ -609,6 +609,9 @@ class GraphToolsService:
 
 请输出打分后的结果 JSON："""
 
+        logger.info(f"[Rerank Prompt] facts_count={len(facts_to_process)}, prompt_length={len(rerank_prompt)}")
+        logger.debug(f"[Rerank Prompt Full]\n{rerank_prompt}")
+
         try:
             response = self.llm.chat_json(messages=[{"role": "user", "content": rerank_prompt}], temperature=0.1)
             rerank_results = response.get("rerank_results", [])
@@ -1059,10 +1062,16 @@ Your response:"""
         """
         logger.info(f"run_retrieval_flow: rows={len(final_rows)}, sim_thresh={similarity_threshold}, filter_thresh={filter_threshold}")
 
-        # 收集所有 facts 并附上行索引
+        # 收集所有 facts 并附上行索引（按 fact text 去重）
         all_facts = []
+        seen_fact_keys = set()
         for row_idx, row in enumerate(final_rows):
             for fact in row.facts:
+                # 用 text + source_node_uuid 作为去重 key
+                fact_key = (fact.get('text', ''), fact.get('source_node_uuid', ''))
+                if fact_key in seen_fact_keys:
+                    continue
+                seen_fact_keys.add(fact_key)
                 f_with_idx = dict(fact)
                 f_with_idx['_row_idx'] = row_idx
                 all_facts.append(f_with_idx)

@@ -183,6 +183,19 @@ export function searchEntityTopicClause(data) {
 }
 
 /**
+ * LLM 相关性重排：对检索结果进行 LLM 打分 + 阈值过滤
+ * @param {Object} data - Contains rows, query, filter_threshold
+ * @returns {Promise}
+ */
+export function rerankFacts(data) {
+  return service({
+    url: '/api/report/tools/rerank',
+    method: 'post',
+    data
+  })
+}
+
+/**
  * AI Q&A - retrieval from multiple graphs + LLM answering
  * @param {Object} data - Contains graph_ids, query
  * @returns {Promise}

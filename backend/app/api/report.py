@@ -104,6 +104,91 @@ def search_entity_topic_clause():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@report_bp.route('/tools/rerank', methods=['POST'])
+def rerank_facts():
+    """
+    LLM 相关性重排：接收检索结果 rows，执行 LLM 打分 + 阈值过滤。
+
+    POST body:
+        rows: List[ObjectFirstRow] (序列化后的 dict)
+        query: str
+        filter_threshold: int (0-100, 默认 75)
+    """
+    from ..services.graph_tools import ObjectFirstRow, ObjectPathNode, ObjectPathEdge
+
+    data = request.get_json() or {}
+    rows_data = data.get('rows', [])
+    query = data.get('query', '')
+    filter_threshold = int(data.get('filter_threshold', 75))
+
+    if not query:
+        return jsonify({"success": False, "error": "query is required"}), 400
+    if not rows_data:
+        return jsonify({"success": True, "data": {"scored_facts": [], "filtered_facts": [], "rows": []}})
+
+    try:
+        from flask import current_app
+        storage = current_app.extensions.get('neo4j_storage')
+        if not storage:
+            return jsonify({"success": False, "error": "Storage not available"}), 503
+
+        # 重建 ObjectFirstRow 对象
+        final_rows = []
+        for r in rows_data:
+            paths = [
+                ObjectPathNode(
+                    uuid=p.get('uuid', ''),
+                    name=p.get('name', ''),
+                    labels=p.get('labels', []),
+                    summary=p.get('summary', ''),
+                    depth=p.get('depth', 0),
+                )
+                for p in r.get('traversal_paths', [])
+            ]
+            edges = [
+                ObjectPathEdge(
+                    uuid=e.get('uuid', ''),
+                    name=e.get('name', ''),
+                    fact=e.get('fact', ''),
+                    source_node_uuid=e.get('source_node_uuid', ''),
+                    target_node_uuid=e.get('target_node_uuid', ''),
+                    depth=e.get('depth', 0),
+                )
+                for e in r.get('traversal_edges', [])
+            ]
+            final_rows.append(ObjectFirstRow(
+                object_node=r.get('object_node', {}),
+                traversal_paths=paths,
+                traversal_edges=edges,
+                facts=r.get('facts', []),
+                relevance_score=r.get('relevance_score', 0),
+            ))
+
+        tools = GraphToolsService(storage=storage)
+        rerank_result = tools.run_retrieval_flow(
+            final_rows=final_rows,
+            query=query,
+            similarity_threshold=0,
+            filter_threshold=filter_threshold,
+        )
+
+        logger.info(f"Rerank complete: scored={len(rerank_result.scored_facts)}, filtered={len(rerank_result.filtered_facts)}")
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "scored_facts": rerank_result.scored_facts,
+                "filtered_facts": rerank_result.filtered_facts,
+                "rows": [r.to_dict() for r in rerank_result.rows_with_scored_facts],
+            }
+        })
+    except Exception as e:
+        logger.error(f"Rerank failed: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @report_bp.route('/tasks/cleanup', methods=['POST'])
 def cleanup_tasks():
     """

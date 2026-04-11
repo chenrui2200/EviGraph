@@ -396,7 +396,8 @@
 import { ref, onMounted, computed, nextTick, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
-import { getProject, searchGraph, searchEntityTopicClause, getGraphData } from '../api/graph'
+import { getProject, getGraphData } from '../api/graph'
+import { hitTestSearch } from '../composables/useHitTestSearch'
 
 const route = useRoute()
 const router = useRouter()
@@ -901,31 +902,15 @@ const handleSearch = async () => {
   if (!searchQuery.value.trim() || !graphId.value) return
   searching.value = true
   try {
-    // 并行查询 Entity 和 Term，合并时 Term 排在 Entity 前面
-    // 使用专用路径检索：Entity/Term → Topic → Clause
-    const [entityRes, termRes] = await Promise.all([
-      searchEntityTopicClause({
-        graph_id: graphId.value,
-        query: searchQuery.value,
-        limit: 15,
-        root_type: 'Entity'
-      }),
-      searchEntityTopicClause({
-        graph_id: graphId.value,
-        query: searchQuery.value,
-        limit: 15,
-        root_type: 'Term'
-      })
-    ])
-    searchTimings.value.object_s = (entityRes.duration_ms || 0) / 1000
-    searchTimings.value.term_s = (termRes.duration_ms || 0) / 1000
-
-    const termRows = (termRes.success ? termRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= similarityThreshold.value).map(r => ({ ...r, root_type: 'Term' }))
-    const entityRows = (entityRes.success ? entityRes.data.rows || [] : []).filter(r => (r.relevance_score || 0) >= similarityThreshold.value).map(r => ({ ...r, root_type: 'Entity' }))
-    // similarityThreshold 范围 50-100
-
-    // 合并: Term 排前，Entity 排后
-    allObjectFirstRows.value = [...termRows, ...entityRows]
+    const { rows, durationMs } = await hitTestSearch({
+      graphId: graphId.value,
+      query: searchQuery.value,
+      limit: 15,
+      similarityThreshold: similarityThreshold.value,
+      rootTypes: rootTypes.value,
+    })
+    searchTimings.value.object_s = durationMs / 1000
+    allObjectFirstRows.value = rows
     results.value = { facts: [], nodes: [], edges: [] }
   } catch (err) {
     console.error('Search failed:', err)
