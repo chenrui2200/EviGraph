@@ -7,60 +7,54 @@
       </div>
       <div class="header-status" v-if="loading">
         <div class="spinner-sm"></div>
-        <span>正在分析中...</span>
+        <span>{{ loadingMessage }}</span>
       </div>
     </header>
 
     <main class="report-body" ref="scrollContainer">
       <!-- Welcome State -->
-      <div v-if="!loading && !reportData.answer" class="welcome-screen">
+      <div v-if="!loading && !results.answer" class="welcome-screen">
         <div class="empty-icon">🔎</div>
         <h2>知识库分析助手</h2>
         <p>请在下方输入您的问题，我将为您检索图谱并生成详细的技术报告</p>
       </div>
 
-      <!-- Report Content -->
-      <div v-if="reportData.answer" class="report-content">
-        <!-- 1. Knowledge Sources with Screenshots -->
-        <section class="report-section">
-          <h2 class="section-title">📚 检索依据原文 (Knowledge Evidence)</h2>
-          <div class="evidence-grid">
-            <div v-for="(fact, idx) in reportData.facts" :key="idx" class="evidence-card">
-              <div class="evidence-header">
-                <span class="evidence-idx">证据 #{{ idx + 1 }}</span>
-                <span class="evidence-source">{{ fact.source }} <template v-if="fact.page">(第 {{ fact.page }} 页)</template></span>
-                <span v-if="fact.relevance_score" class="evidence-score" :style="{ color: getThresholdColor(fact.relevance_score) }">
+      <!-- QA Result Report (与 /ai-qa Output 节点一致) -->
+      <div v-if="results.answer" class="qa-result-container">
+        <!-- 1. Knowledge Sources -->
+        <div class="result-section">
+          <div class="section-header">📚 检索依据原文</div>
+          <div v-if="results.facts.length === 0" class="no-evidence-hint">暂无有效知识出处</div>
+          <div v-else class="source-evidence-list">
+            <div v-for="(fact, idx) in results.facts" :key="idx" class="evidence-item">
+              <div class="evidence-meta">
+                <span class="source-tag">来源 {{ idx + 1 }}: {{ fact.source }} <template v-if="fact.page">(P{{ fact.page }})</template></span>
+                <span v-if="fact.relevance_score" class="evidence-score-badge" :style="{ background: getThresholdColor(fact.relevance_score) }">
                   {{ fact.relevance_score }}分
                 </span>
               </div>
-              <div class="evidence-screenshot">
+              <div class="evidence-screenshot-box">
                 <canvas :ref="el => setEvidenceRef(el, idx)" class="evidence-canvas"></canvas>
-                <div v-if="!fact.bbox" class="no-bbox-fallback">
-                  <p class="fact-text-direct">{{ fact.text }}</p>
-                </div>
+                <div v-if="!fact.bbox" class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
               </div>
             </div>
           </div>
-        </section>
+        </div>
 
-        <!-- 2. Reasoning Process -->
-        <section v-if="parsedResult.thought" class="report-section thought-section">
-          <h2 class="section-title">🧠 深度推理过程 (Thinking Process)</h2>
-          <div class="thought-box">
-            {{ parsedResult.thought }}
-          </div>
-        </section>
+        <!-- 2. Thinking Process -->
+        <div v-if="parsedResult.thought" class="result-section">
+          <div class="section-header">🧠 推理过程 (Thinking Process)</div>
+          <div class="thought-content">{{ parsedResult.thought }}</div>
+        </div>
 
         <!-- 3. Final Conclusion -->
-        <section class="report-section conclusion-section">
-          <h2 class="section-title">✨ 最终结论 (Final Conclusion)</h2>
-          <div class="conclusion-box">
-            {{ parsedResult.conclusion }}
-          </div>
-        </section>
+        <div class="result-section">
+          <div class="section-header">✨ 最终结论</div>
+          <div class="conclusion-text">{{ parsedResult.conclusion }}</div>
+        </div>
       </div>
 
-      <!-- Loading Placeholder at the end -->
+      <!-- Loading Placeholder -->
       <div v-if="loading" class="report-loading-placeholder">
         <div class="skeleton-line title"></div>
         <div class="skeleton-line content"></div>
@@ -89,91 +83,45 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { getApp } from '../api/ai_app'
+import { searchEntityTopicClause, rerankFacts, llmAnswer } from '../api/graph'
 
 const route = useRoute()
 const appId = route.params.id
+
+// App info
 const appName = ref('加载中...')
+const appConfig = ref({
+  selectedGraphIds: [],
+  rootTypes: ['Entity', 'Term'],
+  similarityThreshold: 0,
+  filterThreshold: 75,
+  temperature: 0.7,
+})
+
+// UI state
 const userInput = ref('')
 const loading = ref(false)
+const loadingMessage = ref('正在分析中...')
 const scrollContainer = ref(null)
 const textareaRef = ref(null)
 
-const reportData = ref({
+// Results state
+const results = ref({
+  rows: [],
   facts: [],
-  answer: ''
+  rerank_results: [],
+  answer: '',
 })
 
+// Evidence canvas refs
 const evidenceCanvasRefs = ref({})
 
-const setEvidenceRef = (el, idx) => {
-  if (el) evidenceCanvasRefs.value[idx] = el
-}
-
-const getThresholdColor = (val) => {
-  if (val < 40) return '#f56c6c'
-  if (val < 70) return '#e6a23c'
-  return '#67c23a'
-}
-
-const loadApp = async () => {
-  const res = await getApp(appId)
-  if (res.success) {
-    appName.value = res.data.name
-  }
-}
-
-const handleSearch = async () => {
-  if (!userInput.value.trim() || loading.value) return
-
-  const query = userInput.value.trim()
-  loading.value = true
-  userInput.value = ''
-
-  // Clear previous report
-  reportData.value = { facts: [], answer: '' }
-
-  try {
-    const response = await fetch(`${window.location.origin}/api/ai-app/execute/${appId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query })
-    })
-
-    const result = await response.json()
-    if (result.success) {
-      const data = result.data
-      reportData.value = {
-        answer: data.answer,
-        facts: data.retrieved_facts || []
-      }
-
-      console.log('Received facts:', reportData.value.facts.length)
-
-      // Render screenshots after report is ready
-      nextTick(() => {
-        renderAllScreenshots()
-        scrollToTop()
-      })
-    }
-  } catch (err) {
-    console.error('Report generation error:', err)
-    alert('报告生成失败')
-  } finally {
-    loading.value = false
-  }
-}
-
-const scrollToTop = () => {
-  if (scrollContainer.value) {
-    scrollContainer.value.scrollTop = 0
-  }
-}
-
+// ============ Computed ============
 const parsedResult = computed(() => {
-  const text = reportData.value.answer || ''
+  const text = results.value.answer || ''
   let thought = ''
   let conclusion = text
 
@@ -185,14 +133,27 @@ const parsedResult = computed(() => {
   return { thought, conclusion }
 })
 
-// PDF.js Logic
+// ============ Threshold Colors ============
+const getThresholdColor = (val) => {
+  if (val < 40) return '#f56c6c'
+  if (val < 70) return '#e6a23c'
+  return '#67c23a'
+}
+
+// ============ Canvas Refs ============
+const setEvidenceRef = (el, idx) => {
+  if (el) evidenceCanvasRefs.value[idx] = el
+}
+
+// ============ PDF.js ============
 let pdfjsLibInstance = null
+
 const initPdfJs = async () => {
   if (window.pdfjsLib) {
     pdfjsLibInstance = window.pdfjsLib
     return
   }
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const script = document.createElement('script')
     script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
     script.onload = () => {
@@ -200,24 +161,24 @@ const initPdfJs = async () => {
       pdfjsLibInstance.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
       resolve()
     }
+    script.onerror = reject
     document.head.appendChild(script)
   })
 }
 
-const renderAllScreenshots = async () => {
+const renderEvidenceScreenshots = async () => {
   if (!pdfjsLibInstance) await initPdfJs()
   const pdfDocCache = {}
 
-  for (let i = 0; i < reportData.value.facts.length; i++) {
-    const fact = reportData.value.facts[i]
-    const canvas = evidenceCanvasRefs.value[i]
+  const facts = results.value.rerank_results.length > 0
+    ? results.value.rerank_results.filter(f => f.relevance_score >= appConfig.value.filterThreshold)
+    : results.value.facts
 
-    // Check if canvas exists and we have necessary data
+  for (let i = 0; i < facts.length; i++) {
+    const fact = facts[i]
+    const canvas = evidenceCanvasRefs.value[i]
     if (!canvas) continue
-    if (!fact.bbox || !fact.graph_id || !fact.source) {
-      console.log(`Skipping canvas ${i} due to missing data:`, fact.source)
-      continue
-    }
+    if (!fact.bbox || !fact.graph_id || !fact.source) continue
 
     try {
       const cacheKey = `${fact.graph_id}:${fact.source}`
@@ -235,14 +196,12 @@ const renderAllScreenshots = async () => {
 
       const page = await pdfDoc.getPage(fact.page || 1)
       const context = canvas.getContext('2d')
-
       const bbox = fact.bbox
       const padding = 30
       const cropX = Math.max(0, bbox[0] - padding)
       const cropY = Math.max(0, bbox[1] - padding)
       const cropW = (bbox[2] - bbox[0]) + padding * 2
       const cropH = (bbox[3] - bbox[1]) + padding * 2
-
       const scale = 2.5
       const viewport = page.getViewport({ scale })
 
@@ -252,12 +211,9 @@ const renderAllScreenshots = async () => {
       await page.render({ canvasContext: tempCanvas.getContext('2d'), viewport }).promise
 
       const sX = cropX * scale, sY = cropY * scale, sW = cropW * scale, sH = cropH * scale
-
-      // Use parent clientWidth for responsive sizing
       const targetWidth = canvas.parentElement.clientWidth || 400
       canvas.width = targetWidth
       canvas.height = (sH / sW) * targetWidth
-
       context.drawImage(tempCanvas, sX, sY, sW, sH, 0, 0, canvas.width, canvas.height)
 
       context.strokeStyle = 'rgba(255, 69, 0, 0.7)'
@@ -271,6 +227,122 @@ const renderAllScreenshots = async () => {
     } catch (err) {
       console.error('Error rendering screenshot:', err)
     }
+  }
+}
+
+// ============ Load App ============
+const loadApp = async () => {
+  const res = await getApp(appId)
+  if (res.success) {
+    const data = res.data
+    appName.value = data.name
+    const wf = data.workflow_data || {}
+    appConfig.value = {
+      selectedGraphIds: wf.selectedGraphIds || [],
+      rootTypes: wf.rootTypes || ['Entity', 'Term'],
+      similarityThreshold: wf.similarityThreshold || 0,
+      filterThreshold: wf.filterThreshold || 75,
+      temperature: wf.temperature || 0.7,
+    }
+  }
+}
+
+// ============ Main Search Flow ============
+const handleSearch = async () => {
+  if (!userInput.value.trim() || loading.value) return
+  if (appConfig.value.selectedGraphIds.length === 0) {
+    alert('该应用未配置知识库')
+    return
+  }
+
+  const query = userInput.value.trim()
+  loading.value = true
+  loadingMessage.value = '正在检索...'
+  userInput.value = ''
+
+  // Reset results
+  results.value = { rows: [], facts: [], rerank_results: [], answer: '' }
+  evidenceCanvasRefs.value = {}
+
+  try {
+    // ===== Stage 1: 检索 =====
+    loadingMessage.value = '正在知识库检索...'
+    const allRows = []
+    for (const graphId of appConfig.value.selectedGraphIds) {
+      for (const rootType of appConfig.value.rootTypes) {
+        const res = await searchEntityTopicClause({
+          graph_id: graphId,
+          query: query,
+          limit: 15,
+          root_type: rootType,
+        })
+        if (res.success && res.data.rows) {
+          allRows.push(...res.data.rows.map(r => ({ ...r, root_type: rootType })))
+        }
+      }
+    }
+
+    // 按相似度阈值过滤
+    const filteredRows = allRows.filter(r => (r.relevance_score || 0) >= appConfig.value.similarityThreshold)
+    results.value.rows = filteredRows
+    results.value.facts = filteredRows.flatMap(r => r.facts || [])
+
+    if (filteredRows.length === 0) {
+      loadingMessage.value = '未检索到结果'
+      loading.value = false
+      return
+    }
+
+    // ===== Stage 2: LLM 重排 =====
+    loadingMessage.value = '正在 LLM 重排...'
+    const rerankRes = await rerankFacts({
+      rows: filteredRows,
+      query: query,
+      filter_threshold: appConfig.value.filterThreshold,
+    })
+
+    if (rerankRes.success && rerankRes.data) {
+      results.value.rerank_results = rerankRes.data.scored_facts || []
+      // facts = 过滤后的 facts（用于 LLM 推理和证据展示）
+      results.value.facts = rerankRes.data.filtered_facts || rerankRes.data.scored_facts || []
+      if (rerankRes.data.rows && rerankRes.data.rows.length > 0) {
+        results.value.rows = rerankRes.data.rows
+      }
+    }
+
+    // ===== Stage 3: LLM 生成答案 =====
+    loadingMessage.value = '正在生成答案...'
+    const filteredFacts = results.value.rerank_results.length > 0
+      ? results.value.rerank_results.filter(f => f.relevance_score >= appConfig.value.filterThreshold)
+      : results.value.facts
+
+    const llmRes = await llmAnswer({
+      facts: filteredFacts,
+      query: query,
+      temperature: appConfig.value.temperature,
+    })
+
+    if (llmRes.success && llmRes.data) {
+      results.value.answer = llmRes.data.answer || ''
+    }
+
+    // Render evidence screenshots
+    nextTick(() => {
+      renderEvidenceScreenshots()
+      scrollToTop()
+    })
+  } catch (err) {
+    console.error('Report generation error:', err)
+    alert('报告生成失败: ' + err.message)
+  } finally {
+    loading.value = false
+    loadingMessage.value = '正在分析中...'
+  }
+}
+
+const scrollToTop = () => {
+  if (scrollContainer.value) {
+    scrollContainer.value.scrollTop = 0
   }
 }
 
@@ -303,88 +375,213 @@ onMounted(loadApp)
 .report-body {
   flex: 1;
   overflow-y: auto;
-  padding: 30px 20px 100px 20px;
+  padding: 20px;
   scroll-behavior: smooth;
 }
 
-.report-content {
-  max-width: 900px; margin: 0 auto;
-  display: flex; flex-direction: column; gap: 30px;
+/* ========== QA Result Container ========== */
+.qa-result-container {
+  max-width: 900px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
-.report-section {
-  background: #fff; border-radius: 12px; padding: 25px;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.03); border: 1px solid #eef2f5;
+.result-section {
+  background: #fff;
+  border-radius: 12px;
+  padding: 25px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.03);
+  border: 1px solid #eef2f5;
 }
 
-.section-title {
-  font-size: 15px; font-weight: 800; margin-top: 0; margin-bottom: 20px;
-  padding-bottom: 10px; border-bottom: 2px solid #f0f4f8;
-  display: flex; align-items: center; color: #1a1a1a;
+.section-header {
+  font-size: 15px;
+  font-weight: 800;
+  margin-top: 0;
+  margin-bottom: 16px;
+  padding-bottom: 10px;
+  border-bottom: 2px solid #f0f4f8;
+  display: flex;
+  align-items: center;
+  color: #1a1a1a;
 }
 
-.evidence-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 20px; }
-@media (max-width: 600px) {
-  .evidence-grid { grid-template-columns: 1fr; }
+.no-evidence-hint {
+  font-size: 13px;
+  color: #999;
+  text-align: center;
+  padding: 20px;
 }
 
-.evidence-card { border: 1px solid #eee; border-radius: 10px; overflow: hidden; background: #fff; }
-.evidence-header {
-  padding: 8px 12px; background: #f8f9fa; display: flex;
-  justify-content: space-between; font-size: 12px; font-weight: 600;
-  color: #666; border-bottom: 1px solid #eee;
+.source-evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
-.evidence-idx { color: #409eff; }
-.evidence-source { flex: 1; margin: 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.evidence-score { font-weight: 800; }
 
-.evidence-screenshot { background: #525659; padding: 10px; display: flex; justify-content: center; min-height: 100px; }
-.evidence-canvas { max-width: 100%; box-shadow: 0 4px 12px rgba(0,0,0,0.2); background: #fff; }
-.no-bbox-fallback { background: #fff; padding: 15px; width: 100%; }
-.fact-text-direct { font-size: 13px; line-height: 1.6; color: #333; margin: 0; }
+.evidence-item {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  overflow: hidden;
+}
 
-.thought-box { background: #fffbea; border-left: 4px solid #f6ad55; padding: 15px; font-size: 14px; line-height: 1.8; color: #5a6371; white-space: pre-wrap; }
-.conclusion-box { font-size: 16px; line-height: 1.7; color: #2c3e50; font-weight: 500; white-space: pre-wrap; }
+.evidence-meta {
+  padding: 8px 12px;
+  background: #f8f9fa;
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: #666;
+  border-bottom: 1px solid #eee;
+}
 
+.source-tag { color: #409eff; }
+.evidence-score-badge {
+  color: #fff;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.evidence-screenshot-box {
+  background: #525659;
+  padding: 10px;
+  display: flex;
+  justify-content: center;
+}
+
+.evidence-canvas {
+  max-width: 100%;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  background: #fff;
+}
+
+.no-bbox-hint {
+  background: #fff;
+  padding: 15px;
+  width: 100%;
+  font-size: 13px;
+  color: #666;
+  text-align: left;
+}
+
+.thought-content {
+  background: #fffbea;
+  border-left: 4px solid #f6ad55;
+  padding: 15px;
+  font-size: 14px;
+  line-height: 1.8;
+  color: #5a6371;
+  white-space: pre-wrap;
+}
+
+.conclusion-text {
+  font-size: 16px;
+  line-height: 1.8;
+  color: #2c3e50;
+  font-weight: 500;
+  white-space: pre-wrap;
+}
+
+/* ========== Footer ========== */
 .report-footer {
-  position: fixed; bottom: 0; left: 0; right: 0;
-  background: #fff; padding: 15px 20px;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: #fff;
+  padding: 15px 20px;
   border-top: 1px solid #e0e0e0;
   box-shadow: 0 -4px 15px rgba(0,0,0,0.05);
-  display: flex; justify-content: center;
+  display: flex;
+  justify-content: center;
 }
 
 .search-container {
-  max-width: 900px; width: 100%;
-  display: flex; gap: 12px; align-items: flex-end;
+  max-width: 900px;
+  width: 100%;
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
 }
 
 .search-container textarea {
-  flex: 1; padding: 12px 15px; border: 1px solid #ddd;
-  border-radius: 10px; outline: none; transition: border-color 0.2s;
-  font-family: inherit; font-size: 14px; resize: none;
-  max-height: 120px; min-height: 44px;
+  flex: 1;
+  padding: 12px 15px;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  outline: none;
+  transition: border-color 0.2s;
+  font-family: inherit;
+  font-size: 14px;
+  resize: none;
+  max-height: 120px;
+  min-height: 44px;
 }
-.search-container textarea:focus { border-color: #409eff; }
+
+.search-container textarea:focus {
+  border-color: #409eff;
+}
 
 .search-btn {
-  background: #000; color: #fff; border: none;
-  height: 44px; padding: 0 24px; border-radius: 10px;
-  font-weight: 600; cursor: pointer; transition: background 0.2s;
+  background: #000;
+  color: #fff;
+  border: none;
+  height: 44px;
+  padding: 0 24px;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
 }
-.search-btn:hover:not(:disabled) { background: #333; }
-.search-btn:disabled { background: #ccc; cursor: not-allowed; }
 
-.loading-screen, .welcome-screen { text-align: center; margin-top: 10vh; color: #999; }
-.spinner { width: 40px; height: 40px; border: 4px solid #f3f3f3; border-top: 4px solid #000; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 20px; }
-.empty-icon { font-size: 60px; margin-bottom: 20px; opacity: 0.3; }
+.search-btn:hover:not(:disabled) {
+  background: #333;
+}
 
-.report-loading-placeholder { max-width: 900px; margin: 0 auto; padding: 20px; }
-.skeleton-line { background: #eef2f5; border-radius: 4px; margin-bottom: 12px; animation: pulse 1.5s infinite; }
+.search-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+/* ========== Misc ========== */
+.loading-screen, .welcome-screen {
+  text-align: center;
+  margin-top: 10vh;
+  color: #999;
+}
+
+.empty-icon {
+  font-size: 60px;
+  margin-bottom: 20px;
+  opacity: 0.3;
+}
+
+.report-loading-placeholder {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.skeleton-line {
+  background: #eef2f5;
+  border-radius: 4px;
+  margin-bottom: 12px;
+  animation: pulse 1.5s infinite;
+}
+
 .skeleton-line.title { width: 30%; height: 20px; }
 .skeleton-line.content { width: 100%; height: 15px; }
 
 @keyframes pulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 .spinner-sm { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top: 2px solid #fff; border-radius: 50%; animation: spin 1s linear infinite; display: inline-block; }
+
+@media (max-width: 600px) {
+  .evidence-grid { grid-template-columns: 1fr; }
+}
 </style>

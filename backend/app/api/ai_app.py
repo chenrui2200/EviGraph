@@ -5,6 +5,7 @@ from ..services.graph_tools import GraphToolsService
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 import traceback
+import re
 
 logger = get_logger('mirofish.api.ai_app')
 
@@ -145,22 +146,35 @@ def execute_app(app_id: str):
         storage = _get_storage()
         tools = GraphToolsService(storage=storage)
 
-        # ===== Stage 1: 知识库检索（与运行流程一致）=====
+        # ===== Stage 1: 知识库检索（与 AI-QA 前端 hitTestSearch 一致）=====
+        # 使用固定 2 跳路径检索：Entity/Term → Topic → Clause
         logger.info(f"API Exec App {app_id} [Stage 1] 知识库检索: query={query[:30]}, graphs={len(graph_ids)}")
-        dfs_result = tools.search_with_dfs_flow(
-            graph_ids=graph_ids, query=query, limit=20, max_depth=max_depth,
-            root_types=root_types
-        )
+
+        all_rows = []
+        seen_uuids = set()
+        for gid in graph_ids:
+            for root_type in root_types:
+                try:
+                    search_result = tools.search_term_entity_to_clause(
+                        graph_id=gid, query=query, limit=20, root_type=root_type,
+                    )
+                    for row in search_result.rows:
+                        obj_uuid = row.object_node.uuid if row.object_node else None
+                        if obj_uuid and obj_uuid not in seen_uuids:
+                            seen_uuids.add(obj_uuid)
+                            all_rows.append(row)
+                except Exception as e:
+                    logger.warning(f"API Exec App {app_id} search failed for graph={gid}, root_type={root_type}: {e}")
 
         # 相似度阈值过滤 rows
         if similarity_threshold > 0:
-            dfs_result.rows = [r for r in dfs_result.rows if (r.relevance_score or 0) >= similarity_threshold]
+            all_rows = [r for r in all_rows if (r.relevance_score or 0) >= similarity_threshold]
 
-        logger.info(f"API Exec App {app_id} [Stage 1] 完成: rows:{len(dfs_result.rows)}, facts:{sum(len(r.facts) for r in dfs_result.rows)}")
+        logger.info(f"API Exec App {app_id} [Stage 1] 完成: rows:{len(all_rows)}, facts:{sum(len(r.facts) for r in all_rows)}")
 
         # ===== Stage 2+3: LLM 重排 + 阈值过滤（共享方法）=====
         rerank_result = tools.run_retrieval_flow(
-            final_rows=dfs_result.rows,
+            final_rows=all_rows,
             query=query,
             similarity_threshold=similarity_threshold,
             filter_threshold=filter_threshold,
@@ -168,10 +182,17 @@ def execute_app(app_id: str):
 
         logger.info(f"API Exec App {app_id} [Stage 2+3] 完成: scored={len(rerank_result.scored_facts)}, filtered={len(rerank_result.filtered_facts)}")
 
-        # 构建 LLM prompt（与运行流程一致）
-        rows_for_llm = rerank_result.rows_with_filtered_facts
-        facts_text = "\n\n".join(r.to_text() for r in rows_for_llm) if rows_for_llm else "未找到高于阈值的相关事实。"
-        system_prompt = "你是一个专业的工程标准知识助手。你的任务是基于提供的多跳检索到的【知识参考详情】深度回答用户问题。\n\n回答要求：\n1. 请先在 <thought> 标签内分析所有检索到的条文关联，确引用的完整性。\n2. 给出最终结论，必须引用具体的条款编号（如：根据 7.6.49 条规定...）。\n3. 如果知识涉及多个关联条款，请理清它们的逻辑先后关系。\n4. 若信息不足，请如实告知缺失的具体标准名称或编号。"
+        # 构建 LLM prompt（与 /tools/llm-answer 格式一致）
+        # 使用扁平 facts 格式，带来源标注
+        facts_text_parts = []
+        for i, f in enumerate(rerank_result.filtered_facts):
+            text = (f.get('original_text', '') or f.get('text', '') or '').strip()
+            source = f.get('source', '')
+            page = f.get('page', '')
+            source_str = f"（来源: {source}" + (f", 页码: {page}" if page else "") + "）" if source else ""
+            facts_text_parts.append(f"[{i + 1}] {text}{source_str}")
+        facts_text = "\n".join(facts_text_parts) if facts_text_parts else "未找到高于阈值的相关事实。"
+        system_prompt = "你是一个专业的工程标准知识助手。你的任务是基于提供的多跳检索到的【知识参考详情】深度回答用户问题。\n\n回答要求：\n1. 请先在 <thought> 标签内分析所有检索到的条文关联，确保引用的完整性。\n2. 给出最终结论需要详实，必须引用具体的条款编号（如：根据 7.6.49 条规定...）。\n3. 如果知识涉及多个关联条款，请理清它们的逻辑先后关系。\n4. 若信息不足，请如实告知缺失的具体标准名称或编号。"
         user_prompt = f"### 多跳检索结果汇总 (Context from Knowledge Graph):\n{facts_text}\n\n### 用户当前问题 (User Query):\n{query}\n\n请进行深度推理并回答："
 
         llm = LLMClient()
@@ -182,14 +203,72 @@ def execute_app(app_id: str):
 
         logger.info(f"API Exec App {app_id} 完成: answer_length={len(answer)}")
 
+        # 解析 answer 中的 thought/conclusion
+        thought = ''
+        conclusion = answer
+        thought_match = re.match(r'<(?:thought|think)>([\s\S]*?)</(?:thought|think)>', answer, re.IGNORECASE)
+        if thought_match:
+            thought = thought_match.group(1).strip()
+            conclusion = re.sub(r'<(?:thought|think)>[\s\S]*?</(?:thought|think)>', '', answer, flags=re.IGNORECASE).strip()
+
+        # 构建来源 PDF 下载 URL 模板
+        base_url = request.host_url.rstrip('/')
+
+        # 构建结构化证据列表（含 PDF 定位信息）
+        evidence_list = []
+        for idx, fact in enumerate(rerank_result.filtered_facts):
+            graph_id = fact.get('graph_id', '')
+            source = fact.get('source', '')
+            page = fact.get('page')
+            bbox = fact.get('bbox')
+            page_width = fact.get('page_width')
+            page_height = fact.get('page_height')
+            pdf_bboxes = fact.get('pdf_bboxes')
+
+            evidence_item = {
+                "index": idx + 1,
+                "text": fact.get('text', ''),
+                "clause_content": fact.get('original_text', ''),
+                "source_file": source,
+                "page": page,
+                "relevance_score": fact.get('relevance_score', 0),
+                "relevance_reasoning": fact.get('relevance_reasoning', ''),
+                "clause_id": fact.get('uuid', ''),
+            }
+
+            # PDF 定位信息
+            if source and source not in ('Unknown', 'Graph', 'Graph Knowledge', 'Local Search'):
+                evidence_item["pdf"] = {
+                    "download_url": f"{base_url}/api/graph/project/{graph_id}/document/{source}",
+                    "page_index": page or 1,
+                }
+                if bbox and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                    evidence_item["pdf"]["bbox"] = list(bbox[:4])  # [x0, y0, x1, y1]
+                    if page_width:
+                        evidence_item["pdf"]["page_width"] = page_width
+                    if page_height:
+                        evidence_item["pdf"]["page_height"] = page_height
+
+            evidence_list.append(evidence_item)
+
         return jsonify({
             "success": True,
             "data": {
-                "answer": answer,
-                "retrieved_facts": rerank_result.filtered_facts,
-                "all_scored_facts": rerank_result.scored_facts,
-                "rows": [r.to_dict() for r in rerank_result.rows_with_filtered_facts],
+                "query": query,
                 "app_name": app.name,
+                "answer": {
+                    "raw": answer,
+                    "thought": thought,
+                    "conclusion": conclusion,
+                },
+                "evidence": evidence_list,
+                "retrieval_stats": {
+                    "total_rows": len(all_rows),
+                    "total_facts_retrieved": sum(len(r.facts) for r in all_rows),
+                    "facts_scored": len(rerank_result.scored_facts),
+                    "facts_filtered": len(rerank_result.filtered_facts),
+                    "filter_threshold": filter_threshold,
+                },
             }
         })
 
