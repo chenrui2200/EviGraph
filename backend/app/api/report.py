@@ -212,9 +212,10 @@ def llm_answer():
         llm = LLMClient()
 
         # 构建 facts 文本（带来源标注）
+        # 优先使用 original_text（Clause 完整内容），fallback 到 text
         facts_text_parts = []
         for i, f in enumerate(facts):
-            text = f.get('text', '')
+            text = f.get('original_text', '').strip() or f.get('text', '').strip()
             source = f.get('source', '')
             page = f.get('page', '')
             source_str = f"（来源: {source}" + (f", 页码: {page}" if page else "") + "）" if source else ""
@@ -226,7 +227,7 @@ def llm_answer():
             "你是一个专业的工程标准知识助手。你的任务是基于提供的多跳检索到的【知识参考详情】深度回答用户问题。\n\n"
             "回答要求：\n"
             "1. 请先在 <thought> 标签内分析所有检索到的条文关联，确保引用的完整性。\n"
-            "2. 给出最终结论，必须引用具体的条款编号（如：根据 7.6.49 条规定...）。\n"
+            "2. 给出最终结论需要详实，必须引用具体的条款编号（如：根据 7.6.49 条规定...）。\n"
             "3. 如果知识涉及多个关联条款，请理清它们的逻辑先后关系。\n"
             "4. 若信息不足，请如实告知缺失的具体标准名称或编号。"
         )

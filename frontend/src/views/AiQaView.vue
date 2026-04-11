@@ -128,7 +128,7 @@
                   本次检索命中了 <strong>{{ results.rows.length }}</strong> 个根节点
                   <span v-if="results.rows.length > 0">
                     （Term: {{ results.rows.filter(r => r.object_node?.labels?.includes('Term')).length }},
-                    Entity: {{ results.rows.filter(r => r.object_node?.labels?.includes('Entity')).length }}），
+                    Entity: {{ results.rows.filter(r => r.object_node?.labels?.includes('Entity') && !r.object_node?.labels?.includes('Term')).length }}），
                     共 <strong>{{ results.rows.reduce((s, r) => s + (r.facts?.length || 0), 0) }}</strong> 条关联事实。
                   </span>
                   <template v-if="results.searchTimings.object_s || results.searchTimings.term_s">
@@ -1166,11 +1166,21 @@ const runWorkflow = async () => {
 const saveWorkflowApp = async () => {
   saving.value = true
   try {
+    // 保存时同步 selectedProjectIds（用于加载时映射最新 graph_id）
+    const selectedProjectIds = workflowData.value.selectedGraphIds
+      .map(gid => {
+        const p = projects.value.find(p => p.graph_id === gid)
+        return p?.project_id
+      })
+      .filter(Boolean)
     const payload = {
       app_id: appId.value,
       name: appName.value,
       nodes: nodes.value,
-      workflow_data: workflowData.value,
+      workflow_data: {
+        ...workflowData.value,
+        selectedProjectIds,
+      },
       is_published: isPublished.value
     }
     const res = await saveApp(payload)
@@ -1246,6 +1256,33 @@ const loadAppConfig = async (id) => {
       }
       if (app.workflow_data) {
         workflowData.value = { ...workflowData.value, ...app.workflow_data }
+      }
+      // 同步 selectedGraphIds：优先用 selectedProjectIds 映射最新 graph_id
+      const savedProjectIds = workflowData.value.selectedProjectIds || []
+      if (savedProjectIds.length > 0) {
+        // 用保存的 project_id 查找当前最新 graph_id
+        const syncedGraphIds = savedProjectIds
+          .map(pid => {
+            const proj = projects.value.find(p => p.project_id === pid)
+            return proj?.graph_id
+          })
+          .filter(Boolean)
+        workflowData.value.selectedGraphIds = syncedGraphIds
+      } else {
+        // 兼容旧数据：没有 selectedProjectIds，移除已失效的 graph_id
+        const savedGraphIds = workflowData.value.selectedGraphIds || []
+        workflowData.value.selectedGraphIds = savedGraphIds.filter(gid =>
+          projects.value.some(p => p.graph_id === gid)
+        )
+      }
+
+      // 额外检查：如果路由带了 projectId，确保该项目最新 graph_id 被选中
+      const projectId = (!props.id?.startsWith('app_') && props.id !== 'default') ? props.id : null
+      if (projectId) {
+        const proj = projects.value.find(p => p.project_id === projectId)
+        if (proj?.graph_id && !workflowData.value.selectedGraphIds.includes(proj.graph_id)) {
+          workflowData.value.selectedGraphIds.push(proj.graph_id)
+        }
       }
     }
   } catch (err) {

@@ -2820,7 +2820,7 @@ topic：{topic}
                 if chunk_id:
                     clause_chunk_map[current_clause_id].append(chunk_id)
 
-        # 将聚合的 bboxs 写入各 clause 的 metadata
+        # 将聚合的 bboxs 和多 chunk 文本写入各 clause
         for clause in clauses:
             cid = clause.clause_id
             if cid in clause_bbox_map:
@@ -2844,6 +2844,39 @@ topic：{topic}
                 clause.metadata['bboxs'] = merged_bboxs
                 # 同时记录所有来源 chunk_id（去重）
                 clause.metadata['chunks'] = list(dict.fromkeys(clause_chunk_map.get(cid, [])))
+
+            # 合并同一 clause 下所有 chunk 的文本到 content
+            if cid in clause_chunk_map:
+                chunk_ids = clause_chunk_map[cid]
+                if len(chunk_ids) > 1:
+                    # 构建 chunk_id → chunk content 的快速查找表
+                    chunk_content_map = {}
+                    for chunk in chunks_data:
+                        c_id = chunk.get('chunk_id') or chunk.get('metadata', {}).get('chunk_id', '')
+                        if c_id:
+                            chunk_content_map[c_id] = (chunk.get('content') or chunk.get('text') or '').strip()
+                    # 按原始顺序拼接所有 chunk 文本（跳过空内容，去重首行标题重复）
+                    merged_texts = []
+                    seen_first_line = None
+                    for c_id in chunk_ids:
+                        txt = chunk_content_map.get(c_id, '')
+                        if not txt:
+                            continue
+                        first_line = txt.split('\n', 1)[0]
+                        if seen_first_line is None:
+                            seen_first_line = first_line
+                            merged_texts.append(txt)
+                        else:
+                            # 跳过与首 chunk 首行相同的行（标题重复）
+                            if first_line == seen_first_line:
+                                remaining = txt.split('\n', 1)
+                                if len(remaining) > 1 and remaining[1].strip():
+                                    merged_texts.append(remaining[1].strip())
+                            else:
+                                merged_texts.append(txt)
+                    if merged_texts:
+                        clause.content = '\n'.join(merged_texts)
+                        self.logger.info(f"[条款合并] clause_id={cid}: merged {len(chunk_ids)} chunks, content_len={len(clause.content)}")
 
         self.logger.info(f"[章节构建] 完成: {len(sections)} 章节, {len(clauses)} 条款，bboxs 聚合完成")
         return sections, clauses, chapter_plan
