@@ -195,7 +195,7 @@ def llm_answer():
     LLM 推理问答：接收过滤后的 facts + query，构建 prompt 并调用 LLM 生成回答。
 
     POST body:
-        facts: List[Dict] - 过滤后的 fact 列表（含 text, source, page 等）
+        facts: List[Dict] - 过滤后的 fact 列表（含 text, source, page, bbox, graph_id 等）
         query: str - 用户问题
         temperature: float (default 0.7)
     """
@@ -247,10 +247,23 @@ def llm_answer():
             temperature=temperature,
         )
 
+        # 构建 facts 完整信息（含 PDF 可访问 URL）
+        base_url = request.host_url.rstrip('/')
+        enriched_facts = []
+        for i, f in enumerate(facts):
+            item = dict(f)
+            # 如果有 PDF 来源，生成可访问的文档 URL
+            if f.get('source') and f.get('graph_id'):
+                page = f.get('page', 1)
+                doc_url = f"{base_url}/api/graph/project/{f['graph_id']}/document/{f['source']}?page={page}"
+                item['pdf_url'] = doc_url
+            enriched_facts.append(item)
+
         return jsonify({
             "success": True,
             "data": {
                 "answer": answer,
+                "facts": enriched_facts,
                 "prompts": {
                     "system": system_prompt,
                     "user": user_prompt,
