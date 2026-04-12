@@ -229,13 +229,10 @@ def generate_ontology():
 
                     # 构建 jsonl 路径（每个文件一个 jsonl）
                     jsonl_path = os.path.join(ProjectManager._get_project_dir(project.project_id), f'mineru_{orig_name}.jsonl')
-                    # 初始化/清空 jsonl 文件
+                    # 初始化/清空 jsonl 文件（每个 worker 追加写入）
                     with open(jsonl_path, 'w', encoding='utf-8') as f:
                         pass
 
-                    all_file_md_contents = []
-                    all_file_pdf_info = []
-                    results_map = {}  # 用于收集结果，按 page_num 排序
                     successful_pages = 0
                     completed_count = 0
 
@@ -263,21 +260,16 @@ def generate_ontology():
                                         log=f"第 {api_page_num} 页失败: {error_msg}"
                                     )
                                 else:
-                                    # 追加写入 jsonl（每条记录带 page_num，读取时排序）
+                                    # 追加写入 jsonl（每条记录带 page_num，后续按 page_num 排序读取）
                                     with open(jsonl_path, 'a', encoding='utf-8') as jf:
                                         jf.write(json.dumps(page_result, ensure_ascii=False) + '\n')
-
-                                    results_map[api_page_num] = page_result
-                                    if page_result.get('md_content'):
-                                        all_file_md_contents.append((api_page_num, page_result['md_content']))
-                                    all_file_pdf_info.extend(page_result.get('middle_json', {}).get('pdf_info', []))
                                     successful_pages += 1
 
                                     task_manager.update_task(
                                         task_id,
                                         message=f"✅ {orig_name}: 第 {api_page_num}/{total_pdf_pages} 页成功 ({completed_count}/{total_pdf_pages})",
                                         progress=current_progress,
-                                        log=f"第 {api_page_num} 页成功，已写入 jsonl，md_content 长度: {len(page_result.get('md_content', ''))}"
+                                        log=f"第 {api_page_num} 页成功，已写入 jsonl"
                                     )
                                     build_logger.info(f"[{task_id}] 第 {api_page_num}/{total_pdf_pages} 页成功 ({completed_count}/{total_pdf_pages})")
 
@@ -291,36 +283,8 @@ def generate_ontology():
                         build_logger.error(f"[{task_id}] MinerU API 调用失败: {orig_name}, 成功页数 0")
                         continue
 
-                    # 按 page_num 排序拼接 md_content
-                    all_file_md_contents.sort(key=lambda x: x[0])
-                    sorted_md_content = '\n'.join([mc for _, mc in all_file_md_contents])
-
-                    mineru_data = {
-                        'md_content': sorted_md_content,
-                        'info': {
-                            'pdf_info': all_file_pdf_info,
-                            '_version_name': '2.1.10 (并发解析)',
-                            '_parse_type': 'pipeline',
-                            '_jsonl_file': jsonl_path,
-                        },
-                        'files': {
-                            orig_name: {
-                                'md_content': sorted_md_content,
-                                'info': {
-                                    'pdf_info': all_file_pdf_info,
-                                    '_version_name': '2.1.10 (并发解析)',
-                                    '_parse_type': 'pipeline',
-                                    '_jsonl_file': jsonl_path,
-                                }
-                            }
-                        }
-                    }
-
-                    mineru_parsed = ProjectManager.get_mineru_parsed(project.project_id) or {"files": {}}
-                    mineru_parsed["files"][orig_name] = mineru_data
-                    ProjectManager.save_mineru_parsed(project.project_id, mineru_parsed)
-
-                    file_chunks = _parse_mineru_to_chunks(mineru_data, orig_name, pdf_path)
+                    # 直接从 JSONL 文件解析 chunks（流式读取，无需构造 mineru_data 字典）
+                    file_chunks = _parse_mineru_to_chunks(jsonl_path, orig_name, pdf_path)
                     for c in file_chunks:
                         c["chunk_id"] = f"chunk_{idx}_{c['chunk_id'].split('_', 1)[-1]}"
                     all_chunks.extend(file_chunks)

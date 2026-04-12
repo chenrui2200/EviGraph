@@ -1722,8 +1722,8 @@ Your response:"""
             # Step 2: 收集所有根节点 UUID
             root_uuids = [n.get("uuid") for n in root_nodes if n.get("uuid")]
 
-            # Step 3: 直接查询 Entity → Topic → Clause 路径
-            paths_map = self.storage.get_entity_topic_clause_paths(root_uuids)
+            # Step 3: 直接查询 Entity → Topic → Clause 路径（添加 graph_id 过滤避免跨图谱查询）
+            paths_map = self.storage.get_entity_topic_clause_paths(root_uuids, graph_id)
 
             # Step 4: 收集所有 Clause UUID 并批量获取
             all_clause_uuids: set = set()

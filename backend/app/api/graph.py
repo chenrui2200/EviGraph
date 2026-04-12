@@ -11,7 +11,7 @@ import shutil
 import traceback
 import threading
 import requests
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Union
 from flask import request, jsonify, current_app, send_from_directory
 
 from . import graph_bp
@@ -1597,9 +1597,161 @@ def _merge_line_bboxes(lines: List[dict], page_idx: int, block_bbox: list = None
     return _merge_bboxes([line.get('bbox', []) for line in lines if len(line.get('bbox', [])) >= 4])
 
 
-def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = '') -> List[Dict[str, Any]]:
+def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
     """
-    将 MinerU 原始数据解析为 chunks 结构。
+    直接从 JSONL 文件读取并解析为 chunks 结构（一次遍历 + 排序）。
+
+    JSONL 每行格式: {"page_num": int, "md_content": str, "middle_json": {"pdf_info": [...]}}
+    每条记录对应一页，按 page_num 升序排列。
+
+    Args:
+        jsonl_path: JSONL 文件路径
+        filename: 源文件名
+
+    Returns:
+        chunks 列表
+    """
+    chunks: List[Dict[str, Any]] = []
+
+    if not os.path.exists(jsonl_path):
+        return chunks
+
+    # 一次性读取所有页面数据，按 page_num 排序
+    sorted_pages: List[tuple] = []  # (page_num, page_data)
+
+    with open(jsonl_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                page_data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            page_num = page_data.get('page_num', 0)
+            sorted_pages.append((page_num, page_data))
+
+    # 按 page_num 排序（确保按阅读顺序处理）
+    sorted_pages.sort(key=lambda x: x[0])
+
+    # page_size 映射（page_num -> [width, height]）
+    page_sizes: dict[int, list] = {}
+    for _, page_data in sorted_pages:
+        middle_json = page_data.get('middle_json', {})
+        for info in middle_json.get('pdf_info', []):
+            info_page_idx = info.get('page_idx', 0)
+            page_sizes[info_page_idx] = info.get('page_size', [595, 842])
+
+    # 解析 chunks
+    for page_num, page_data in sorted_pages:
+        middle_json = page_data.get('middle_json', {})
+        pdf_info_list = middle_json.get('pdf_info', [])
+
+        for info in pdf_info_list:
+            info_page_idx = info.get('page_idx', page_num)
+            page_w, page_h = page_sizes.get(info_page_idx, [595, 842])
+
+            for block in info.get('preproc_blocks', []):
+                bt = block.get('type', 'text')
+
+                # ---- 标题/正文块 ----
+                if bt in ('title', 'text'):
+                    lines = block.get('lines', [])
+                    lines_text = '\n'.join(
+                        ''.join(s.get('content', '') for s in line.get('spans', []))
+                        for line in lines
+                    ).strip()
+                    if not lines_text:
+                        continue
+                    bbox = _merge_line_bboxes(lines, info_page_idx, block.get('bbox', []))
+                    chunks.append({
+                        "chunk_id": f"chunk_{len(chunks)}",
+                        "page_idx": info_page_idx,
+                        "type": bt,
+                        "content": lines_text,
+                        "bbox_pdf": bbox,
+                        "bbox_viewport": bbox,
+                        "page_width": page_w,
+                        "page_height": page_h,
+                        "category_id": {'title': 0, 'text': 1}.get(bt, 1),
+                        "block_type": bt,
+                        "source": filename
+                    })
+
+                # ---- 表格块 ----
+                elif bt == 'table':
+                    caption = ''
+                    img_path = ''
+                    table_html = ''
+                    table_footnote = ''
+                    all_sub_lines = list(block.get('lines', []))
+                    outer_bbox = _merge_line_bboxes(block.get('lines', []), info_page_idx, block.get('bbox', []))
+
+                    for sub in block.get('blocks', []):
+                        sub_type = sub.get('type', '')
+                        if sub_type == 'table_caption':
+                            for line in sub.get('lines', []):
+                                for span in line.get('spans', []):
+                                    content = span.get('content', '')
+                                    if content:
+                                        caption += content
+                                all_sub_lines.append(line)
+                        elif sub_type == 'table_body':
+                            for line in sub.get('lines', []):
+                                all_sub_lines.append(line)
+                            for line in sub.get('lines', []):
+                                for span in line.get('spans', []):
+                                    if span.get('image_path'):
+                                        img_path = span['image_path']
+                                    if span.get('html') and not table_html:
+                                        table_html = span['html']
+                        elif sub_type == 'table_footnote':
+                            for line in sub.get('lines', []):
+                                all_sub_lines.append(line)
+                                for span in line.get('spans', []):
+                                    content = span.get('content', '')
+                                    if content:
+                                        table_footnote += content + '\n'
+
+                    if len(all_sub_lines) > len(block.get('lines', [])):
+                        merged_sub_bbox = _merge_line_bboxes(all_sub_lines, info_page_idx, block.get('bbox', []))
+                    else:
+                        merged_sub_bbox = outer_bbox
+
+                    use_bbox = merged_sub_bbox if merged_sub_bbox and len(merged_sub_bbox) >= 4 else outer_bbox
+
+                    final_bbox = list(use_bbox)
+                    if len(final_bbox) >= 4 and final_bbox[1] > final_bbox[3]:
+                        final_bbox = [final_bbox[0], final_bbox[3], final_bbox[2], final_bbox[1]]
+
+                    chunks.append({
+                        "chunk_id": f"chunk_{len(chunks)}",
+                        "page_idx": info_page_idx,
+                        "type": "table",
+                        "content": caption or '[表格]',
+                        "bbox_pdf": final_bbox,
+                        "bbox_viewport": final_bbox,
+                        "page_width": page_w,
+                        "page_height": page_h,
+                        "category_id": 2,
+                        "block_type": "table",
+                        "source": filename,
+                        "table_caption": caption,
+                        "table_img_path": img_path,
+                        "table_content": table_html,
+                        "table_footnote": table_footnote.rstrip('\n') if table_footnote else '',
+                    })
+
+    return chunks
+
+
+def _parse_mineru_to_chunks(mineru_data_or_jsonl_path: Union[dict, str], filename: str, pdf_path: str = '') -> List[Dict[str, Any]]:
+    """
+    将 MinerU 数据解析为 chunks 结构。
+
+    支持两种输入：
+    - dict: mineru_data 字典（向后兼容）
+    - str: JSONL 文件路径（新增路径，直接流式读取）
 
     数据源（MinerU 0.7.1 格式）：
     - 正文/标题：preproc_blocks 中 type=title/text，提取 lines/spans 的 content
@@ -1607,6 +1759,12 @@ def _parse_mineru_to_chunks(mineru_data: dict, filename: str, pdf_path: str = ''
             从 blocks.table_body 提取 img_path 和 bbox，
             表格内容由 PaddleOCR 从 PDF 提取
     """
+    # 新路径：直接读取 JSONL 文件
+    if isinstance(mineru_data_or_jsonl_path, str):
+        return _parse_mineru_jsonl(mineru_data_or_jsonl_path, filename)
+
+    # 旧路径：向后兼容 mineru_data 字典
+    mineru_data = mineru_data_or_jsonl_path
     pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
 
     # page_size 映射

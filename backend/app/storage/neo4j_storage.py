@@ -1142,6 +1142,7 @@ class Neo4jStorage(GraphStorage):
     def get_entity_topic_clause_paths(
         self,
         entity_uuids: List[str],
+        graph_id: str,
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         直接查询 Entity → Topic → Clause 路径。
@@ -1151,6 +1152,7 @@ class Neo4jStorage(GraphStorage):
 
         Args:
             entity_uuids: Entity 节点 UUID 列表
+            graph_id: 图谱 ID（用于过滤）
 
         Returns:
             Dict mapping entity_uuid to list of {topic_uuid, clause_uuid} path info
@@ -1163,9 +1165,13 @@ class Neo4jStorage(GraphStorage):
                 """
                 MATCH (e:Entity)-[:MENTIONS]-(t:Topic)-[:HAS_TOPIC]-(c:Clause)
                 WHERE e.uuid IN $uuids
+                  AND e.graph_id = $gid
+                  AND t.graph_id = $gid
+                  AND c.graph_id = $gid
                 RETURN e.uuid AS entity_uuid, t.uuid AS topic_uuid, c.uuid AS clause_uuid
                 """,
                 uuids=entity_uuids,
+                gid=graph_id,
             )
             paths_map: Dict[str, List[Dict[str, Any]]] = {uid: [] for uid in entity_uuids}
             for record in result:
@@ -2470,13 +2476,21 @@ class Neo4jStorage(GraphStorage):
                         entities_by_clause[src].append(e)
 
                 # 批量 MERGE Topic 节点和 HAS_TOPIC 关系
+                # 注意：每个 clause_id 只创建一个 Topic 节点（基于 clause_id 去重）
+                processed_clause_ids = set()  # 用于去重
                 for clause in clauses_with_topic:
                     clause_id = clause.get('clause_id', '')
                     topic_text = clause.get('topic', '')
-                    if not clause_id or not topic_text:
+                    if not clause_id:
                         continue
 
-                    # 创建 Topic 节点（纯 Topic 标签，不加 :Entity 避免 entity_uuid 约束冲突）
+                    # 跳过已处理的 clause_id（同一个 clause 可能有多个条目，保留第一个 topic）
+                    if clause_id in processed_clause_ids:
+                        logger.info(f"[topic_entity] Skipping duplicate clause_id={clause_id}")
+                        continue
+                    processed_clause_ids.add(clause_id)
+
+                    # Topic UUID 只基于 clause_id 生成（确保每个 clause 只有一个 Topic）
                     topic_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{clause_id}:topic".encode()).hexdigest()))
                     tx.run(
                         """
@@ -2645,10 +2659,12 @@ class Neo4jStorage(GraphStorage):
         注意：此方法不再处理三元组（Component/Action/Condition），
         因为原来的设计是 Term/Entity - Topic - Clause 结构。
         """
-        clause_name = f"条款{clause_id}"
+        # 标准化 clause_id（去除首尾空格）
+        clause_id_normalized = clause_id.strip() if clause_id else ''
+        clause_name = f"条款{clause_id_normalized}"
 
-        # 生成Clause UUID
-        entity_seed = f"{graph_id}:{clause_name}".encode('utf-8')
+        # 生成Clause UUID（基于 clause_id 确保唯一性）
+        entity_seed = f"{graph_id}:{clause_id_normalized}:clause".encode('utf-8')
         entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
 
         # 获取条款级要求类型（fallback）
@@ -2671,16 +2687,16 @@ class Neo4jStorage(GraphStorage):
         pdf_page_width = metadata.get('page_width')
         pdf_page_height = metadata.get('page_height')
 
-        # 创建Clause节点
+        # 创建Clause节点（MERGE 条件包含 clause_id）
         tx.run(
             """
-            MERGE (e:Clause {graph_id: $gid, name_lower: $name_lower})
+            MERGE (e:Clause {graph_id: $gid, clause_id: $clause_id})
             ON CREATE SET
                 e.uuid = $uuid,
                 e.name = $name,
+                e.name_lower = $name_lower,
                 e.summary = $summary,
                 e.embedding = $embedding,
-                e.clause_id = $clause_id,
                 e.requirement_type = $req_type,
                 e.pdf_source = $pdf_source,
                 e.pdf_page = $pdf_page,
@@ -2698,12 +2714,12 @@ class Neo4jStorage(GraphStorage):
                 e.pdf_page_height = COALESCE(e.pdf_page_height, $pdf_page_height)
             """,
             gid=graph_id,
-            name_lower=clause_name.lower(),
+            clause_id=clause_id_normalized,
             uuid=entity_uuid,
             name=clause_name,
+            name_lower=clause_name.lower(),
             summary=content if content else "",
             embedding=embedding,
-            clause_id=clause_id,
             req_type=clause_requirement,
             pdf_source=pdf_source,
             pdf_page=pdf_page,
@@ -2757,10 +2773,12 @@ class Neo4jStorage(GraphStorage):
         3. Clause --mandates/recommends/prohibits--> Action  （MANDATES/RECOMMENDS/PROHIBITS）
         4. Condition --in_situation--> Action  （IN_SITUATION）
         """
-        clause_name = f"条款{clause_id}"
+        # 标准化 clause_id（去除首尾空格）
+        clause_id_normalized = clause_id.strip() if clause_id else ''
+        clause_name = f"条款{clause_id_normalized}"
 
-        # 生成Entity UUID
-        entity_seed = f"{graph_id}:{clause_name}".encode('utf-8')
+        # 生成Entity UUID（基于 clause_id 确保唯一性）
+        entity_seed = f"{graph_id}:{clause_id_normalized}:clause".encode('utf-8')
         entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
 
         # 获取条款级要求类型（fallback）
@@ -2787,16 +2805,16 @@ class Neo4jStorage(GraphStorage):
         pdf_page_width = metadata.get('page_width')
         pdf_page_height = metadata.get('page_height')
 
-        # 创建Clause Entity节点
+        # 创建Clause Entity节点（MERGE 条件包含 clause_id）
         tx.run(
             """
-            MERGE (e:Clause {graph_id: $gid, name_lower: $name_lower})
+            MERGE (e:Clause {graph_id: $gid, clause_id: $clause_id})
             ON CREATE SET
                 e.uuid = $uuid,
                 e.name = $name,
+                e.name_lower = $name_lower,
                 e.summary = $summary,
                 e.embedding = $embedding,
-                e.clause_id = $clause_id,
                 e.requirement_type = $req_type,
                 e.pdf_source = $pdf_source,
                 e.pdf_page = $pdf_page,
@@ -2814,12 +2832,12 @@ class Neo4jStorage(GraphStorage):
                 e.pdf_page_height = COALESCE(e.pdf_page_height, $pdf_page_height)
             """,
             gid=graph_id,
-            name_lower=clause_name.lower(),
+            clause_id=clause_id_normalized,
             uuid=entity_uuid,
             name=clause_name,
+            name_lower=clause_name.lower(),
             summary=content if content else "",
             embedding=embedding,
-            clause_id=clause_id,
             req_type=clause_requirement,
             pdf_source=pdf_source,
             pdf_page=pdf_page,

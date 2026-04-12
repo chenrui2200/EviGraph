@@ -468,15 +468,32 @@ class HierarchicalChunkResult:
         return [c for c in self.clauses if not c.semantics_enriched]
 
     def to_episode_list(self) -> List[Dict[str, Any]]:
-        """转换为Episode节点列表（按 content 去重）"""
-        seen = set()
-        result = []
+        """
+        转换为Episode节点列表
+
+        去重策略：按 clause_id 去重，保留 content 最丰富的条目。
+        如果没有 clause_id，则按 (text, metadata.clause_id) 去重。
+        """
+        # 第一步：按 clause_id 分组，保留最长的 content
+        clause_best: Dict[str, Dict[str, Any]] = {}
         for chunk in self.get_all_chunks():
             ep = chunk.to_episode_dict()
-            key = (ep.get('text', ''), ep.get('metadata', {}).get('clause_id', ''))
-            if key not in seen:
-                seen.add(key)
-                result.append(ep)
+            clause_id = ep.get('metadata', {}).get('clause_id', '')
+            text = ep.get('text', '')
+
+            if clause_id:
+                # 有 clause_id：保留 content 最长的
+                if clause_id not in clause_best or len(text) > len(clause_best[clause_id].get('text', '')):
+                    clause_best[clause_id] = ep
+            else:
+                # 没有 clause_id：按 text 去重
+                key = text
+                if key not in clause_best:
+                    clause_best[f"_text_{key}"] = ep
+
+        # 第二步：按 clause_id 排序
+        result = list(clause_best.values())
+        result.sort(key=lambda x: x.get('metadata', {}).get('clause_id', '') or x.get('text', '')[:50])
         return result
 
     # ========================================================================
