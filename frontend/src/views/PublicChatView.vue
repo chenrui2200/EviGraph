@@ -86,10 +86,13 @@
 import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { getApp } from '../api/ai_app'
-import { searchEntityTopicClause, rerankFacts, llmAnswer } from '../api/graph'
+import { getProjectList, searchEntityTopicClause, rerankFacts, llmAnswer } from '../api/graph'
 
 const route = useRoute()
 const appId = route.params.id
+
+// Projects list (for resolving latest graph_id)
+const projects = ref([])
 
 // App info
 const appName = ref('加载中...')
@@ -230,21 +233,63 @@ const renderEvidenceScreenshots = async () => {
   }
 }
 
+// ============ Load Projects (for resolving latest graph_id) ============
+const loadProjects = async () => {
+  try {
+    const res = await getProjectList()
+    if (res.success) {
+      projects.value = res.data?.projects || []
+    }
+  } catch (err) {
+    console.error('[PublicChat] loadProjects error:', err)
+  }
+}
+
 // ============ Load App ============
 const loadApp = async () => {
-  const res = await getApp(appId)
-  if (res.success) {
-    const data = res.data
-    appName.value = data.name
-    const wf = data.workflow_data || {}
-    appConfig.value = {
-      selectedGraphIds: wf.selectedGraphIds || [],
-      rootTypes: wf.rootTypes || ['Entity', 'Term'],
-      similarityThreshold: wf.similarityThreshold || 0,
-      topK: wf.topK ?? 5,
-      rerankMinScore: wf.rerankMinScore ?? 50,
-      temperature: wf.temperature || 0.7,
+  try {
+    // Load projects first to resolve latest graph_ids
+    await loadProjects()
+
+    const res = await getApp(appId)
+    if (res.success) {
+      const data = res.data
+      appName.value = data.name
+      const wf = data.workflow_data || {}
+
+      // Resolve selectedGraphIds from selectedProjectIds (like AiQaView)
+      // This ensures we use the latest graph_id for each project
+      const savedProjectIds = wf.selectedProjectIds || []
+      let resolvedGraphIds = []
+
+      if (savedProjectIds.length > 0) {
+        // Map project_ids to latest graph_ids
+        resolvedGraphIds = savedProjectIds
+          .map(pid => {
+            const proj = projects.value.find(p => p.project_id === pid)
+            return proj?.graph_id
+          })
+          .filter(Boolean)
+      } else {
+        // Backward compatibility: use selectedGraphIds directly
+        resolvedGraphIds = wf.selectedGraphIds || []
+      }
+
+      appConfig.value = {
+        selectedGraphIds: resolvedGraphIds,
+        rootTypes: wf.rootTypes || ['Entity', 'Term'],
+        similarityThreshold: wf.similarityThreshold ?? 50,
+        topK: wf.topK ?? 5,
+        rerankMinScore: wf.rerankMinScore ?? 50,
+        temperature: wf.temperature || 0.7,
+      }
+    } else {
+      console.error('[PublicChat] getApp failed:', res.error)
+      alert('加载应用失败: ' + (res.error || '应用不存在'))
     }
+  } catch (err) {
+    console.error('[PublicChat] loadApp error:', err)
+    alert('加载应用失败: ' + err.message)
   }
 }
 

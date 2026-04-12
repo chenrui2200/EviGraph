@@ -6,7 +6,6 @@ Provides unified logging management with output to both console and file
 import os
 import sys
 import logging
-import threading
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
@@ -26,31 +25,6 @@ def _ensure_utf8_stdout():
 
 # Log directory
 LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
-
-
-class ThreadSafeRotatingFileHandler(RotatingFileHandler):
-    """
-    Thread-safe wrapper for RotatingFileHandler.
-
-    On Windows, multiple threads writing to the same file can cause
-    PermissionError when rotation occurs. This wrapper adds a lock
-    around the emit() method to prevent concurrent writes.
-    """
-
-    def __init__(self, *args, **kwargs):
-        RotatingFileHandler.__init__(self, *args, **kwargs)
-        self._thread_lock = threading.Lock()
-
-    def emit(self, record):
-        with self._thread_lock:
-            try:
-                super().emit(record)
-            except Exception:
-                self.handleError(record)
-
-    def flush(self):
-        with self._thread_lock:
-            super().flush()
 
 
 def setup_logger(name: str = 'mirofish', level: int = logging.DEBUG) -> logging.Logger:
@@ -90,9 +64,8 @@ def setup_logger(name: str = 'mirofish', level: int = logging.DEBUG) -> logging.
     )
 
     # 1. File handler - detailed logs (named by date, with rotation)
-    # Use thread-safe handler to prevent concurrent write issues on Windows
     log_filename = datetime.now().strftime('%Y-%m-%d') + '.log'
-    file_handler = ThreadSafeRotatingFileHandler(
+    file_handler = RotatingFileHandler(
         os.path.join(LOG_DIR, log_filename),
         maxBytes=10 * 1024 * 1024,  # 10MB
         backupCount=5,
@@ -102,8 +75,8 @@ def setup_logger(name: str = 'mirofish', level: int = logging.DEBUG) -> logging.
     file_handler.setFormatter(detailed_formatter)
 
     # 2. Console handler - concise logs (INFO and above)
-    # Ensure UTF-8 encoding on Windows to avoid Chinese character issues
-    _ensure_utf8_stdout()
+    # NOTE: Don't call _ensure_utf8_stdout() here - it calls sys.stdout.reconfigure()
+    # which hangs on Windows when stdout is redirected (e.g. by IDE/debuggers)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(simple_formatter)

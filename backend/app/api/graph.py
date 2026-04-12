@@ -910,8 +910,70 @@ def mineru_parse():
     })
 
 
+def _parse_single_page(pdf_path: str, filename: str, api_page_num: int) -> tuple[int, Optional[Dict[str, Any]], Optional[str]]:
+    """
+    并发解析单个页面，返回 (页码, 结果数据, 错误信息)
+
+    Returns:
+        (api_page_num, page_result_dict, error_msg)
+        - page_result_dict 包含: md_content, middle_json, page_num
+        - error_msg 为 None 表示成功
+    """
+    import uuid
+    temp_filename = f"temp_{uuid.uuid4().hex[:8]}.pdf"
+
+    with open(pdf_path, 'rb') as f:
+        pdf_bytes = f.read()
+
+    data = {
+        'return_middle_json': 'true',
+        'return_model_output': 'false',
+        'return_md': 'true',
+        'return_images': 'false',
+        'return_content_list': 'false',
+        'parse_method': 'auto',
+        'lang_list': 'ch',
+        'table_enable': 'true',
+        'formula_enable': 'true',
+        'backend': 'pipeline',
+        'start_page_id': str(api_page_num),
+        'end_page_id': str(api_page_num),
+        'output_dir': './output',
+        'server_url': 'string',
+    }
+
+    try:
+        mineru_response = requests.post(
+            Config.MINERU_API_URL,
+            files={'files': (temp_filename, pdf_bytes, 'application/pdf')},
+            data=data,
+            timeout=600
+        )
+
+        if mineru_response.status_code != 200:
+            return api_page_num, None, f"HTTP {mineru_response.status_code}: {mineru_response.text[:200]}"
+
+        result = mineru_response.json()
+        results = result.get('results', [])
+
+        if not results:
+            return api_page_num, None, "Empty results"
+
+        page_result = results[0]
+        return api_page_num, {
+            'page_num': api_page_num,
+            'md_content': page_result.get('md_content', ''),
+            'middle_json': page_result.get('middle_json', {})
+        }, None
+
+    except Exception as e:
+        return api_page_num, None, str(e)
+
+
 def _do_mineru_parse_work(task_id: str, project_id: str, filename: str):
-    """MinerU 解析的后台执行逻辑"""
+    """MinerU 解析的后台执行逻辑（并发写入 jsonl）"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     task_manager = TaskManager()
 
     # === 1. 查找 PDF 文件 ===
@@ -936,131 +998,94 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str):
 
     task_manager.update_task(
         task_id,
-        message=f"📄 PDF 总页数: {total_pages}，开始逐页解析...",
+        message=f"📄 PDF 总页数: {total_pages}，开始并发解析...",
         progress=0,
-        log=f"PDF 总页数: {total_pages}"
+        log=f"PDF 总页数: {total_pages}，并发数: {min(8, total_pages)}"
     )
 
-    # === 2. 逐页调用 MinerU API ===
+    # === 2. 并发调用 MinerU API 并写入 jsonl ===
+    jsonl_path = os.path.join(project_dir, 'mineru_parsed.jsonl')
+    successful_pages = 0
+    completed_count = 0
     all_md_contents = []
     all_pdf_info = []
-    successful_pages = 0
+    results_map = {}  # 按页码排序
 
-    for page_idx in range(total_pages):
-        # MinerU API 页码从 1 开始
-        api_page_num = page_idx + 1
+    # 使用 ThreadPoolExecutor 并发处理
+    max_workers = min(8, total_pages)
 
-        task_manager.update_task(
-            task_id,
-            message=f"🔄 正在解析第 {api_page_num}/{total_pages} 页...",
-            progress=int((page_idx / total_pages) * 80),  # 0-80% 用于 API 调用
-            log=f"正在解析第 {api_page_num}/{total_pages} 页"
-        )
-
-        with open(pdf_path, 'rb') as f:
-            pdf_bytes = f.read()
-
-        data = {
-            'return_middle_json': 'true',
-            'return_model_output': 'false',
-            'return_md': 'true',
-            'return_images': 'false',
-            'return_content_list': 'false',
-            'parse_method': 'auto',
-            'lang_list': 'ch',
-            'table_enable': 'true',
-            'formula_enable': 'true',
-            'backend': 'pipeline',
-            'start_page_id': str(api_page_num),
-            'end_page_id': str(api_page_num),
-            'output_dir': './output',
-            'server_url': 'string',
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有页面的解析任务
+        future_to_page = {
+            executor.submit(_parse_single_page, pdf_path, filename, page_idx + 1): page_idx + 1
+            for page_idx in range(total_pages)
         }
 
-        try:
-            # 使用临时英文文件名避免编码问题
-            import uuid
-            temp_filename = f"temp_{uuid.uuid4().hex[:8]}.pdf"
+        for future in as_completed(future_to_page):
+            api_page_num = future_to_page[future]
+            completed_count += 1
 
-            # 打印请求详情（调试用）
-            logger.info(f"[MinerU] 请求详情:")
-            logger.info(f"  URL: {Config.MINERU_API_URL}")
-            logger.info(f"  original filename: {filename}")
-            logger.info(f"  temp filename: {temp_filename}")
-            logger.info(f"  start_page_id: {data['start_page_id']}, end_page_id: {data['end_page_id']}")
-            logger.info(f"  pdf_bytes: {len(pdf_bytes)} bytes")
+            try:
+                page_num, page_result, error_msg = future.result()
 
-            mineru_response = requests.post(
-                Config.MINERU_API_URL,
-                files={'files': (temp_filename, pdf_bytes, 'application/pdf')},
-                data=data,
-                timeout=600
-            )
+                if error_msg:
+                    task_manager.update_task(
+                        task_id,
+                        message=f"⚠️ 第 {page_num} 页解析失败: {error_msg}",
+                        progress=int((completed_count / total_pages) * 80),
+                        log=f"第 {page_num} 页失败: {error_msg}"
+                    )
+                else:
+                    # 写入 jsonl（每行一条记录）
+                    with open(jsonl_path, 'a', encoding='utf-8') as jf:
+                        jf.write(json.dumps(page_result, ensure_ascii=False) + '\n')
 
-            # 打印响应状态和内容（调试用）
-            logger.info(f"[MinerU] 响应状态: {mineru_response.status_code}")
-            if mineru_response.status_code != 200:
-                logger.error(f"[MinerU] 响应内容: {mineru_response.text[:500]}")
+                    results_map[page_num] = page_result
+                    if page_result.get('md_content'):
+                        all_md_contents.append((page_num, page_result['md_content']))
+                    all_pdf_info.extend(page_result.get('middle_json', {}).get('pdf_info', []))
+                    successful_pages += 1
 
-            if mineru_response.status_code != 200:
+                    task_manager.update_task(
+                        task_id,
+                        message=f"✅ 第 {page_num}/{total_pages} 页解析成功 ({completed_count}/{total_pages})",
+                        progress=int((completed_count / total_pages) * 80),
+                        log=f"第 {page_num} 页成功，md_content 长度: {len(page_result.get('md_content', ''))}"
+                    )
+
+            except Exception as e:
                 task_manager.update_task(
                     task_id,
-                    message=f"⚠️ 第 {api_page_num} 页返回错误: {mineru_response.status_code}",
-                    log=f"第 {api_page_num} 页返回错误: {mineru_response.status_code}, 响应: {mineru_response.text[:200]}"
+                    message=f"⚠️ 第 {api_page_num} 页解析异常: {e}",
+                    progress=int((completed_count / total_pages) * 80),
+                    log=f"第 {api_page_num} 页异常: {e}"
                 )
-                continue
-
-            result = mineru_response.json()
-            results = result.get('results', [])
-
-            if results:
-                page_result = results[0]
-                md_content = page_result.get('md_content', '')
-                middle_json = page_result.get('middle_json', {})
-
-                if md_content:
-                    all_md_contents.append(md_content)
-
-                pdf_info = middle_json.get('pdf_info', [])
-                all_pdf_info.extend(pdf_info)
-                successful_pages += 1
-
-                task_manager.update_task(
-                    task_id,
-                    message=f"✅ 第 {api_page_num}/{total_pages} 页解析成功",
-                    progress=int(((page_idx + 1) / total_pages) * 80),
-                    log=f"第 {api_page_num} 页成功，md_content 长度: {len(md_content)}"
-                )
-
-        except Exception as e:
-            task_manager.update_task(
-                task_id,
-                message=f"⚠️ 第 {api_page_num} 页解析失败: {e}",
-                log=f"第 {api_page_num} 页失败: {e}"
-            )
-            continue
 
     task_manager.update_task(
         task_id,
         message=f"📝 MinerU API 调用完成，成功 {successful_pages}/{total_pages} 页",
         progress=80,
-        log=f"MinerU API 调用完成: {successful_pages}/{total_pages} 页"
+        log=f"MinerU API 调用完成: {successful_pages}/{total_pages} 页，jsonl 已写入"
     )
+
+    # 按页码排序拼接 md_content
+    all_md_contents.sort(key=lambda x: x[0])
+    sorted_md_content = '\n'.join([mc for _, mc in all_md_contents])
 
     # 构建合并后的 mineru_data
     mineru_data = {
-        'md_content': '\n'.join(all_md_contents),
+        'md_content': sorted_md_content,
         'info': {
             'pdf_info': all_pdf_info,
-            '_version_name': '2.1.10 (逐页解析)',
+            '_version_name': '2.1.10 (并发解析)',
             '_parse_type': 'pipeline',
         },
         'files': {
             filename: {
-                'md_content': '\n'.join(all_md_contents),
+                'md_content': sorted_md_content,
                 'info': {
                     'pdf_info': all_pdf_info,
-                    '_version_name': '2.1.10 (逐页解析)',
+                    '_version_name': '2.1.10 (并发解析)',
                     '_parse_type': 'pipeline',
                 }
             }
@@ -1084,7 +1109,6 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str):
         log="开始解析 chunks"
     )
 
-    pdf_info_list = mineru_data.get('info', {}).get('pdf_info', [])
     chunks = _parse_mineru_to_chunks(mineru_data, filename, pdf_path)
 
     # === 4. 保存 raw_text.txt ===

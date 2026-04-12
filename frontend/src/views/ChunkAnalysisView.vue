@@ -169,6 +169,9 @@
                 <span class="badge">{{ mineruChunks.length }} 块</span>
               </span>
             </div>
+            <button class="start-analysis-btn" @click="handleStartChunking" :disabled="starting">
+              {{ starting ? '分析中...' : '🚀 开始智能分析' }}
+            </button>
             <button class="re-annotate-btn" @click="handleReAnnotate" :disabled="reAnnotating">
               {{ reAnnotating ? '标注中...' : '重新标注' }}
             </button>
@@ -757,7 +760,7 @@ async function loadExistingProject() {
         taskId.value = res.data.ontology_task_id
         startTaskSSE()
       }
-      showStartButton.value = true
+      // MinerU 解析完成后由用户手动触发智能分析，不自动弹出 start-card
     }
 
     await Promise.allSettled(tasks)
@@ -1725,6 +1728,11 @@ header.ca-header {
 .start-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .reset-btn { background: none; border: 1px solid #d0d7de; color: #6b7280; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; }
 .reset-btn:hover:not(:disabled) { background: #f0f0f0; color: #1a1a2e; }
+
+/* MinerU panel start analysis button */
+.start-analysis-btn { background: #2563eb; color: white; border: none; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; margin-right: 8px; }
+.start-analysis-btn:hover:not(:disabled) { background: #1d4ed8; }
+.start-analysis-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* Spinner */
 .spinner { width: 24px; height: 24px; border: 2px solid #e5e7eb; border-top-color: #2563eb; border-radius: 50%; animation: spin 0.7s linear infinite; margin: 0 auto; }

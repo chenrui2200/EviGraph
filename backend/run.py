@@ -7,9 +7,7 @@ import sys
 
 # Solve Windows console Chinese character encoding issue: set UTF-8 encoding before all imports
 if sys.platform == 'win32':
-    # Set environment variable to ensure Python uses UTF-8
     os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
-    # Reconfigure standard output stream to UTF-8
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     if hasattr(sys.stderr, 'reconfigure'):
@@ -39,12 +37,10 @@ def main():
     # Get runtime configuration
     host = os.environ.get('FLASK_HOST', '0.0.0.0')
     port = int(os.environ.get('FLASK_PORT', 5001))
-    debug = Config.DEBUG
 
-    # Start service
-    app.run(host=host, port=port, debug=debug, threaded=True)
+    # Start service (use_reloader=False to prevent subprocess hangs on Windows)
+    app.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
 
 
 if __name__ == '__main__':
     main()
-

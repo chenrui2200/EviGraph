@@ -165,23 +165,39 @@ class Neo4jStorage(GraphStorage):
         self._password = password or Config.NEO4J_PASSWORD
 
         self._driver = GraphDatabase.driver(
-            self._uri, auth=(self._user, self._password)
+            self._uri,
+            auth=(self._user, self._password),
+            max_connection_lifetime=3600,
+            max_connection_pool_size=50,
+            connection_acquisition_timeout=60,  # 60秒获取连接超时
         )
         self._embedding = embedding_service or EmbeddingService()
         self._ner = ner_extractor or NERExtractor()
         self._search = SearchService(self._embedding)
 
-        # Initialize schema (indexes, constraints)
-        self._ensure_schema()
+        # Lazy schema init: defer to first use instead of blocking startup
+        self._schema_initialized = False
 
-    @property
-    def driver(self) -> GraphDatabase.driver:
-        """Expose the Neo4j driver."""
-        return self._driver
+    def _lazy_init_schema(self):
+        """Lazily initialize schema on first database access."""
+        if self._schema_initialized:
+            return
+        try:
+            self._ensure_schema()
+            self._schema_initialized = True
+        except Exception as e:
+            logger.warning(f"Schema initialization deferred to first query: {e}")
+            self._schema_initialized = True  # Mark as attempted to prevent repeated failures
 
     def close(self):
         """Close the Neo4j driver connection."""
         self._driver.close()
+
+    @property
+    def driver(self) -> GraphDatabase.driver:
+        """Expose the Neo4j driver. Triggers lazy schema init on first access."""
+        self._lazy_init_schema()
+        return self._driver
 
     def _ensure_schema(self):
         """Create indexes and constraints if they don't exist."""
