@@ -107,19 +107,21 @@ def search_entity_topic_clause():
 @report_bp.route('/tools/rerank', methods=['POST'])
 def rerank_facts():
     """
-    LLM 相关性重排：接收检索结果 rows，执行 LLM 打分 + 阈值过滤。
+    相关性重排：接收检索结果 rows，调用 bge-reranker-v2-m3 打分 + 分数过滤 + top_k 截取。
 
     POST body:
         rows: List[ObjectFirstRow] (序列化后的 dict)
         query: str
-        filter_threshold: int (0-100, 默认 75)
+        top_k: int (保留得分最高的 k 个样本，默认 10)
+        rerank_min_score: int (0-100，最低分阈值，默认 0 不过滤)
     """
     from ..services.graph_tools import ObjectFirstRow, ObjectPathNode, ObjectPathEdge
 
     data = request.get_json() or {}
     rows_data = data.get('rows', [])
     query = data.get('query', '')
-    filter_threshold = int(data.get('filter_threshold', 75))
+    top_k = int(data.get('top_k', 10))
+    rerank_min_score = int(data.get('rerank_min_score', 0))
 
     if not query:
         return jsonify({"success": False, "error": "query is required"}), 400
@@ -169,10 +171,11 @@ def rerank_facts():
             final_rows=final_rows,
             query=query,
             similarity_threshold=0,
-            filter_threshold=filter_threshold,
+            top_k=top_k,
+            rerank_min_score=rerank_min_score,
         )
 
-        logger.info(f"Rerank complete: scored={len(rerank_result.scored_facts)}, filtered={len(rerank_result.filtered_facts)}")
+        logger.info(f"Rerank complete: scored={len(rerank_result.scored_facts)}, filtered={len(rerank_result.filtered_facts)} (top_k={top_k}, min_score={rerank_min_score})")
 
         return jsonify({
             "success": True,

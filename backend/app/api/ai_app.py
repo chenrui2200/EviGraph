@@ -136,7 +136,8 @@ def execute_app(app_id: str):
         graph_ids = app.workflow_data.get('selectedGraphIds', [])
         temperature = app.workflow_data.get('temperature', 0.7)
         similarity_threshold = int(data.get('similarity_threshold', app.workflow_data.get('similarityThreshold', 0)))
-        filter_threshold = int(data.get('filter_threshold', app.workflow_data.get('filterThreshold', 75)))
+        top_k = int(data.get('top_k', app.workflow_data.get('topK', 10)))
+        rerank_min_score = int(data.get('rerank_min_score', app.workflow_data.get('rerankMinScore', 0)))
         max_depth = int(data.get('max_depth', app.workflow_data.get('maxDepth', 3)))
         root_types = data.get('root_types', app.workflow_data.get('rootTypes', ['Entity', 'Term']))
 
@@ -172,12 +173,13 @@ def execute_app(app_id: str):
 
         logger.info(f"API Exec App {app_id} [Stage 1] 完成: rows:{len(all_rows)}, facts:{sum(len(r.facts) for r in all_rows)}")
 
-        # ===== Stage 2+3: LLM 重排 + 阈值过滤（共享方法）=====
+        # ===== Stage 2+3: bge-reranker-v2-m3 精排 + 分数过滤 + top_k 截取（共享方法）=====
         rerank_result = tools.run_retrieval_flow(
             final_rows=all_rows,
             query=query,
             similarity_threshold=similarity_threshold,
-            filter_threshold=filter_threshold,
+            top_k=top_k,
+            rerank_min_score=rerank_min_score,
         )
 
         logger.info(f"API Exec App {app_id} [Stage 2+3] 完成: scored={len(rerank_result.scored_facts)}, filtered={len(rerank_result.filtered_facts)}")
@@ -267,7 +269,7 @@ def execute_app(app_id: str):
                     "total_facts_retrieved": sum(len(r.facts) for r in all_rows),
                     "facts_scored": len(rerank_result.scored_facts),
                     "facts_filtered": len(rerank_result.filtered_facts),
-                    "filter_threshold": filter_threshold,
+                    "top_k": top_k,
                 },
             }
         })

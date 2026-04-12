@@ -183,8 +183,8 @@ export function searchEntityTopicClause(data) {
 }
 
 /**
- * LLM 相关性重排：对检索结果进行 LLM 打分 + 阈值过滤
- * @param {Object} data - Contains rows, query, filter_threshold
+ * bge-reranker-v2-m3 相关性重排：打分 + 分数阈值过滤 + top_k 截取
+ * @param {Object} data - Contains rows, query, top_k, rerank_min_score
  * @returns {Promise}
  */
 export function rerankFacts(data) {

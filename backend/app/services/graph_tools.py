@@ -258,7 +258,7 @@ class ObjectFirstRow:
 @dataclass
 class RerankResult:
     """
-    检索流程结果（知识库检索 + LLM 重排 + 阈值过滤）。
+    检索流程结果（知识库检索 + bge-reranker-v2-m3 重排 + 分数过滤 + top_k 截取）。
     供 SSE 流程和 API 流程共用。
     """
     scored_facts: List[Dict[str, Any]]  # 所有 facts 带 relevance_score（供前端展示）
@@ -562,88 +562,71 @@ class GraphToolsService:
 
     def rerank_facts(self, query: str, facts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Use LLM to rerank facts based on relevance to the query.
-        Returns sorted facts with 'relevance_score' and 'relevance_reasoning'.
+        Use SiliconFlow bge-reranker-v2-m3 to rerank facts based on relevance to the query.
+        Returns sorted facts with 'relevance_score' (normalized to 0-100 scale).
+
+        Falls back to returning original facts if API call fails.
         """
         if not facts:
             return []
 
-        logger.info(f"Performing LLM Reranking for {len(facts)} facts...")
+        import requests as _requests
 
-        # Prepare fact list for LLM (limit to top 30 to avoid prompt too long)
-        fact_list_str = ""
-        facts_to_process = facts[:30]
-        for i, f in enumerate(facts_to_process):
-            # 优先使用 original_text（条款完整内容），否则用 text（也包含摘要）
+        from ..config import Config
+
+        facts_to_process = facts[:50]  # SiliconFlow reranker limit
+        logger.info(f"[Rerank] Using bge-reranker-v2-m3 for {len(facts_to_process)} facts")
+
+        # 准备 documents（使用 text 字段，限制长度避免超限）
+        documents = []
+        for f in facts_to_process:
             raw_text = f.get('original_text', '').strip() or f.get('text', '').strip()
-            relation = f.get('relation_name', '')
-            source = f.get('source', 'Graph')
-            page = f.get('page', '')
-            rel_str = f"[{relation}] " if relation else ""
-            pg_str = f" (来源: {source}, 页码: {page})" if page else (f" (来源: {source})" if source != 'Graph' else "")
-            fact_list_str += f"[{i}] {rel_str}{raw_text[:500]}{pg_str}\n"
-
-        rerank_prompt = f"""你是一个专业的知识重排（Rerank）专家。请根据【用户问题】，对【候选事实列表】中的每一条记录进行相关性打分。
-
-### 用户问题:
-{query}
-
-### 候选事实列表:
-{fact_list_str}
-
-### 任务要求:
-1. 对每个事实，评估其对回答【用户问题】的直接贡献度和核心程度。
-2. 打分范围为 0-100（分值越高越相关）：
-   - 90-100: 事实直接、完整地回答了用户问题
-   - 60-89: 事实提供了重要参考信息，但需要进一步推理
-   - 30-59: 事实有一定关联，但偏离核心问题
-   - 0-29: 事实与问题几乎无关
-3. 重点关注事实的条款内容（括号外的文本），区分关系类型（如 DEFINES/HAS_CONDITION/MANDATES 等）。
-4. 返回 JSON 格式：
-{{
-  "rerank_results": [
-    {{"index": 0, "score": 95, "reason": "直接引用了多孔导管敷设的具体间距规定"}},
-    {{"index": 2, "score": 40, "reason": "提及了导管，但主要讨论材质而非敷设规定"}}
-  ]
-}}
-
-请输出打分后的结果 JSON："""
-
-        logger.info(f"[Rerank Prompt] facts_count={len(facts_to_process)}, prompt_length={len(rerank_prompt)}")
-        logger.info(f"[Rerank Prompt Full]\n{rerank_prompt}")
+            documents.append(raw_text[:800])
 
         try:
-            response = self.llm.chat_json(messages=[{"role": "user", "content": rerank_prompt}], temperature=0.1)
-            logger.info(f"[Rerank LLM Raw Response] {response}")
-            rerank_results = response.get("rerank_results", [])
-            logger.info(f"[Rerank LLM] returned {len(rerank_results)} scored items")
+            payload = {
+                "model": Config.RERANKER_MODEL,
+                "query": query,
+                "documents": documents,
+                "top_n": len(documents),
+                "return_documents": False,
+            }
+            headers = {
+                "Authorization": f"Bearer {Config.RERANKER_API_KEY}",
+                "Content-Type": "application/json",
+            }
 
-            # Map results
+            resp = _requests.post(
+                Config.RERANKER_BASE_URL,
+                json=payload,
+                headers=headers,
+                timeout=60,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+            logger.info(f"[Rerank] SiliconFlow response: {json.dumps(result, ensure_ascii=False)[:500]}")
+
+            # SiliconFlow 返回: {"results": [{"index": 0, "relevance_score": 0.95}, ...]}
+            results_list = result.get('results', [])
+            score_map = {item['index']: item['relevance_score'] for item in results_list}
+
             scored_facts = []
-            for item in rerank_results:
-                idx = item.get('index')
-                if isinstance(idx, int) and 0 <= idx < len(facts_to_process):
-                    fact = facts_to_process[idx].copy()
-                    fact['relevance_score'] = item.get('score', 0)
-                    fact['relevance_reasoning'] = item.get('reason', '')
-                    scored_facts.append(fact)
+            for idx, fact in enumerate(facts_to_process):
+                f_copy = fact.copy()
+                score = score_map.get(idx, 0.0)
+                # 转换为百分制（与之前 LLM 打分 0-100 范围一致）
+                f_copy['relevance_score'] = round(score * 100, 1)
+                f_copy['relevance_reasoning'] = ""  # bge-reranker 不提供 reasoning
+                scored_facts.append(f_copy)
 
-            # Sort by score descending
+            # 按分数降序排列
             scored_facts.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-
-            # Add any facts that LLM missed (at the end with 0 score)
-            seen_texts = {f.get('text') for f in scored_facts}
-            for f in facts_to_process:
-                if f.get('text') not in seen_texts:
-                    f_copy = f.copy()
-                    f_copy['relevance_score'] = 0
-                    f_copy['relevance_reasoning'] = "LLM missed during rerank"
-                    scored_facts.append(f_copy)
-
+            logger.info(f"[Rerank] Scored {len(scored_facts)} facts")
             return scored_facts
         except Exception as e:
-            logger.error(f"LLM Fact Reranking failed: {str(e)}")
-            return facts # Return all if reranking fails
+            logger.error(f"[Rerank] bge-reranker API failed: {str(e)}, returning original facts")
+            return facts
 
     def search_with_agentic_flow(
         self,
@@ -1047,22 +1030,24 @@ Your response:"""
         final_rows: List[ObjectFirstRow],
         query: str,
         similarity_threshold: int = 0,
-        filter_threshold: int = 0,
+        top_k: int = 10,
+        rerank_min_score: int = 0,
     ) -> RerankResult:
         """
-        执行检索流程的后两步：LLM 重排 + 阈值过滤。
+        执行检索流程的后两步：bge-reranker 重排 + 分数过滤 + top_k 截取。
         供 SSE 流程（graph.py）和 API 流程（ai_app.py）共用。
 
         Args:
             final_rows: search_with_dfs_flow 返回的 rows（已做过相似度阈值过滤）
             query: 用户查询
             similarity_threshold: 相似度阈值（用于日志）
-            filter_threshold: 相关性阈值（低于此分数的 facts 被过滤）
+            top_k: 保留 top k 个得分最高的 facts（默认 10）
+            rerank_min_score: 重排分数阈值（0-100），低于此分数的 facts 会被过滤掉（默认 0 不过滤）
 
         Returns:
-            RerankResult: 包含所有打分 facts 和过滤后 facts
+            RerankResult: 包含所有打分 facts 和过滤后的 facts
         """
-        logger.info(f"run_retrieval_flow: rows={len(final_rows)}, sim_thresh={similarity_threshold}, filter_thresh={filter_threshold}")
+        logger.info(f"run_retrieval_flow: rows={len(final_rows)}, sim_thresh={similarity_threshold}, top_k={top_k}, rerank_min_score={rerank_min_score}")
 
         # 收集所有 facts 并附上行索引（按 fact text 去重）
         all_facts = []
@@ -1078,26 +1063,19 @@ Your response:"""
                 f_with_idx['_row_idx'] = row_idx
                 all_facts.append(f_with_idx)
 
-        # 日志：每个 fact 的原文和所属 row
-        for i, f in enumerate(all_facts):
-            text_full = f.get('text', '') or ''
-            logger.info(f"[Rerank] input fact[{i}] row={f.get('_row_idx')}: score={f.get('relevance_score', 'N/A')}, text={text_full}")
-
-        # Stage 2: LLM 重排
+        # Stage 2: bge-reranker 重排
         scored_facts = []
         rows_with_scored = []
         if all_facts:
-            logger.info(f"[Stage 2] LLM 重排: input=facts:{len(all_facts)}, query={query[:60]}")
+            logger.info(f"[Stage 2] bge-reranker 重排: input=facts:{len(all_facts)}, query={query[:60]}")
             scored_facts = self.rerank_facts(query, all_facts)
             scored_facts_sorted = sorted(scored_facts, key=lambda f: f.get('relevance_score', 0), reverse=True)
-            # 日志：LLM 打分后每个 fact 的分数和理由
-            for i, f in enumerate(scored_facts_sorted):
+            # 日志：重排后每个 fact 的分数
+            for i, f in enumerate(scored_facts_sorted[:top_k]):
                 score = f.get('relevance_score', 0)
-                reason = f.get('relevance_reasoning', '')
                 text_preview = (f.get('text', '') or '')[:80]
-                pass_mark = 'PASS' if (score or 0) >= filter_threshold else 'FAIL'
-                logger.info(f"[Rerank] scored fact[{i}] score={score} ({pass_mark}, thresh={filter_threshold}): {text_preview}... | reason={reason}")
-            logger.info(f"[Stage 2] LLM 重排: output=facts:{len(scored_facts_sorted)}")
+                logger.info(f"[Rerank] scored fact[{i}] score={score}: {text_preview}...")
+            logger.info(f"[Stage 2] bge-reranker 重排: output=facts:{len(scored_facts_sorted)}")
 
             # 将打分 facts 挂回 rows（全部打分结果）
             rows_with_scored = []
@@ -1117,14 +1095,16 @@ Your response:"""
         else:
             scored_facts_sorted = []
 
-        # Stage 3: filter_threshold 过滤
-        if filter_threshold > 0:
-            filtered_facts = [f for f in scored_facts_sorted if (f.get('relevance_score', 0) or 0) >= filter_threshold]
+        # Stage 3: 分数阈值过滤 + top_k 截取
+        if rerank_min_score > 0:
+            scored_above_threshold = [f for f in scored_facts_sorted if f.get('relevance_score', 0) >= rerank_min_score]
+            logger.info(f"[Stage 3] 分数阈值过滤: min_score={rerank_min_score}, before={len(scored_facts_sorted)}, after={len(scored_above_threshold)}")
         else:
-            filtered_facts = scored_facts_sorted
-        logger.info(f"[Stage 3] 阈值过滤: input=facts:{len(scored_facts_sorted)}, output=facts:{len(filtered_facts)}")
+            scored_above_threshold = scored_facts_sorted
+        filtered_facts = scored_above_threshold[:top_k] if scored_above_threshold else []
+        logger.info(f"[Stage 3] top_k 截取: input=facts:{len(scored_above_threshold)}, top_k={top_k}, output=facts:{len(filtered_facts)}")
 
-        # 将过滤后 facts 挂回 rows
+        # 将 top_k facts 挂回 rows
         rows_with_filtered = []
         for row_idx, original_row in enumerate(final_rows):
             row_facts = [

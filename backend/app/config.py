@@ -47,6 +47,11 @@ class Config:
     EMBEDDING_API_KEY = os.environ.get('EMBEDDING_API_KEY')
     EMBEDDING_DIMENSION = int(os.environ.get('EMBEDDING_DIMENSION', '768'))
 
+    # Reranker configuration (SiliconFlow bge-reranker-v2-m3)
+    RERANKER_MODEL = os.environ.get('RERANKER_MODEL', 'BAAI/bge-reranker-v2-m3')
+    RERANKER_BASE_URL = os.environ.get('RERANKER_BASE_URL', 'https://api.siliconflow.cn/v1/rerank')
+    RERANKER_API_KEY = os.environ.get('RERANKER_API_KEY')
+
     # File upload configuration
     MAX_CONTENT_LENGTH = 500 * 1024 * 1024  # 500MB
     UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), '../uploads')

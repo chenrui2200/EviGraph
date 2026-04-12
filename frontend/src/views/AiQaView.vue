@@ -103,7 +103,7 @@
                   </div>
                 </div>
 
-                <!-- 相似度阈值：DFS 检索后预过滤，减少 LLM reranking 数量 -->
+                <!-- 相似度阈值：检索后预过滤，减少 reranking 数量 -->
                 <div class="search-option-row sim-row">
                   <span class="option-label">相似度阈值</span>
                   <div class="sim-slider-wrap">
@@ -219,17 +219,23 @@
             <!-- Rerank Node Content -->
             <div v-if="node.type === 'rerank'" class="rerank-content">
               <div class="rerank-config">
-                <div class="threshold-label">
-                  <span>🎯 知识过滤阈值:</span>
-                  <span class="threshold-value" :class="getThresholdClass(workflowData.filterThreshold)">{{ workflowData.filterThreshold }}分</span>
-                </div>
-                <div class="thermometer-container">
-                  <input type="range" v-model="workflowData.filterThreshold" min="50" max="100" step="5" class="thermometer-input" />
-                  <div class="thermometer-track">
-                    <div class="thermometer-fill" :style="{ width: ((workflowData.filterThreshold - 50) / 50 * 100) + '%', background: getThresholdColor(workflowData.filterThreshold) }"></div>
+                <div class="rerank-config-row">
+                  <div class="threshold-label">
+                    <span>🎯 保留 Top K 样本:</span>
+                    <input type="number" v-model.number="workflowData.topK" min="1" max="50" step="1" class="topk-input" />
                   </div>
                 </div>
-                <p class="config-hint">仅将高于此分数的检索事实发送给大模型推理</p>
+                <div class="threshold-label" style="margin-top: 6px;">
+                  <span>🎯 重排得分阈值:</span>
+                  <span class="threshold-value" :class="getThresholdClass(workflowData.rerankMinScore)">{{ workflowData.rerankMinScore }}分</span>
+                </div>
+                <div class="thermometer-container">
+                  <input type="range" v-model.number="workflowData.rerankMinScore" min="50" max="100" step="5" class="thermometer-input" />
+                  <div class="thermometer-track">
+                    <div class="thermometer-fill" :style="{ width: ((workflowData.rerankMinScore - 50) / 50 * 100) + '%', background: getThresholdColor(workflowData.rerankMinScore) }"></div>
+                  </div>
+                </div>
+                <p class="config-hint">过滤掉 bge-reranker-v2-m3 打分低于阈值的不相关事实，再取 Top K</p>
               </div>
 
               <div v-if="results.rerank_results.length === 0" class="rerank-placeholder">
@@ -237,18 +243,15 @@
               </div>
               <div v-else class="rerank-results-list">
                 <div class="rerank-summary">
-                  LLM 已完成精排，共 {{ results.facts.length }} 条
-                  <span v-if="workflowData.filterThreshold > 0">
-                    （高于{{ workflowData.filterThreshold }}分的有 {{ results.facts.filter(f => f.relevance_score >= workflowData.filterThreshold).length }} 条）
-                  </span>
+                  bge-reranker-v2-m3 已完成精排，共 {{ results.facts.length }} 条（Top {{ workflowData.topK }}，最低 {{ workflowData.rerankMinScore }}分）
                 </div>
                 <div class="rerank-scroll-area">
-                  <div v-for="(fact, idx) in results.facts" :key="idx" class="rerank-item-card" :class="{ 'high-score': fact.relevance_score >= workflowData.filterThreshold, 'below-threshold': fact.relevance_score < workflowData.filterThreshold }">
+                  <div v-for="(fact, idx) in results.facts" :key="idx" class="rerank-item-card" :class="{ 'high-score': idx < workflowData.topK, 'below-threshold': idx >= workflowData.topK }">
                     <div class="rerank-item-header">
                       <span class="rerank-score">{{ fact.relevance_score }}分</span>
                       <span class="rerank-index">Rank #{{ idx + 1 }}</span>
                     </div>
-                    <div class="rerank-reason">理由: {{ fact.relevance_reasoning }}</div>
+                    <div v-if="fact.relevance_reasoning" class="rerank-reason">理由: {{ fact.relevance_reasoning }}</div>
                     <div class="rerank-text-snippet">{{ fact.text }}</div>
                     <div class="fact-footer" style="margin-top: 8px;">
                       <span class="fact-source-tag">
@@ -896,8 +899,9 @@ const workflowData = ref({
   query: '',
   selectedGraphIds: [],
   temperature: 0.7,
-  similarityThreshold: 50,   // 相似度阈值：DFS 检索后预过滤，减少 LLM reranking 数量
-  filterThreshold: 75,        // 推理阈值：reranking 后过滤，≥此分数才送 LLM 推理
+  similarityThreshold: 50,   // 相似度阈值：检索后预过滤，减少 reranking 数量
+  topK: 5,                 // top_k：bge-reranker-v2-m3 精排后保留得分最高的 K 条
+  rerankMinScore: 50,        // 重排分数阈值：低于此分数的 facts 会被过滤（默认50）
   rootTypes: ['Entity', 'Term'],  // 根节点类型（与 hit-test 对齐）
 })
 
@@ -906,7 +910,8 @@ const results = ref({
   rows: [],      // ObjectFirstRow structure from DFS flow
   searchTimings: { object_s: 0, term_s: 0, total_s: 0 },  // 与 hit-test 对齐
   similarityThreshold: 0,   // 相似度阈值（retrieval 用）
-  filterThreshold: 0,       // 推理阈值（rerank 用）
+  topK: 5,               // top_k（rerank 用）
+  rerankMinScore: 50,      // 重排分数阈值（rerank 用）
   answer: '',
   rerank_results: [],
   prompts: {
@@ -930,7 +935,7 @@ const showPromptModal = ref(false)
 const nodes = ref([
   { id: 'n1', type: 'input', title: '用户输入 (Input)', icon: '📝', x: 50, y: 150, status: 'pending' },
   { id: 'n2', type: 'retrieval', title: '知识库检索 (Retrieval)', icon: '🔍', x: 350, y: 150, status: 'pending' },
-  { id: 'n_rerank', type: 'rerank', title: 'LLM 相关性重排 (Rerank)', icon: '🃏', x: 650, y: 150, status: 'pending' },
+  { id: 'n_rerank', type: 'rerank', title: 'bge-reranker-v2-m3 精排', icon: '🃏', x: 650, y: 150, status: 'pending' },
   { id: 'n3', type: 'llm', title: '大模型推理 (LLM)', icon: '🧠', x: 950, y: 150, status: 'pending' },
   { id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 1250, y: 150, status: 'pending' }
 ])
@@ -1044,7 +1049,7 @@ const getThresholdClass = (val) => {
 
 // 相似度阈值颜色（中=橙，高=绿），与 hit-test 对齐
 const simValueClass = computed(() => {
-  if (workflowData.value.filterThreshold >= 75) return 'high'
+  if (workflowData.value.similarityThreshold >= 75) return 'high'
   return 'mid'
 })
 
@@ -1084,7 +1089,7 @@ const runWorkflow = async () => {
     results.value.rows = rows
     results.value.facts = rows.flatMap(r => r.facts || [])
 
-    // ===== Stage 2: LLM 相关性重排 =====
+    // ===== Stage 2: 相关性重排 =====
     const rerankNode = nodes.value.find(n => n.type === 'rerank')
     if (rerankNode) rerankNode.status = 'running'
 
@@ -1092,7 +1097,8 @@ const runWorkflow = async () => {
     const rerankRes = await rerankFacts({
       rows: rows,
       query: workflowData.value.query,
-      filter_threshold: workflowData.value.filterThreshold,
+      top_k: workflowData.value.topK,
+      rerank_min_score: workflowData.value.rerankMinScore,
     })
 
     // fallback: 使用原始 facts
@@ -1862,6 +1868,30 @@ onUnmounted(() => {
 .threshold-value.low { background: #f56c6c; }
 .threshold-value.mid { background: #e6a23c; }
 .threshold-value.high { background: #67c23a; }
+
+.topk-input {
+  width: 60px;
+  padding: 4px 8px;
+  border: 1.5px solid #dcdfe6;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  color: #409eff;
+  background: #f5f7fa;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.topk-input:focus {
+  border-color: #409eff;
+  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.15);
+  background: #fff;
+}
+.topk-input::-webkit-inner-spin-button,
+.topk-input::-webkit-outer-spin-button {
+  opacity: 1;
+  height: 20px;
+}
 
 .thermometer-container {
   position: relative;

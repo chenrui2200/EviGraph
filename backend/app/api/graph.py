@@ -4103,9 +4103,14 @@ def ai_qa():
     query = data.get('query')
     graph_ids = data.get('graph_ids', [])
     try:
-        filter_threshold = int(data.get('filter_threshold', 75))
+        top_k = int(data.get('top_k', 10))
     except (ValueError, TypeError):
-        filter_threshold = 75
+        top_k = 10
+
+    try:
+        rerank_min_score = int(data.get('rerank_min_score', 0))
+    except (ValueError, TypeError):
+        rerank_min_score = 0
 
     try:
         max_depth = int(data.get('max_depth', 3))
@@ -4209,7 +4214,7 @@ def ai_qa():
             }
             yield f"data: {json.dumps(msg_ret, ensure_ascii=False)}\n\n"
 
-            # ===== Stage 2: LLM 相关性重排 =====
+            # ===== Stage 2: bge-reranker-v2-m3 精排 =====
             yield f"data: {json.dumps({'type': 'rerank_start'})}\n\n"
             rerank_start = time.time()
 
@@ -4218,7 +4223,8 @@ def ai_qa():
                 final_rows=dfs_result.rows,
                 query=query,
                 similarity_threshold=similarity_threshold,
-                filter_threshold=filter_threshold,
+                top_k=top_k,
+                rerank_min_score=rerank_min_score,
             )
             rerank_dur = round(time.time() - rerank_start, 2)
 

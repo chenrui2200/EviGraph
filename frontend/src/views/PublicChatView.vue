@@ -97,7 +97,8 @@ const appConfig = ref({
   selectedGraphIds: [],
   rootTypes: ['Entity', 'Term'],
   similarityThreshold: 0,
-  filterThreshold: 75,
+  topK: 10,
+  rerankMinScore: 50,
   temperature: 0.7,
 })
 
@@ -170,9 +171,8 @@ const renderEvidenceScreenshots = async () => {
   if (!pdfjsLibInstance) await initPdfJs()
   const pdfDocCache = {}
 
-  const facts = results.value.rerank_results.length > 0
-    ? results.value.rerank_results.filter(f => f.relevance_score >= appConfig.value.filterThreshold)
-    : results.value.facts
+  // 使用 top_k 截取后的 facts（已由后端过滤）
+  const facts = results.value.facts
 
   for (let i = 0; i < facts.length; i++) {
     const fact = facts[i]
@@ -241,7 +241,8 @@ const loadApp = async () => {
       selectedGraphIds: wf.selectedGraphIds || [],
       rootTypes: wf.rootTypes || ['Entity', 'Term'],
       similarityThreshold: wf.similarityThreshold || 0,
-      filterThreshold: wf.filterThreshold || 75,
+      topK: wf.topK ?? 10,
+      rerankMinScore: wf.rerankMinScore ?? 50,
       temperature: wf.temperature || 0.7,
     }
   }
@@ -293,17 +294,18 @@ const handleSearch = async () => {
       return
     }
 
-    // ===== Stage 2: LLM 重排 =====
-    loadingMessage.value = '正在 LLM 重排...'
+    // ===== Stage 2: 相关性重排 =====
+    loadingMessage.value = '正在重排...'
     const rerankRes = await rerankFacts({
       rows: filteredRows,
       query: query,
-      filter_threshold: appConfig.value.filterThreshold,
+      top_k: appConfig.value.topK,
+      rerank_min_score: appConfig.value.rerankMinScore,
     })
 
     if (rerankRes.success && rerankRes.data) {
       results.value.rerank_results = rerankRes.data.scored_facts || []
-      // facts = 过滤后的 facts（用于 LLM 推理和证据展示）
+      // facts = top_k 截取后的 facts（用于 LLM 推理和证据展示）
       results.value.facts = rerankRes.data.filtered_facts || rerankRes.data.scored_facts || []
       if (rerankRes.data.rows && rerankRes.data.rows.length > 0) {
         results.value.rows = rerankRes.data.rows
@@ -312,12 +314,9 @@ const handleSearch = async () => {
 
     // ===== Stage 3: LLM 生成答案 =====
     loadingMessage.value = '正在生成答案...'
-    const filteredFacts = results.value.rerank_results.length > 0
-      ? results.value.rerank_results.filter(f => f.relevance_score >= appConfig.value.filterThreshold)
-      : results.value.facts
-
+    // filtered_facts 已由后端按 top_k 截取，直接使用
     const llmRes = await llmAnswer({
-      facts: filteredFacts,
+      facts: results.value.facts,
       query: query,
       temperature: appConfig.value.temperature,
     })
