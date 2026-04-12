@@ -1,6 +1,7 @@
 [根目录](../CLAUDE.md) > **frontend**
 
 ## 变更记录 (Changelog)
+- **2026-04-12**: 新增 API 客户端、Composable 状态管理、Router 路由配置、Store 状态管理。
 - **2026-03-24**: 初始扫描，识别 Vue 3 组件与 API 客户端结构。
 
 ## 模块职责
@@ -9,28 +10,51 @@
 - 基于 D3.js 的图谱可视化 (`components/GraphPanel.vue`)。
 - 分步向导式的构建流程 (`components/GraphBuild.vue` 等)。
 - 交互式 AI 问答界面。
+- 实体标签管理与统计展示。
 
 ## 入口与启动
 - **入口**: `frontend/src/main.js`。
 - **开发**: `npm run dev` (Vite)。
 - **构建**: `npm run build`。
 
-## 对外接口 (API Client)
-- `frontend/src/api/index.js`: Axios 基础配置与重试机制。
-- `frontend/src/api/graph.js`: 图谱相关 API 调用。
-- `frontend/src/api/simulation.js`: 仿真相关 API 调用。
+## 前端目录结构
+```
+frontend/src/
+├── api/           # API 客户端 (Axios)
+├── components/   # Vue 组件
+├── composables/   # Vue 3 Composable 状态逻辑
+├── router/        # Vue Router 路由配置
+├── store/        # Pinia 状态管理
+├── views/        # 页面视图
+├── assets/       # 静态资源
+└── App.vue      # 根组件
+```
+
+## API 客户端 (`api/`)
+| 文件 | 职责 |
+| :--- | :--- |
+| `index.js` | Axios 基础配置与重试机制 |
+| `graph.js` | 图谱相关 API 调用 |
+| `ai_qa.js` | AI 问答 API 调用 |
+| `chunk.js` | 分块 API 调用 |
+| `project.js` | 项目管理 API 调用 |
+| `ontology.js` | 本体 API 调用 |
 
 ## 关键依赖
 - **Vue 3**: 前端框架。
 - **Vite**: 构建工具。
 - **D3.js**: 知识图谱的可视化。
 - **Axios**: HTTP 请求。
+- **Pinia**: 状态管理。
+- **Vue Router**: 路由管理。
 
 ## 测试与质量
-- **覆盖率**: 目前缺少单元测试与 E2E 测试。
+- **覆盖率**: 建议引入单元测试与 E2E 测试。
 - **工具**: 建议使用 `vitest` 和 `Cypress`。
 
 ## 相关文件清单
 - `frontend/src/views/MainView.vue`: 应用主布局。
 - `frontend/src/components/GraphPanel.vue`: 核心图谱展示组件。
 - `frontend/src/components/GraphBuild.vue`: 知识图谱构建面板。
+- `frontend/src/components/AiQaPanel.vue`: AI 问答交互面板。
+- `frontend/src/composables/`: 可复用状态逻辑。

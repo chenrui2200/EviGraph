@@ -1,6 +1,7 @@
 # Knowledge EviGraph 架构文档
 
 ## 变更记录 (Changelog)
+- **2026-04-12**: 更新架构文档，反映 QA Pipeline、BGE-reranker、JSONL 解析、智能分块等新功能。
 - **2026-03-24**: 初始化项目架构文档，识别后端 (Python/Flask) 与前端 (Vue 3/Vite) 模块。
 
 ## 项目愿景
@@ -10,31 +11,74 @@ Knowledge EviGraph 是一个基于 Neo4j 和大语言模型 (LLM) 的知识图�
 
 ```mermaid
 graph TD
-    Root["(根) Knowledge EviGraph"] --> BE["backend (Flask)"]
-    Root --> FE["frontend (Vue 3)"]
+    Root[“(根) Knowledge EviGraph”] --> BE[“backend (Flask)”]
+    Root --> FE[“frontend (Vue 3)”]
 
-    BE --> API["API 层 (Blueprint)"]
-    BE --> Services["Service 层 (逻辑核心)"]
-    BE --> Storage["Storage 层 (Neo4j/Embeddings)"]
-    BE --> Models["Models 层 (数据模型)"]
+    BE --> API[“API 层 (Blueprint)”]
+    BE --> Services[“Service 层 (逻辑核心)”]
+    BE --> Storage[“Storage 层 (Neo4j/Embeddings)”]
+    BE --> Models[“Models 层 (数据模型)”]
+    BE --> Utils[“Utils 层 (Parser/Tools)”]
 
-    FE --> Components["UI 组件 (Graph/Steps)"]
-    FE --> Views["视图层 (Home/Interaction)"]
-    FE --> Router["路由 (Vue Router)"]
+    FE --> Components[“UI 组件 (Graph/Steps)”]
+    FE --> Views[“视图层 (Home/Interaction)”]
+    FE --> Router[“路由 (Vue Router)”]
+    FE --> Store[“状态管理 (Pinia)”]
+    FE --> ApiClient[“API 客户端”]
 
-    Services --> LLM["LLM 客户端 (Ollama/OpenAI)"]
-    Storage --> Neo4j[("Neo4j 数据库")]
+    Services --> LLM[“LLM 客户端 (Ollama/vLLM)”]
+    Services --> QAPipeline[“QA Pipeline 服务”]
+    Services --> Chunker[“智能分块服务”]
+    Storage --> Neo4j[(“Neo4j 数据库”)]
+    Storage --> VectorStore[“向量存储 (Embedding)”]
 
-    click BE "./backend/CLAUDE.md" "查看后端模块文档"
-    click FE "./frontend/CLAUDE.md" "查看前端模块文档"
+    click BE “./backend/CLAUDE.md” “查看后端模块文档”
+    click FE “./frontend/CLAUDE.md” “查看前端模块文档”
 ```
 
 ## 模块索引
 
 | 模块路径 | 语言 | 职责描述 | 入口文件 |
 | :--- | :--- | :--- | :--- |
-| [backend](./backend/CLAUDE.md) | Python | 后端 API、图谱构建服务、LLM 链条管理、Neo4j 交互 | `backend/run.py` |
+| [backend](./backend/CLAUDE.md) | Python | 后端 API、图谱构建服务、LLM 链条管理、Neo4j 交互、QA Pipeline | `backend/run.py` |
 | [frontend](./frontend/CLAUDE.md) | Vue/JS | 用户界面、图谱可视化 (D3.js)、项目流程管理 | `frontend/src/main.js` |
+
+## 核心功能模块
+
+### 后端 API 路由 (`backend/app/api/`)
+| 路由文件 | 路径 | 职责 |
+| :--- | :--- | :--- |
+| `graph.py` | `/api/graph` | 核心图谱接口、后台 Worker 逻辑 |
+| `graph_ops_routes.py` | `/api/graph/ops` | 图谱操作（实体/关系管理） |
+| `ai_qa_routes.py` | `/api/ai-qa` | AI 问答路由 |
+| `ai_app.py` | `/api/ai-app` | AI 应用配置与管理 |
+| `chunk_routes.py` | `/api/chunk` | 文档智能分块 |
+| `ontology_routes.py` | `/api/ontology` | 本体生成与管理 |
+| `project_routes.py` | `/api/project` | 项目管理 |
+| `entity_routes.py` | `/api/entity` | 实体管理 |
+| `report.py` | `/api/report` | 报告生成 |
+| `task_routes.py` | `/api/task` | 异步任务状态 |
+
+### 后端核心服务 (`backend/app/services/`)
+| 服务文件 | 职责 |
+| :--- | :--- |
+| `graph_builder.py` | 图谱构建核心逻辑 |
+| `graph_tools.py` | 图谱工具集（重排、检索、查询） |
+| `qa_pipeline.py` | 统一 QA Pipeline 服务 |
+| `llm_driven_chunker.py` | LLM 驱动的智能文档分块 |
+| `hierarchical_chunker.py` | 层级分块服务 |
+| `ontology_generator.py` | 本体生成 |
+| `oasis_profile_generator.py` | OASIS 规范剖面生成 |
+| `normative_ontology.py` | 规范本体定义 |
+| `semantic_enricher.py` | 语义 enrichment |
+| `llm_doc_parser.py` | LLM 文档解析 |
+| `query_intent_parser.py` | 查询意图解析 |
+
+### 后端存储层 (`backend/app/storage/`)
+| 存储文件 | 职责 |
+| :--- | :--- |
+| `neo4j_storage.py` | Neo4j 图数据库封装 |
+| `search_service.py` | 检索服务（支持 BGE-reranker） |
 
 ## 运行与开发
 
@@ -42,17 +86,24 @@ graph TD
 - Node.js >= 18.0.0
 - Python >= 3.10
 - Neo4j 数据库
-- Ollama (可选，用于本地运行 LLM)
+- Ollama / vLLM (用于本地运行 LLM)
+- MinerU (PDF 解析，可选)
+- BGE-reranker-v2-m3 (重排模型)
 
 ### 快速启动
 1. **安装依赖**: `npm run setup:all` (会自动执行 root, backend 和 frontend 的安装)
 2. **启动开发服务**: `npm run dev` (同时启动后端 5001 和前端)
 3. **配置文件**: 在根目录或 `backend` 目录下创建 `.env` 文件。
 
+### 启动脚本 (`script/`)
+- `mineru_start.sh`: 启动 MinerU PDF 解析服务
+- `nomic_embed_start.sh`: 启动 Nomic Embedding 服务
+- `vllm_start.sh`: 启动 vLLM LLM 服务
+
 ## 测试策略
-- **当前状态**: 暂未发现自动化测试。
+- **当前状态**: 后端已有 `.pytest_cache`，建议正式引入 `pytest`。
 - **建议**:
-  - 后端引入 `pytest` 进行 API 与 Service 逻辑测试。
+  - 后端使用 `pytest` 进行 API 与 Service 逻辑测试。
   - 前端引入 `vitest` 进行组件与 API 客户端测试。
 
 ## 编码规范
@@ -84,8 +135,19 @@ graph TD
 ### 3. 构建流程
 - **预处理**: 保留 metadata 溯源。
 - **抽取**: 正则识别章节术语；LLM 识别条件、动作与参数。
-- **关系**: 扫描“在…时”等句式建立条件关联；表格行拆解为参数节点。
+- **关系**: 扫描”在…时”等句式建立条件关联；表格行拆解为参数节点。
+
+## 检索与重排流程
+
+项目采用 **BGE-reranker-v2-m3** 替代 LLM 重排，提升检索效率：
+
+```
+查询 → Embedding 检索 → Top-K 候选 → BGE-reranker 重排 → 最终结果
+```
 
 ## AI 使用指引
-- 该项目涉及复杂的图谱构建逻辑 (`backend/app/services/graph_builder.py`) 和多步检索逻辑 (`backend/app/api/graph.py` 中的 `ai_qa`)。修改这些部分时，请确保理解其背景任务 (Background Workers) 和状态机转换。
-- **核心模型应用**: 必须严格遵循上述 **Normative KG Schema** 进行实体提取和建模，以支持“遇到什么情况应该怎么做”的情景化查询。
+- 该项目涉及复杂的图谱构建逻辑 (`backend/app/services/graph_builder.py`) 和多步检索逻辑 (`backend/app/api/graph.py` 中的 `ai_qa`)。
+- **QA Pipeline**: 统一服务整合了检索、分块、重排功能 (`qa_pipeline.py`)。
+- **智能分块**: 支持 LLM 驱动分块 (`llm_driven_chunker.py`) 和层级分块 (`hierarchical_chunker.py`)。
+- **JSONL 支持**: 条款解析支持直接读取 JSONL 格式。
+- **核心模型应用**: 必须严格遵循上述 **Normative KG Schema** 进行实体提取和建模，以支持”遇到什么情况应该怎么做”的情景化查询。
