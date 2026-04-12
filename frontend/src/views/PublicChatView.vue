@@ -97,7 +97,7 @@ const appConfig = ref({
   selectedGraphIds: [],
   rootTypes: ['Entity', 'Term'],
   similarityThreshold: 0,
-  topK: 10,
+  topK: 5,
   rerankMinScore: 50,
   temperature: 0.7,
 })
@@ -241,7 +241,7 @@ const loadApp = async () => {
       selectedGraphIds: wf.selectedGraphIds || [],
       rootTypes: wf.rootTypes || ['Entity', 'Term'],
       similarityThreshold: wf.similarityThreshold || 0,
-      topK: wf.topK ?? 10,
+      topK: wf.topK ?? 5,
       rerankMinScore: wf.rerankMinScore ?? 50,
       temperature: wf.temperature || 0.7,
     }

@@ -1274,8 +1274,8 @@ Your response:"""
                                     "page_height": pdf_info["page_height"] or meta.get("page_height") or nested_meta.get("page_height"),
                                     "episode_text": node_eps[0].get("text"),
                                 })
-                        except:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"Failed to get node episodes for {node_uuid}: {e}")
 
                     nodes.append({
                         "uuid": node_uuid,
@@ -1302,7 +1302,10 @@ Your response:"""
                     if node_uuid and len(facts) < limit * 2:
                         try:
                             node_rels = self.storage.get_node_edges(node_uuid)
-                            for rel in node_rels[:3]: # Add up to 3 context relations
+                        except Exception as e:
+                            logger.debug(f"Failed to get node edges for {node_uuid}: {e}")
+                            node_rels = []
+                        for rel in node_rels[:3]: # Add up to 3 context relations
                                 if rel.get('fact'):
                                     # Traceability for Relation: Find original episodes from edge
                                     rel_source_info = {"source": "Graph Path Extension", "page": None, "bbox": None}
@@ -1320,8 +1323,8 @@ Your response:"""
                                                     "page_width": meta.get("page_width") or nested_meta.get("page_width"),
                                                     "page_height": meta.get("page_height") or nested_meta.get("page_height")
                                                 })
-                                        except:
-                                            pass
+                                        except Exception as e:
+                                            logger.debug(f"Failed to get rel episodes: {e}")
 
                                     facts.append({
                                         "text": f"Contextual Fact: {rel['fact']}",
@@ -1332,8 +1335,6 @@ Your response:"""
                                         "page_height": rel_source_info.get("page_height"),
                                         "graph_id": graph_id
                                     })
-                        except:
-                            pass
 
             logger.info(f"Search complete: Found {len(facts)} related facts")
 
@@ -1962,6 +1963,11 @@ Your response:"""
         traversal_edges: List[ObjectPathEdge] = []
         facts: List[Dict[str, Any]] = []
         visited: set = set()
+        # Track nodes added to traversal_nodes to prevent duplicates at different depths
+        # (同一个节点可能被多次enqueued但只应出现在一个深度层级)
+        nodes_in_traversal: set = set()
+        # Track edges added to traversal_edges to prevent duplicate edges
+        edges_in_traversal: set = set()
 
         # Phase 1: Stack-based iterative DFS — one edge query per node
         # Stack items: (node_uuid, node_data, depth)
@@ -1977,8 +1983,9 @@ Your response:"""
                 continue
             visited.add(node_uuid)
 
-            # Add node to DFS path
-            if node_data:
+            # Add node to DFS path (skip if already added at a shallower depth)
+            if node_data and node_uuid not in nodes_in_traversal:
+                nodes_in_traversal.add(node_uuid)
                 traversal_nodes.append(ObjectPathNode(
                     uuid=node_uuid,
                     name=node_data.get("name", ""),
@@ -2016,15 +2023,17 @@ Your response:"""
                     or edge_name in edge_type_filter
                 )
 
-                # Add edge to traversal path (always, for context)
-                traversal_edges.append(ObjectPathEdge(
-                    uuid=edge_uuid,
-                    name=edge_name,
-                    fact=edge_fact,
-                    source_node_uuid=src_uuid,
-                    target_node_uuid=tgt_uuid,
-                    depth=depth,
-                ))
+                # Add edge to traversal path (always, for context, skip duplicates)
+                if edge_uuid and edge_uuid not in edges_in_traversal:
+                    edges_in_traversal.add(edge_uuid)
+                    traversal_edges.append(ObjectPathEdge(
+                        uuid=edge_uuid,
+                        name=edge_name,
+                        fact=edge_fact,
+                        source_node_uuid=src_uuid,
+                        target_node_uuid=tgt_uuid,
+                        depth=depth,
+                    ))
 
                 # Collect neighbor for Phase 2 batch fetch only if edge matches intent filter
                 if neighbor_uuid and neighbor_uuid not in visited and is_matching_edge:

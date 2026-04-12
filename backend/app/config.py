@@ -21,7 +21,10 @@ class Config:
     """Flask configuration class"""
 
     # Flask configuration
-    SECRET_KEY = os.environ.get('SECRET_KEY', 'mirofish-secret-key')
+    # SECURITY: SECRET_KEY must be set via environment variable, no default
+    SECRET_KEY = os.environ.get('SECRET_KEY')
+    if not SECRET_KEY:
+        raise ValueError("SECRET_KEY environment variable is required. Set it in .env file or environment.")
     DEBUG = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
 
     # JSON configuration - disable ASCII escaping to display Chinese directly (not as \uXXXX)
@@ -36,7 +39,10 @@ class Config:
     # Neo4j configuration
     NEO4J_URI = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
     NEO4J_USER = os.environ.get('NEO4J_USER', 'neo4j')
-    NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD', 'mirofish')
+    # SECURITY: NEO4J_PASSWORD must be set via environment variable, no default
+    NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD')
+    if not NEO4J_PASSWORD:
+        raise ValueError("NEO4J_PASSWORD environment variable is required. Set it in .env file or environment.")
 
     # MinerU PDF parsing API
     MINERU_API_URL = os.environ.get('MINERU_API_URL', 'http://192.168.110.126:8188/pdf_parse?parse_method=auto&is_json_md_dump=true')

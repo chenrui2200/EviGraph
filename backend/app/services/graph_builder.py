@@ -588,6 +588,8 @@ class GraphBuilderService:
         """
         from ..models.normative_entity import EntityType
 
+        # 只保留 Term 和 Entity 类型，其他类型映射为 Entity
+        VALID_ENTITY_TYPES = {"Term", "Entity"}
         relation_count = 0
 
         # 构建实体名称到类型的映射（LLM 已识别）
@@ -596,13 +598,16 @@ class GraphBuilderService:
         # 第一步：收集所有实体及其类型（来自 LLM）
         for clause in parsed_doc.clauses:
             for entity in clause.entities:
-                entity_type_map[entity.name] = entity.entity_type.value
+                # 只保留 Term 和 Entity 类型，其他类型统一映射为 Entity
+                raw_type = entity.entity_type.value
+                entity_type_map[entity.name] = raw_type if raw_type in VALID_ENTITY_TYPES else "Entity"
 
         # 全局实体
         for entity in parsed_doc.global_entities:
-            entity_type_map[entity.name] = entity.entity_type.value
+            raw_type = entity.entity_type.value
+            entity_type_map[entity.name] = raw_type if raw_type in VALID_ENTITY_TYPES else "Entity"
 
-        # 第二步：创建所有实体节点
+        # 第二步：创建所有实体节点（只创建 Term 和 Entity 类型）
         entity_uuid_map: Dict[str, str] = {}
         for entity_name, entity_type in entity_type_map.items():
             uuid = self._get_or_create_entity(graph_id, entity_type, entity_name)
@@ -621,8 +626,8 @@ class GraphBuilderService:
                     source_name = relation.source_entity
                     target_name = relation.target_entity
 
-                    # 直接使用 LLM 识别的类型
-                    target_type = entity_type_map.get(target_name, EntityType.COMPONENT.value)
+                    # 直接使用 LLM 识别的类型（不在 map 中默认为 Entity）
+                    target_type = entity_type_map.get(target_name, "Entity")
                     source_uuid = entity_uuid_map.get(source_name) or clause_uuid
 
                     # 如果目标实体已创建，添加关系
@@ -655,7 +660,7 @@ class GraphBuilderService:
                 target_uuid = entity_uuid_map.get(target_name)
 
                 if source_uuid and target_uuid:
-                    target_type = entity_type_map.get(target_name, EntityType.COMPONENT.value)
+                    target_type = entity_type_map.get(target_name, "Entity")
                     rel_data = {
                         "type": rel_type,
                         "target": target_name,
@@ -675,7 +680,8 @@ class GraphBuilderService:
         try:
             result = self.storage.find_clause_by_id(graph_id, clause_id)
             return result.get("uuid") if result else None
-        except:
+        except Exception as e:
+            logger.debug(f"Failed to find clause UUID for {clause_id}: {e}")
             return None
 
     def _get_or_create_entity(

@@ -67,7 +67,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import GraphBuild from '../components/GraphBuild.vue'
@@ -431,7 +431,7 @@ onMounted(() => {
   initProject()
 })
 
-onUnmounted(() => {
+onBeforeUnmount(() => {
   stopPolling()
   stopGraphPolling()
 })

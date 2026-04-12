@@ -350,7 +350,8 @@ Respond with ONLY the choice name.
 
             if "engineering" in domain: return "engineering"
             return "social"
-        except:
+        except Exception as e:
+            logger.debug(f"Failed to detect domain: {e}")
             return "social"
 
     # Maximum text length for LLM (50,000 characters)

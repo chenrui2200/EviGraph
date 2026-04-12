@@ -59,6 +59,40 @@ ACTION_ALLOWED_PREFIXES = {
     "阻燃", "耐火", "防腐", "防水",  # 这些通常是材料属性，但可作为动作理解
 }
 
+# ============================================================
+# Neo4j Label 白名单（防止 Cypher 注入）
+# ============================================================
+# Episode 节点支持的层级标签
+VALID_EPISODE_LABELS = frozenset({
+    "Chapter", "Section", "Subsection", "Clause", "Term",
+    "Table", "Figure", "Appendix", "Level1", "Level2", "Level3",
+    # 通用标签
+    "Term", "Entity", "Component", "Action", "Condition", "Object",
+    "Episode", "Topic", "Document", "Page",
+})
+
+# Entity/Topic/Clause 节点支持的类型标签
+VALID_NODE_LABELS = frozenset({
+    "Term", "Entity", "Component", "Action", "Condition", "Object",
+    "Topic", "Clause",
+})
+
+# 用于验证并返回安全标签的辅助函数
+def _safe_label(label: str, allowed: frozenset = VALID_NODE_LABELS) -> Optional[str]:
+    """
+    验证标签是否在白名单中，返回安全标签或 None。
+    防止 Cypher 注入：确保标签名不包含特殊字符且在白名单中。
+    """
+    if not label or not isinstance(label, str):
+        return None
+    # 验证标签只包含字母数字，且在白名单中
+    safe_label = label.strip()
+    if not safe_label.isalnum():
+        return None
+    if safe_label not in allowed:
+        return None
+    return safe_label
+
 
 def is_actionable(action_name: str) -> bool:
     """
@@ -274,6 +308,25 @@ class Neo4jStorage(GraphStorage):
         except Exception as e:
             logger.warning(f"Could not determine Neo4j version: {e}")
 
+    def _parse_json_safe(self, json_str: str, default: Any = None) -> Any:
+        """
+        安全解析 JSON 字符串，失败时返回默认值并记录日志。
+
+        Args:
+            json_str: JSON 字符串
+            default: 解析失败时返回的默认值
+
+        Returns:
+            解析后的对象，或默认值
+        """
+        if not json_str:
+            return default if default is not None else {}
+        try:
+            return json.loads(json_str)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"JSON parse error: {e}")
+            return default if default is not None else {}
+
     def _get_existing_indexes(self, session) -> Dict[str, str]:
         """Get existing indexes from Neo4j."""
         try:
@@ -464,7 +517,7 @@ class Neo4jStorage(GraphStorage):
             )
             record = result.single()
             if record and record["oj"]:
-                return json.loads(record["oj"])
+                return self._parse_json_safe(record.get("oj"))
             return {}
 
     # ----------------------------------------------------------------
@@ -546,8 +599,10 @@ class Neo4jStorage(GraphStorage):
                 hierarchy_type = metadata.get("hierarchy_type") if metadata else None
                 if hierarchy_type:
                     # Convert to PascalCase for Neo4j label (e.g., 'chapter' -> 'Chapter')
-                    label = hierarchy_type.capitalize()
-                    tx.run(f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{label}`", uuid=episode_id)
+                    # 使用白名单验证，防止 Cypher 注入
+                    safe_label = _safe_label(hierarchy_type.capitalize(), VALID_EPISODE_LABELS)
+                    if safe_label:
+                        tx.run(f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{safe_label}`", uuid=episode_id)
 
                 # Link to Page/Document if metadata is available
                 if metadata:
@@ -654,12 +709,9 @@ class Neo4jStorage(GraphStorage):
 
                     final_attrs = _attrs
                     if existing and existing["attrs"]:
-                        try:
-                            old_attrs = json.loads(existing["attrs"])
-                            # Merge: new attributes override old ones
-                            final_attrs = {**old_attrs, **_attrs}
-                        except:
-                            pass
+                        old_attrs = self._parse_json_safe(existing.get("attrs"), {})
+                        # Merge: new attributes override old ones
+                        final_attrs = {**old_attrs, **_attrs}
 
                     # 2. Merge Entity
                     res = tx.run(
@@ -695,8 +747,11 @@ class Neo4jStorage(GraphStorage):
                     )
 
                     # Add label
+                    # 使用白名单验证，防止 Cypher 注入
                     if _type and _type != "Entity":
-                        tx.run(f"MATCH (n:Entity {{uuid: $uuid}}) SET n:`{_type}`", uuid=e_uuid)
+                        safe_label = _safe_label(_type, VALID_NODE_LABELS)
+                        if safe_label:
+                            tx.run(f"MATCH (n:Entity {{uuid: $uuid}}) SET n:`{safe_label}`", uuid=e_uuid)
 
                     # 3. Auto-Hierarchy for Chapters, Sections, and Clauses
                     import re
@@ -1110,10 +1165,15 @@ class Neo4jStorage(GraphStorage):
             return self._call_with_retry(session.execute_read, _read)
 
     def get_nodes_by_label(self, graph_id: str, label: str) -> List[Dict[str, Any]]:
+        # 白名单验证，防止 Cypher 注入
+        safe_label = _safe_label(label, VALID_NODE_LABELS)
+        if not safe_label:
+            logger.warning(f"[storage] get_nodes_by_label: invalid label '{label}'")
+            return []
+
         def _read(tx):
-            # Dynamic label in query (safe — label comes from ontology, not user input)
             query = f"""
-                MATCH (n:Entity:`{label}` {{graph_id: $gid}})
+                MATCH (n:Entity:`{{safe_label}}` {{graph_id: $gid}})
                 RETURN n, labels(n) AS labels
             """
             result = tx.run(query, gid=graph_id)
@@ -1177,10 +1237,7 @@ class Neo4jStorage(GraphStorage):
                         props[k] = v.isoformat()
 
                 meta_json = props.pop("metadata_json", "{}")
-                try:
-                    metadata = json.loads(meta_json) if meta_json else {}
-                except (json.JSONDecodeError, TypeError):
-                    metadata = {}
+                metadata = self._parse_json_safe(meta_json)
 
                 # Overlay graph structure info onto metadata if present
                 if record["doc_name"]:
@@ -1320,10 +1377,7 @@ class Neo4jStorage(GraphStorage):
             for record in result:
                 props = dict(record["ep"])
                 meta_json = props.pop("metadata_json", "{}")
-                try:
-                    metadata = json.loads(meta_json) if meta_json else {}
-                except:
-                    metadata = {}
+                metadata = self._parse_json_safe(meta_json)
 
                 if record["doc_name"]:
                     metadata["source"] = record["doc_name"]
@@ -1565,10 +1619,7 @@ class Neo4jStorage(GraphStorage):
                             pdf_bboxes_raw = record.get("pdf_bboxes")
                             pdf_bboxes = []
                             if pdf_bboxes_raw:
-                                try:
-                                    pdf_bboxes = json.loads(pdf_bboxes_raw) if isinstance(pdf_bboxes_raw, str) else pdf_bboxes_raw
-                                except (json.JSONDecodeError, TypeError):
-                                    pdf_bboxes = []
+                                    pdf_bboxes = self._parse_json_safe(pdf_bboxes_raw, []) if isinstance(pdf_bboxes_raw, str) else pdf_bboxes_raw
                             node_pdf_info[entity_uuid] = {
                                 "source": metadata.get("source", ""),
                                 "page": metadata.get("page"),
@@ -1656,8 +1707,7 @@ class Neo4jStorage(GraphStorage):
     # Dict conversion helpers
     # ----------------------------------------------------------------
 
-    @staticmethod
-    def _node_to_dict(node, labels: List[str]) -> Dict[str, Any]:
+    def _node_to_dict(self, node, labels: List[str]) -> Dict[str, Any]:
         """Convert Neo4j node to the standard node dict format."""
         props = dict(node)
 
@@ -1667,10 +1717,7 @@ class Neo4jStorage(GraphStorage):
                 props[k] = v.isoformat()
 
         attrs_json = props.pop("attributes_json", "{}")
-        try:
-            attributes = json.loads(attrs_json) if attrs_json else {}
-        except (json.JSONDecodeError, TypeError):
-            attributes = {}
+        attributes = self._parse_json_safe(attrs_json)
 
         # Remove internal fields from dict
         props.pop("embedding", None)
@@ -1718,8 +1765,7 @@ class Neo4jStorage(GraphStorage):
             "pdf_bboxes": props.get("pdf_bboxes"),
         }
 
-    @staticmethod
-    def _edge_to_dict(rel, source_uuid: str, target_uuid: str) -> Dict[str, Any]:
+    def _edge_to_dict(self, rel, source_uuid: str, target_uuid: str) -> Dict[str, Any]:
         """Convert Neo4j relationship to the standard edge dict format."""
         props = dict(rel)
         # 从 Neo4j relationship type 提取边类型名（如 MANDATES, OPERATES_ON）
@@ -1731,10 +1777,7 @@ class Neo4jStorage(GraphStorage):
                 props[k] = v.isoformat()
 
         attrs_json = props.pop("attributes_json", "{}")
-        try:
-            attributes = json.loads(attrs_json) if attrs_json else {}
-        except (json.JSONDecodeError, TypeError):
-            attributes = {}
+        attributes = self._parse_json_safe(attrs_json)
 
         # Remove internal fields
         props.pop("fact_embedding", None)
@@ -1828,19 +1871,23 @@ class Neo4jStorage(GraphStorage):
                 )
 
                 # 添加层级标签
-                level_label = f"Level{level}"
-                tx.run(
-                    f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{level_label}`",
-                    uuid=episode_id
-                )
-
-                # 添加类型标签
-                if chunk_type:
-                    type_label = chunk_type.capitalize()
+                # 验证 level 是整数且在有效范围内 (1-9)，防止注入
+                if isinstance(level, int) and 1 <= level <= 9:
+                    level_label = f"Level{level}"
                     tx.run(
-                        f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{type_label}`",
+                        f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{level_label}`",
                         uuid=episode_id
                     )
+
+                # 添加类型标签
+                # 使用白名单验证，防止 Cypher 注入
+                if chunk_type:
+                    safe_label = _safe_label(chunk_type.capitalize(), VALID_EPISODE_LABELS)
+                    if safe_label:
+                        tx.run(
+                            f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{safe_label}`",
+                            uuid=episode_id
+                        )
 
                 # 如果是条文，提取clause_id并添加标签
                 clause_id = metadata.get("clause_id")
@@ -1941,12 +1988,15 @@ class Neo4jStorage(GraphStorage):
                     target_uuid = target_uuid_result["uuid"]
 
                     # 添加目标类型标签
+                    # 使用白名单验证，防止 Cypher 注入
                     target_type = rel.get("target_type", "Entity")
                     if target_type != "Entity":
-                        tx.run(
-                            f"MATCH (n:Entity {{uuid: $uuid}}) SET n:`{target_type}`",
-                            uuid=target_uuid
-                        )
+                        safe_label = _safe_label(target_type, VALID_NODE_LABELS)
+                        if safe_label:
+                            tx.run(
+                                f"MATCH (n:Entity {{uuid: $uuid}}) SET n:`{safe_label}`",
+                                uuid=target_uuid
+                            )
 
                     # 创建关系
                     tx.run(
@@ -2010,10 +2060,7 @@ class Neo4jStorage(GraphStorage):
             clauses = []
             for record in result:
                 meta_json = record["metadata_json"] or "{}"
-                try:
-                    metadata = json.loads(meta_json)
-                except:
-                    metadata = {}
+                metadata = self._parse_json_safe(meta_json)
 
                 clauses.append({
                     "uuid": record["uuid"],
@@ -2056,10 +2103,7 @@ class Neo4jStorage(GraphStorage):
             clauses = []
             for record in result:
                 meta_json = record["metadata_json"] or "{}"
-                try:
-                    metadata = json.loads(meta_json)
-                except:
-                    metadata = {}
+                metadata = self._parse_json_safe(meta_json)
 
                 clauses.append({
                     "uuid": record["uuid"],
@@ -2127,10 +2171,6 @@ class Neo4jStorage(GraphStorage):
                 if not ref_result:
                     continue
 
-                try:
-                    metadata = json.loads(ref_result["metadata_json"] or "{}")
-                except:
-                    continue
 
                 cross_refs = metadata.get("cross_refs", [])
                 if isinstance(cross_refs, str):
@@ -2189,8 +2229,16 @@ class Neo4jStorage(GraphStorage):
             return None
 
         # 生成稳定UUID
-        content_seed = f"{graph_id}:{content}".encode('utf-8')
-        episode_id = str(uuid.UUID(hashlib.md5(content_seed).hexdigest()))
+        # 优先使用 clause_id 生成 UUID（确保同一 clause_id 只创建唯一节点）
+        # 对于多trunk合并的clause，所有子chunk共享同一个clause_id
+        clause_id_for_uuid = metadata.get("clause_id", "")
+        if clause_id_for_uuid:
+            # clause_id 存在时，用 clause_id 生成稳定 UUID
+            uuid_seed = f"{graph_id}:{clause_id_for_uuid}".encode('utf-8')
+        else:
+            # 无 clause_id 时，用 content 生成 UUID（保持原有逻辑）
+            uuid_seed = f"{graph_id}:{content}".encode('utf-8')
+        episode_id = str(uuid.UUID(hashlib.md5(uuid_seed).hexdigest()))
 
         now = datetime.now(timezone.utc).isoformat()
         metadata_json = json.dumps(metadata, ensure_ascii=False)
@@ -2293,14 +2341,18 @@ class Neo4jStorage(GraphStorage):
                 if chunk_type == "clause":
                     clause_id = metadata.get("clause_id", "")
                     if clause_id:
-                        # 如果 metadata 已包含 topic/entities（来自 intelligent_chunks），跳过 LLM 语义解析
+                        # 如果 metadata 已包含 topic（来自 intelligent_chunks），跳过 LLM 语义解析
                         # Topic/Entity 节点将由 add_topic_and_entity_nodes 统一创建
-                        has_topic = metadata.get("topic") and metadata.get("entities")
+                        # 原来的逻辑是检查 has_topic && has_entities，但 entities 可能为空（某些 clause 没有提取到实体）
+                        # 而 Topic/Entity 关系统一由 add_topic_and_entity_nodes 处理，不需要三元组逻辑
+                        has_topic = bool(metadata.get("topic"))
                         if has_topic:
-                            logger.info(f"[hierarchical] Skipping LLM parse for clause {clause_id} (has topic+entities from intelligent_chunks)")
+                            logger.info(f"[hierarchical] Skipping triplet parse for clause {clause_id} (has topic, Topic-Entity handled by add_topic_and_entity_nodes)")
                         else:
                             # 创建Clause实体（旧路径：需要 LLM 解析三元组）
-                            self._create_entity_for_clause(tx, graph_id, episode_id, clause_id, content, embedding, metadata)
+                            # 注意：即使走旧路径也不再创建 Component/Action/Condition 节点，
+                            # 只创建 Clause 节点本身，Entity 由 add_topic_and_entity_nodes 统一创建
+                            self._create_clause_entity_only(tx, graph_id, episode_id, clause_id, content, embedding, metadata)
                 elif chunk_type == "section":
                     title = metadata.get("title", content[:50])
                     self._create_section_entity(tx, graph_id, episode_id, title, metadata, embedding)
@@ -2566,10 +2618,118 @@ class Neo4jStorage(GraphStorage):
             result = self._call_with_retry(session.execute_write, _create_nodes_and_relations)
             return result
 
+    def _create_clause_entity_only(self, tx, graph_id: str, episode_id: str,
+                                   clause_id: str, content: str,
+                                   embedding: List[float], metadata: Dict):
+        """为Clause创建节点（不创建Component/Action/Condition实体）
+
+        当没有 intelligent_chunks 数据时使用此方法。
+        只创建 Clause 节点和 Episode 关系，Entity 由 add_topic_and_entity_nodes 统一创建。
+
+        注意：此方法不再处理三元组（Component/Action/Condition），
+        因为原来的设计是 Term/Entity - Topic - Clause 结构。
+        """
+        clause_name = f"条款{clause_id}"
+
+        # 生成Clause UUID
+        entity_seed = f"{graph_id}:{clause_name}".encode('utf-8')
+        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
+
+        # 获取条款级要求类型（fallback）
+        clause_requirement = metadata.get('requirement_type', 'recommended').lower()
+
+        # 提取 PDF 定位信息
+        pdf_source = metadata.get('source')
+        pdf_page = metadata.get('page')
+        pdf_bboxes_raw = metadata.get('bboxs', [])
+        if not pdf_bboxes_raw:
+            single_bbox = metadata.get('bbox')
+            if single_bbox:
+                if isinstance(single_bbox, list) and len(single_bbox) >= 4:
+                    pdf_bboxes_raw = [[pdf_page or 1] + single_bbox[:4]]
+                elif isinstance(single_bbox, dict):
+                    pdf_bboxes_raw = [[pdf_page or 1,
+                                   single_bbox.get('x0', 0), single_bbox.get('y0', 0),
+                                   single_bbox.get('x1', 0), single_bbox.get('y1', 0)]]
+        pdf_bboxes = json.dumps(pdf_bboxes_raw, ensure_ascii=False) if pdf_bboxes_raw else "[]"
+        pdf_page_width = metadata.get('page_width')
+        pdf_page_height = metadata.get('page_height')
+
+        # 创建Clause节点
+        tx.run(
+            """
+            MERGE (e:Clause {graph_id: $gid, name_lower: $name_lower})
+            ON CREATE SET
+                e.uuid = $uuid,
+                e.name = $name,
+                e.summary = $summary,
+                e.embedding = $embedding,
+                e.clause_id = $clause_id,
+                e.requirement_type = $req_type,
+                e.pdf_source = $pdf_source,
+                e.pdf_page = $pdf_page,
+                e.pdf_bboxes = $pdf_bboxes,
+                e.pdf_page_width = $pdf_page_width,
+                e.pdf_page_height = $pdf_page_height,
+                e.created_at = datetime()
+            ON MATCH SET
+                e.embedding = $embedding,
+                e.summary = COALESCE(e.summary, $summary),
+                e.pdf_source = COALESCE(e.pdf_source, $pdf_source),
+                e.pdf_page = COALESCE(e.pdf_page, $pdf_page),
+                e.pdf_bboxes = COALESCE(e.pdf_bboxes, $pdf_bboxes),
+                e.pdf_page_width = COALESCE(e.pdf_page_width, $pdf_page_width),
+                e.pdf_page_height = COALESCE(e.pdf_page_height, $pdf_page_height)
+            """,
+            gid=graph_id,
+            name_lower=clause_name.lower(),
+            uuid=entity_uuid,
+            name=clause_name,
+            summary=content if content else "",
+            embedding=embedding,
+            clause_id=clause_id,
+            req_type=clause_requirement,
+            pdf_source=pdf_source,
+            pdf_page=pdf_page,
+            pdf_bboxes=pdf_bboxes,
+            pdf_page_width=pdf_page_width,
+            pdf_page_height=pdf_page_height,
+        )
+
+        # 链接Episode -> Clause (MENTIONS)
+        tx.run(
+            """
+            MATCH (ep:Episode {uuid: $ep_uuid}), (e:Clause {uuid: $e_uuid})
+            MERGE (ep)-[r:MENTIONS]->(e)
+            ON CREATE SET r.graph_id = $gid
+            """,
+            ep_uuid=episode_id,
+            e_uuid=entity_uuid,
+            gid=graph_id
+        )
+
+        # ========== 术语章节处理 ==========
+        terms = metadata.get('terms', [])
+        is_term_def = metadata.get('is_term_definition', False)
+        if is_term_def and terms:
+            term_name = terms[0].get('term_name', '') if terms else ''
+            term_definition = terms[0].get('definition', '') if terms else ''
+            if term_name:
+                logger.info(f"[hierarchical] 创建术语定义: {term_name}")
+                term_entity_uuid = self._create_term_entity(
+                    tx, graph_id, entity_uuid, term_name, term_definition, clause_id,
+                    pdf_source=pdf_source, pdf_page=pdf_page, pdf_bboxes=pdf_bboxes,
+                    pdf_page_width=pdf_page_width, pdf_page_height=pdf_page_height
+                )
+                self._create_defines_relation(tx, term_entity_uuid, entity_uuid)
+            return
+
+        logger.info(f"[hierarchical] Clause node created (no triplet parsing): {clause_id}")
+
     def _create_entity_for_clause(self, tx, graph_id: str, episode_id: str,
                                   clause_id: str, content: str,
                                   embedding: List[float], metadata: Dict):
-        """为Clause创建Entity节点及其语义关系
+        """为Clause创建Entity节点及其语义关系（已废弃，仅保留用于无 intelligent_chunks 场景）
 
         核心改进：使用语义三元组 (SemanticTriplet) 而非平行列表，
         每个三元组 (component, action, obj, condition, requirement) 精确建一条关系，
@@ -2655,7 +2815,7 @@ class Neo4jStorage(GraphStorage):
         # 链接Episode -> Clause (MENTIONS)
         tx.run(
             """
-            MATCH (ep:Episode {uuid: $ep_uuid}), (e:Entity {uuid: $e_uuid})
+            MATCH (ep:Episode {uuid: $ep_uuid}), (e:Clause {uuid: $e_uuid})
             MERGE (ep)-[r:MENTIONS]->(e)
             ON CREATE SET r.graph_id = $gid
             """,
@@ -3516,11 +3676,17 @@ class Neo4jStorage(GraphStorage):
     def _find_entity_uuid(self, tx, graph_id: str, entity_type: str, entity_name: str) -> Optional[str]:
         """根据实体类型和名称查找实体UUID"""
         try:
+            # 使用白名单验证，防止 Cypher 注入
+            safe_label = _safe_label(entity_type, VALID_NODE_LABELS)
+            if not safe_label:
+                logger.warning(f"[storage] _find_entity_uuid: invalid entity_type '{entity_type}'")
+                return None
+
             result = tx.run(
-                """
-                MATCH (e:Entity:`{entity_type}` {{graph_id: $gid, name_lower: $name_lower}})
+                f"""
+                MATCH (e:Entity:`{{safe_label}}` {{graph_id: $gid, name_lower: $name_lower}})
                 RETURN e.uuid AS uuid
-                """.format(entity_type=entity_type),
+                """,
                 gid=graph_id,
                 name_lower=entity_name.lower()
             )

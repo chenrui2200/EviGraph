@@ -587,8 +587,8 @@ class OasisProfileGenerator:
                     result = json.loads(json_str)
                     result["_fixed"] = True
                     return result
-                except:
-                    pass
+                except json.JSONDecodeError as e:
+                    logger.debug(f"JSON parsing failed in persona generation: {e}")
 
         # 6. Try to extract partial information from content
         bio_match = re.search(r'"bio"\s*:\s*"([^"]*)"', content)

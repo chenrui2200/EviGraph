@@ -237,7 +237,11 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
-import * as d3 from 'd3'
+import { select } from 'd3-selection'
+import { scaleOrdinal } from 'd3-scale'
+import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide, forceX, forceY } from 'd3-force'
+import { zoom, zoomIdentity } from 'd3-zoom'
+import { drag } from 'd3-drag'
 
 const props = defineProps({
   graphData: Object,
@@ -348,7 +352,7 @@ const renderGraph = () => {
   const width = container.clientWidth
   const height = container.clientHeight
   
-  const svg = d3.select(graphSvg.value)
+  const svg = select(graphSvg.value)
     .attr('width', width)
     .attr('height', height)
     .attr('viewBox', `0 0 ${width} ${height}`)
@@ -476,27 +480,27 @@ const renderGraph = () => {
   })
     
   // simulation - dynamically adjust node spacing based on edge count
-  const simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(edges).id(d => d.id).distance(d => {
+  const simulation = forceSimulation(nodes)
+    .force('link', forceLink(edges).id(d => d.id).distance(d => {
       // Dynamically adjust distance based on edge count between this pair of nodes
       // Base distance 150, add 40 for each additional edge
       const baseDistance = 150
       const edgeCount = d.pairTotal || 1
       return baseDistance + (edgeCount - 1) * 50
     }))
-    .force('charge', d3.forceManyBody().strength(-400))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collide', d3.forceCollide(50))
+    .force('charge', forceManyBody().strength(-400))
+    .force('center', forceCenter(width / 2, height / 2))
+    .force('collide', forceCollide(50))
     // Add center gravity to cluster independent node groups to center area
-    .force('x', d3.forceX(width / 2).strength(0.04))
-    .force('y', d3.forceY(height / 2).strength(0.04))
+    .force('x', forceX(width / 2).strength(0.04))
+    .force('y', forceY(height / 2).strength(0.04))
   
   currentSimulation = simulation
 
   const g = svg.append('g')
   
   // Zoom
-  zoomBehavior.value = d3.zoom()
+  zoomBehavior.value = zoom()
     .extent([[0, 0], [width, height]])
     .scaleExtent([0.1, 4])
     .on('zoom', (event) => {
@@ -595,7 +599,7 @@ const renderGraph = () => {
       linkLabelBg.attr('fill', 'rgba(255,255,255,0.95)')
       linkLabels.attr('fill', '#666')
       // Highlight currently selected edge
-      d3.select(event.target).attr('stroke', '#3498db').attr('stroke-width', 3)
+      select(event.target).attr('stroke', '#3498db').attr('stroke-width', 3)
 
       selectedItem.value = {
         type: 'edge',
@@ -620,7 +624,7 @@ const renderGraph = () => {
       linkLabels.attr('fill', '#666')
       // Highlight corresponding edge
       link.filter(l => l === d).attr('stroke', '#3498db').attr('stroke-width', 3)
-      d3.select(event.target).attr('fill', 'rgba(52, 152, 219, 0.1)')
+      select(event.target).attr('fill', 'rgba(52, 152, 219, 0.1)')
 
       selectedItem.value = {
         type: 'edge',
@@ -648,7 +652,7 @@ const renderGraph = () => {
       linkLabels.attr('fill', '#666')
       // Highlight corresponding edge
       link.filter(l => l === d).attr('stroke', '#3498db').attr('stroke-width', 3)
-      d3.select(event.target).attr('fill', '#3498db')
+      select(event.target).attr('fill', '#3498db')
 
       selectedItem.value = {
         type: 'edge',
@@ -673,7 +677,7 @@ const renderGraph = () => {
     .attr('stroke', '#fff')
     .attr('stroke-width', 2.5)
     .style('cursor', 'pointer')
-    .call(d3.drag()
+    .call(drag()
       .on('start', (event, d) => {
         // Only record position, don't restart simulation (distinguish click from drag)
         d.fx = d.x
@@ -718,7 +722,7 @@ const renderGraph = () => {
       node.attr('stroke', '#fff').attr('stroke-width', 2.5)
       linkGroup.selectAll('path').attr('stroke', '#C0C0C0').attr('stroke-width', 1.5)
       // Highlight selected node
-      d3.select(event.target).attr('stroke', '#E91E63').attr('stroke-width', 4)
+      select(event.target).attr('stroke', '#E91E63').attr('stroke-width', 4)
       // Highlight edges connected to this node
       link.filter(l => l.source.id === d.id || l.target.id === d.id)
         .attr('stroke', '#E91E63')
@@ -733,12 +737,12 @@ const renderGraph = () => {
     })
     .on('mouseenter', (event, d) => {
       if (!selectedItem.value || selectedItem.value.data?.uuid !== d.rawData.uuid) {
-        d3.select(event.target).attr('stroke', '#333').attr('stroke-width', 3)
+        select(event.target).attr('stroke', '#333').attr('stroke-width', 3)
       }
     })
     .on('mouseleave', (event, d) => {
       if (!selectedItem.value || selectedItem.value.data?.uuid !== d.rawData.uuid) {
-        d3.select(event.target).attr('stroke', '#fff').attr('stroke-width', 2.5)
+        select(event.target).attr('stroke', '#fff').attr('stroke-width', 2.5)
       }
     })
 
@@ -762,7 +766,7 @@ const renderGraph = () => {
     // Update edge label positions (no rotation, horizontal is clearer)
     linkLabels.each(function(d) {
       const mid = getLinkMidpoint(d)
-      d3.select(this)
+      select(this)
         .attr('x', mid.x)
         .attr('y', mid.y)
         .attr('transform', '') // Remove rotation, keep horizontal
@@ -773,7 +777,7 @@ const renderGraph = () => {
       const mid = getLinkMidpoint(d)
       const textEl = linkLabels.nodes()[i]
       const bbox = textEl.getBBox()
-      d3.select(this)
+      select(this)
         .attr('x', mid.x - bbox.width / 2 - 4)
         .attr('y', mid.y - bbox.height / 2 - 2)
         .attr('width', bbox.width + 8)
@@ -811,7 +815,7 @@ watch(() => props.highlightNodeId, (newId) => {
 
 const triggerHighlight = (newId) => {
   if (!graphSvg.value) return
-  const svg = d3.select(graphSvg.value)
+  const svg = select(graphSvg.value)
 
   if (newId) {
     // 1. Highlight specific node (玫红色高亮，完全模拟点击效果)
@@ -880,7 +884,7 @@ const focusNode = (nodeId) => {
   }
 
   // Animate zoom to center the node
-  const svg = d3.select(graphSvg.value)
+  const svg = select(graphSvg.value)
   const container = graphContainer.value
   const width = container.clientWidth
   const height = container.clientHeight
@@ -894,7 +898,7 @@ const focusNode = (nodeId) => {
     .duration(750)
     .call(
       zoomBehavior.value.transform,
-      d3.zoomIdentity
+      zoomIdentity
         .translate(width / 2, height / 2)
         .scale(scale)
         .translate(-x, -y)

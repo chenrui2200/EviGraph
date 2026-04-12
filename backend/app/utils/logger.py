@@ -6,6 +6,7 @@ Provides unified logging management with output to both console and file
 import os
 import sys
 import logging
+import threading
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
@@ -25,6 +26,31 @@ def _ensure_utf8_stdout():
 
 # Log directory
 LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
+
+
+class ThreadSafeRotatingFileHandler(RotatingFileHandler):
+    """
+    Thread-safe wrapper for RotatingFileHandler.
+
+    On Windows, multiple threads writing to the same file can cause
+    PermissionError when rotation occurs. This wrapper adds a lock
+    around the emit() method to prevent concurrent writes.
+    """
+
+    def __init__(self, *args, **kwargs):
+        RotatingFileHandler.__init__(self, *args, **kwargs)
+        self._thread_lock = threading.Lock()
+
+    def emit(self, record):
+        with self._thread_lock:
+            try:
+                super().emit(record)
+            except Exception:
+                self.handleError(record)
+
+    def flush(self):
+        with self._thread_lock:
+            super().flush()
 
 
 def setup_logger(name: str = 'mirofish', level: int = logging.DEBUG) -> logging.Logger:
@@ -64,8 +90,9 @@ def setup_logger(name: str = 'mirofish', level: int = logging.DEBUG) -> logging.
     )
 
     # 1. File handler - detailed logs (named by date, with rotation)
+    # Use thread-safe handler to prevent concurrent write issues on Windows
     log_filename = datetime.now().strftime('%Y-%m-%d') + '.log'
-    file_handler = RotatingFileHandler(
+    file_handler = ThreadSafeRotatingFileHandler(
         os.path.join(LOG_DIR, log_filename),
         maxBytes=10 * 1024 * 1024,  # 10MB
         backupCount=5,
@@ -123,4 +150,3 @@ def error(msg, *args, **kwargs):
 
 def critical(msg, *args, **kwargs):
     logger.critical(msg, *args, **kwargs)
-

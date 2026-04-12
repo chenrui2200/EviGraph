@@ -196,7 +196,7 @@ const loadProjects = async () => {
     loading.value = true
     const response = await getProjectList(20)
     if (response.success) {
-      projects.value = response.data || []
+      projects.value = response.data?.projects || []
     }
   } catch (error) {
     console.error('Failed to load projects:', error)

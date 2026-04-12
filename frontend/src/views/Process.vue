@@ -503,11 +503,15 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, searchGraph, updateProject, getTaskEventsURL } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
-import * as d3 from 'd3'
+import { select } from 'd3-selection'
+import { scaleOrdinal } from 'd3-scale'
+import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide, forceX, forceY } from 'd3-force'
+import { zoom } from 'd3-zoom'
+import { drag } from 'd3-drag'
 
 const route = useRoute()
 const router = useRouter()
@@ -1056,6 +1060,10 @@ const startPollingTask = (taskId, type = 'build') => {
 
 // Shared UI update logic for task
 const updateTaskUI = (taskData, type) => {
+  // Guard: don't update UI if we've already moved past this phase
+  if (type === 'ontology' && currentPhase.value > 0) return
+  if (type === 'build' && currentPhase.value >= 2) return
+
   if (type === 'ontology') {
     currentPhase.value = 0
     ontologyProgress.value = {
@@ -1160,7 +1168,7 @@ const renderGraph = () => {
 
   console.log('Rendering graph:', width, 'x', height)
   
-  const svg = d3.select(graphSvg.value)
+  const svg = select(graphSvg.value)
     .attr('width', width)
     .attr('height', height)
     .attr('viewBox', `0 0 ${width} ${height}`)
@@ -1216,23 +1224,23 @@ const renderGraph = () => {
 
   // Color mapping
   const types = [...new Set(nodes.map(n => n.type))]
-  const colorScale = d3.scaleOrdinal()
+  const colorScale = scaleOrdinal()
     .domain(types)
     .range(['#FF6B35', '#004E89', '#7B2D8E', '#1A936F', '#C5283D', '#E9724C', '#2D3436', '#6C5CE7'])
 
   // Force-directed layout
-  const simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(edges).id(d => d.id).distance(100).strength(0.5))
-    .force('charge', d3.forceManyBody().strength(-300))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collision', d3.forceCollide().radius(40))
-    .force('x', d3.forceX(width / 2).strength(0.05))
-    .force('y', d3.forceY(height / 2).strength(0.05))
+  const simulation = forceSimulation(nodes)
+    .force('link', forceLink(edges).id(d => d.id).distance(100).strength(0.5))
+    .force('charge', forceManyBody().strength(-300))
+    .force('center', forceCenter(width / 2, height / 2))
+    .force('collision', forceCollide().radius(40))
+    .force('x', forceX(width / 2).strength(0.05))
+    .force('y', forceY(height / 2).strength(0.05))
 
   // Add zoom functionality
   const g = svg.append('g')
 
-  svg.call(d3.zoom()
+  svg.call(zoom()
     .extent([[0, 0], [width, height]])
     .scaleExtent([0.2, 4])
     .on('zoom', (event) => {
@@ -1287,7 +1295,7 @@ const renderGraph = () => {
       event.stopPropagation()
       selectNode(d.rawData, colorScale(d.type))
     })
-    .call(d3.drag()
+    .call(drag()
       .on('start', dragstarted)
       .on('drag', dragged)
       .on('end', dragended))
@@ -1368,7 +1376,7 @@ onMounted(() => {
   initProject()
 })
 
-onUnmounted(() => {
+onBeforeUnmount(() => {
   stopPolling()
   stopGraphPolling()
 })

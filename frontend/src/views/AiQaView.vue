@@ -989,7 +989,7 @@ const loadProjects = async () => {
   try {
     const res = await getProjectList()
     if (res.success) {
-      projects.value = res.data
+      projects.value = res.data?.projects || []
       const projectId = (!props.id?.startsWith('app_') && props.id !== 'default') ? props.id : null
       if (projectId) {
         const currentProj = projects.value.find(p => p.project_id === projectId)

@@ -18,7 +18,6 @@
 
 ## 对外接口 (API)
 - `graph_bp` (`/api/graph`): 图谱管理、任务进度、多步问答。
-- `simulation_bp` (`/api/simulation`): 仿真任务管理。
 - `report_bp` (`/api/report`): 报告生成。
 
 ## 关键依赖与配置
