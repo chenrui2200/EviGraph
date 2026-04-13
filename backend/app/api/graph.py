@@ -1672,7 +1672,7 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                         "bbox_viewport": bbox,
                         "page_width": page_w,
                         "page_height": page_h,
-                        "category_id": {'title': 0, 'text': 1}.get(bt, 1),
+                        "category_id": {'title': 0, 'Title': 0, 'text': 1, 'Text': 1}.get(bt, 1),
                         "block_type": bt,
                         "source": filename
                     })
@@ -1802,7 +1802,7 @@ def _parse_mineru_to_chunks(mineru_data_or_jsonl_path: Union[dict, str], filenam
                     "bbox_viewport": bbox,
                     "page_width": page_w,
                     "page_height": page_h,
-                    "category_id": {'title': 0, 'text': 1}.get(bt, 1),
+                    "category_id": {'title': 0, 'Title': 0, 'text': 1, 'Text': 1}.get(bt, 1),
                     "block_type": bt,
                     "source": filename
                 })

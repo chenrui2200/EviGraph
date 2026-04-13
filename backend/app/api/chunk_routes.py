@@ -133,7 +133,12 @@ def intelligent_chunk():
                 task_mgr = TaskManager()
 
                 def progress_callback(progress, message, checkpoint_info=None):
-                    task_mgr.update_task(task_id, status=TaskStatus.PROCESSING, progress=int(progress * 100), message=message, progress_detail=checkpoint_info or {})
+                    # progress < 0 表示不需要更新进度百分比，只推送日志消息
+                    if progress >= 0:
+                        task_mgr.update_task(task_id, status=TaskStatus.PROCESSING, progress=int(progress * 100), message=message, progress_detail=checkpoint_info or {})
+                    else:
+                        # 只更新日志消息，不改变进度
+                        task_mgr.update_task(task_id, log=message)
 
                 mineru_data = ProjectManager.get_mineru_parsed(project_id)
                 md_content = None

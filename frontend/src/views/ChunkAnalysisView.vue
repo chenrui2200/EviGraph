@@ -250,6 +250,13 @@
             <div class="analysis-panel-title">
               <span>🧠 智能分析</span>
             </div>
+            <!-- 分析进度条 -->
+            <div v-if="analysisStatus === 'graph_chunking'" class="inline-progress">
+              <div class="inline-progress-bar">
+                <div class="inline-progress-fill" :style="{ width: progressPercent + '%' }"></div>
+              </div>
+              <span class="inline-progress-text">{{ progressPercent }}%</span>
+            </div>
             <button class="re-analyse-btn" @click="handleResetChunking" :disabled="starting">
               🔄 重新分析
             </button>
@@ -1131,17 +1138,55 @@ function startProgressPolling() {
       const progRes = await getChunkProgress(currentProjectId.value)
       if (progRes.success && progRes.data) {
         const prog = progRes.data
-        progressPercent.value = Math.round((prog.progress_ratio || 0) * 100)
-        // if (prog.completed_clauses_count !== undefined) {
-        //   realtimeLogs.value.push(`📊 已完成 ${prog.completed_clauses_count} 条文`)
-        // }
+        const prevPercent = progressPercent.value
+        const newPercent = Math.round((prog.progress_ratio || 0) * 100)
+        progressPercent.value = newPercent
+
+        // 构建进度日志信息
+        const progressInfo = []
+        if (prog.total_chapters !== undefined && prog.total_chapters > 0) {
+          progressInfo.push(`章节: ${prog.completed_chapters || 0}/${prog.total_chapters}`)
+        }
+        if (prog.completed_clauses_count !== undefined) {
+          progressInfo.push(`条款: ${prog.completed_clauses_count}`)
+        }
+        if (prog.current_chapter) {
+          progressInfo.push(`当前: ${prog.current_chapter.title || prog.current_chapter.chapter_number || '...'}`)
+        }
+
+        // 打印进度日志的条件：
+        // 1. 进度变化了
+        // 2. 或者每 10 次轮询且进度在 0-100% 之间（稳态时定期输出）
+        if (newPercent !== prevPercent || (pollCount > 0 && pollCount % 10 === 0 && newPercent > 0 && newPercent < 100)) {
+          const msg = progressInfo.length > 0
+            ? `📊 智能分析 ${newPercent}% (${progressInfo.join(', ')})`
+            : `📊 智能分析 ${newPercent}%`
+          // 去重检查
+          const exists = realtimeLogs.value.find(l => l.startsWith('📊 智能分析') && l.includes(`${newPercent}%`))
+          if (!exists) {
+            realtimeLogs.value.push(msg)
+          }
+        }
+      } else if (pollCount <= 3) {
+        // 前几次轮询如果 getChunkProgress 失败，可能还在初始化，显示等待消息
+        const waitingMsg = '⏳ 等待分析任务初始化...'
+        if (!realtimeLogs.value.find(l => l === waitingMsg)) {
+          realtimeLogs.value.push(waitingMsg)
+        }
       }
 
-      // getTaskStatus 仅用于状态判断（completed/failed），不覆盖进度值
+      // getTaskStatus 用于状态判断和日志显示
       if (taskId.value) {
         const res = await getTaskStatus(taskId.value)
         if (res.success) {
           const task = res.data
+          // 显示任务消息（如果有）
+          if (task.message && pollCount % 5 === 0) {
+            const msgExists = realtimeLogs.value.find(l => l === task.message)
+            if (!msgExists) {
+              realtimeLogs.value.push(task.message)
+            }
+          }
           if (task.status === 'completed') {
             analysisStatus.value = 'graph_chunked'
             clearInterval(pollInterval)
@@ -1576,6 +1621,34 @@ header.ca-header {
 .re-analyse-btn:hover { background: rgba(255,255,255,0.35); }
 .re-analyse-btn:disabled { background: rgba(255,255,255,0.1); cursor: not-allowed; }
 
+/* 内联进度条 */
+.inline-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  max-width: 200px;
+}
+.inline-progress-bar {
+  flex: 1;
+  height: 6px;
+  background: rgba(255,255,255,0.3);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.inline-progress-fill {
+  height: 100%;
+  background: #4ade80;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.inline-progress-text {
+  font-size: 11px;
+  color: rgba(255,255,255,0.9);
+  min-width: 32px;
+  text-align: right;
+}
+
 /* MinerU 面板 */
 .mineru-panel {
   border-bottom: 1px solid #e0e0e0;
@@ -1744,7 +1817,7 @@ header.ca-header {
 .log-drawer-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; cursor: pointer; font-size: 12px; color: #6b7280; }
 .log-drawer-header:hover { color: #1a1a2e; }
 .log-toggle { font-size: 10px; }
-.log-drawer-body { max-height: 100px; overflow-y: auto; padding: 0 16px 8px; font-family: 'Consolas', 'Monaco', monospace; font-size: 11px; background: #f9fafb; }
+.log-drawer-body { max-height: 400px; overflow-y: auto; padding: 0 16px 8px; font-family: 'Consolas', 'Monaco', monospace; font-size: 11px; background: #f9fafb; }
 .log-line { padding: 1px 0; color: #6b7280; }
 .log-error { color: #dc2626; }
 .log-success { color: #16a34a; }

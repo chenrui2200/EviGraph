@@ -2119,6 +2119,16 @@ topic：{topic}
         clause.metadata['entities'] = entities
         clause.metadata['semantics_enriched'] = True
 
+        # 通过进度回调推送详细日志到前端
+        if self.progress_callback and entities:
+            try:
+                self.progress_callback(
+                    -1,  # 不更新进度百分比
+                    f"📝 {clause.clause_id}: {topic[:20] if topic else '(无)'} | 实体: {', '.join(entities[:3])}{'...' if len(entities) > 3 else ''}"
+                )
+            except Exception:
+                pass  # 忽略回调错误
+
     # =========================================================================
     # JSONL 增量写入工具
     # =========================================================================
