@@ -67,6 +67,12 @@ class LLMClient:
         """Check if we're talking to an Ollama server."""
         return '11434' in (self.base_url or '')
 
+    def _supports_thinking_param(self) -> bool:
+        """Check if the model supports enable_thinking parameter (Qwen series)."""
+        model_lower = (self.model or '').lower()
+        # Qwen models support enable_thinking
+        return model_lower.startswith('qwen')
+
     def _azure_chat(
         self,
         messages: List[Dict[str, str]],
@@ -153,6 +159,12 @@ class LLMClient:
             kwargs["extra_body"] = {
                 "options": {"num_ctx": self._num_ctx}
             }
+
+        # For Qwen models: disable thinking to reduce token usage
+        if self._supports_thinking_param():
+            if "extra_body" not in kwargs:
+                kwargs["extra_body"] = {}
+            kwargs["extra_body"].setdefault("options", {})["enable_thinking"] = False
 
         last_error = None
         for attempt in range(self.max_retries + 1):

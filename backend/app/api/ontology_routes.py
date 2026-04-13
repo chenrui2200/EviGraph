@@ -173,7 +173,7 @@ def generate_ontology():
 
         # Start background thread
         def ontology_task():
-            from .graph import _parse_mineru_to_chunks, _extract_nouns_from_chunks
+            from .graph import _parse_mineru_to_chunks
 
             try:
                 build_logger = get_logger('mirofish.ontology')
@@ -269,7 +269,7 @@ def generate_ontology():
                                         task_id,
                                         message=f"✅ {orig_name}: 第 {api_page_num}/{total_pdf_pages} 页成功 ({completed_count}/{total_pdf_pages})",
                                         progress=current_progress,
-                                        log=f"第 {api_page_num} 页成功，已写入 jsonl"
+                                        log=f"第 {api_page_num}/{total_pdf_pages} 页成功 ({completed_count}/{total_pdf_pages})"
                                     )
                                     build_logger.info(f"[{task_id}] 第 {api_page_num}/{total_pdf_pages} 页成功 ({completed_count}/{total_pdf_pages})")
 
@@ -307,12 +307,6 @@ def generate_ontology():
                 ProjectManager.save_chunks(project.project_id, all_chunks)
                 build_logger.info(f"[{task_id}] ✅ chunks.json 已保存，共 {len(all_chunks)} 个块")
 
-                # ========== 阶段 1.3: 提取名词实体（可选，轻量） ==========
-                task_manager.update_task(task_id, progress=75, message="🧠 提取名词实体...", log="提取名词实体")
-                content_chunks = [c for c in all_chunks if c.get('content') and not c.get('is_layout_bbox')]
-                total_nouns = _extract_nouns_from_chunks(content_chunks, project.project_id, task_id, build_logger)
-                build_logger.info(f"[{task_id}] ✅ 名词提取完成: {total_nouns} 个名词")
-
                 # ========== 阶段 1 完成: 保存本体 + 设置状态 ==========
                 task_manager.update_task(task_id, progress=85, message="💾 保存本体定义...", log="保存本体定义")
 
@@ -323,7 +317,7 @@ def generate_ontology():
                         "entity_types": ontology.get("entity_types", []),
                         "edge_types": ontology.get("edge_types", [])
                     }
-                    project.analysis_summary = f"MinerU 解析完成：{len(all_chunks)} 块，{total_nouns} 名词"
+                    project.analysis_summary = f"MinerU 解析完成：{len(all_chunks)} 块"
                 else:
                     project.ontology = {"entity_types": [], "edge_types": []}
                     project.analysis_summary = ""
@@ -331,7 +325,8 @@ def generate_ontology():
                 project.status = ProjectStatus.ONTOLOGY_GENERATED
                 ProjectManager.save_project(project)
 
-                summary = f"✅ MinerU 解析完成！共 {len(all_chunks)} 块（含 layout），{total_nouns} 名词"
+                content_chunks_count = len([c for c in all_chunks if c.get('content') and not c.get('is_layout_bbox')])
+                summary = f"✅ MinerU 解析完成！共 {len(all_chunks)} 块（含 layout）"
                 build_logger.info(f"[{task_id}] {summary}")
 
                 task_manager.complete_task(task_id, {
@@ -340,8 +335,7 @@ def generate_ontology():
                     "analysis_summary": project.analysis_summary,
                     "total_text_length": project.total_text_length,
                     "chunks_count": len(all_chunks),
-                    "content_chunks_count": len(content_chunks),
-                    "total_nouns": total_nouns
+                    "content_chunks_count": content_chunks_count
                 })
                 build_logger.info(f"[{task_id}] 任务完成.")
 

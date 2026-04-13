@@ -2368,11 +2368,7 @@ class Neo4jStorage(GraphStorage):
                         # 原来的逻辑是检查 has_topic && has_entities，但 entities 可能为空（某些 clause 没有提取到实体）
                         # 而 Topic/Entity 关系统一由 add_topic_and_entity_nodes 处理，不需要三元组逻辑
                         has_topic = bool(metadata.get("topic"))
-                        if has_topic:
-                            logger.info(f"[hierarchical] Skipping triplet parse for clause {clause_id} (has topic, Topic-Entity handled by add_topic_and_entity_nodes)")
-                        else:
-                            # 创建Clause实体（旧路径：需要 LLM 解析三元组）
-                            # 注意：即使走旧路径也不再创建 Component/Action/Condition 节点，
+                        if not has_topic:
                             # 只创建 Clause 节点本身，Entity 由 add_topic_and_entity_nodes 统一创建
                             self._create_clause_entity_only(tx, graph_id, episode_id, clause_id, content, embedding, metadata)
                 elif chunk_type == "section":

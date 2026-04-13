@@ -1644,6 +1644,7 @@ onUnmounted(() => {
   color: #333;
   line-height: 1.5;
   margin-bottom: 8px;
+  font-size: small;
 }
 
 .fact-footer {
