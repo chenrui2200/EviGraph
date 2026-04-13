@@ -434,6 +434,39 @@
       </div>
     </main>
 
+    <!-- 解析方法选择模态窗口 -->
+    <div v-if="showParseMethodModal" class="modal-overlay" @click.self="showParseMethodModal = false">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>选择解析方法</h3>
+          <button class="modal-close" @click="showParseMethodModal = false">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-desc">请选择 MinerU PDF 解析方法：</p>
+          <div class="method-options">
+            <label class="method-option" :class="{ active: selectedParseMethod === 'auto' }">
+              <input type="radio" v-model="selectedParseMethod" value="auto" />
+              <div class="method-content">
+                <span class="method-name">Auto</span>
+                <span class="method-desc">自动选择最佳解析方式</span>
+              </div>
+            </label>
+            <label class="method-option" :class="{ active: selectedParseMethod === 'ocr' }">
+              <input type="radio" v-model="selectedParseMethod" value="ocr" />
+              <div class="method-content">
+                <span class="method-name">OCR</span>
+                <span class="method-desc">基于 OCR 的解析方式（默认）</span>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="modal-btn cancel" @click="showParseMethodModal = false">取消</button>
+          <button class="modal-btn confirm" @click="confirmReAnnotate">确认</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 实时日志抽屉 -->
     <div class="log-drawer" :class="{ open: logDrawerOpen }">
       <div class="log-drawer-header" @click="logDrawerOpen = !logDrawerOpen">
@@ -534,6 +567,10 @@ const hasAutoExpanded = ref(false)
 let pollInterval = null
 let taskSource = null
 const logScrollEl = ref(null)
+
+// 重新标注模态窗口
+const showParseMethodModal = ref(false)
+const selectedParseMethod = ref('ocr')
 
 // 实体编辑
 const editingClauseId = ref(null)
@@ -952,13 +989,21 @@ async function handleStartChunking() {
 
 async function handleReAnnotate() {
   if (reAnnotating.value) return
-  if (!confirm('确认重新标注？将重新调用 MinerU 解析 PDF 并生成 chunks.json。')) return
+  // 弹出解析方法选择模态窗口
+  showParseMethodModal.value = true
+}
 
+function confirmReAnnotate() {
+  showParseMethodModal.value = false
+  doReAnnotate(selectedParseMethod.value)
+}
+
+async function doReAnnotate(parseMethod) {
   reAnnotating.value = true
-  realtimeLogs.value.push('🔄 开始重新标注...')
+  realtimeLogs.value.push(`🔄 开始重新标注 (方法: ${parseMethod})...`)
 
   try {
-    const res = await reAnnotateMineru(currentProjectId.value)
+    const res = await reAnnotateMineru(currentProjectId.value, parseMethod)
     if (res.success) {
       taskId.value = res.data.task_id
       waitingForReAnnotate.value = true
@@ -1049,7 +1094,13 @@ function startTaskSSE() {
             waitingForReAnnotate.value = false
             reAnnotating.value = false
             if (payload.status === 'completed') {
+              // 清除旧的选中状态
+              mineruSelectedChunk.value = null
+              highlightedClauseId.value = null
+              // 重新加载 MinerU 结果
               await loadMineruResults()
+              // 重新加载 PDF 视图以显示新的标注框
+              await loadPdf()
               realtimeLogs.value.push(`✅ 重新标注完成`)
             } else {
               realtimeLogs.value.push(`❌ 重新标注失败: ${payload.error || '未知错误'}`)
@@ -1731,4 +1782,54 @@ header.ca-header {
 .mineru-toggle { background: none; border: 1px solid #d0d7de; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px; color: #6b7280; }
 .mineru-toggle:hover { background: #f0f0f0; }
 .mineru-toggle.active { background: #667eea; color: white; border-color: #667eea; }
+
+/* 解析方法选择模态窗口 */
+.modal-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.modal-card {
+  background: #ffffff; border-radius: 12px;
+  padding: 0; min-width: 360px; max-width: 420px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.2);
+  overflow: hidden;
+}
+.modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+}
+.modal-header h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.modal-close { background: rgba(255,255,255,0.2); border: none; color: white; width: 24px; height: 24px; border-radius: 50%; cursor: pointer; font-size: 18px; line-height: 1; display: flex; align-items: center; justify-content: center; }
+.modal-close:hover { background: rgba(255,255,255,0.3); }
+.modal-body { padding: 20px; }
+.modal-desc { margin: 0 0 16px; font-size: 14px; color: #6b7280; }
+.method-options { display: flex; flex-direction: column; gap: 10px; }
+.method-option {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px;
+  border: 2px solid #e5e7eb; border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.method-option:hover { border-color: #667eea; background: #f9fafb; }
+.method-option.active { border-color: #667eea; background: #eef2ff; }
+.method-option input[type="radio"] { display: none; }
+.method-content { display: flex; flex-direction: column; gap: 2px; }
+.method-name { font-size: 14px; font-weight: 600; color: #1a1a2e; }
+.method-desc { font-size: 12px; color: #6b7280; }
+.modal-footer {
+  display: flex; gap: 12px; justify-content: flex-end;
+  padding: 16px 20px;
+  background: #f9fafb;
+  border-top: 1px solid #e5e7eb;
+}
+.modal-btn { padding: 8px 20px; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+.modal-btn.cancel { background: none; border: 1px solid #d0d7de; color: #6b7280; }
+.modal-btn.cancel:hover { background: #f0f0f0; }
+.modal-btn.confirm { background: #667eea; border: none; color: white; }
+.modal-btn.confirm:hover { background: #5a67e8; }
 </style>

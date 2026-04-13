@@ -925,9 +925,15 @@ def _sanitize_response_bytes(obj: Any) -> Any:
     return obj
 
 
-def _parse_single_page(pdf_path: str, filename: str, api_page_num: int) -> tuple[int, Optional[Dict[str, Any]], Optional[str]]:
+def _parse_single_page(pdf_path: str, filename: str, api_page_num: int, parse_method: str = 'ocr') -> tuple[int, Optional[Dict[str, Any]], Optional[str]]:
     """
     并发解析单个页面，返回 (页码, 结果数据, 错误信息)
+
+    Args:
+        pdf_path: PDF 文件路径
+        filename: 文件名
+        api_page_num: 页码（0-based）
+        parse_method: 解析方法，'auto' 或 'ocr'
 
     Returns:
         (api_page_num, page_result_dict, error_msg)
@@ -937,11 +943,11 @@ def _parse_single_page(pdf_path: str, filename: str, api_page_num: int) -> tuple
     with open(pdf_path, 'rb') as f:
         pdf_bytes = f.read()
 
-    page_result, error_msg = _call_mineru_api(pdf_bytes, api_page_num)
+    page_result, error_msg = _call_mineru_api(pdf_bytes, api_page_num, parse_method=parse_method)
     return api_page_num, page_result, error_msg
 
 
-def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, timeout: int = 600) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, timeout: int = 600, parse_method: str = 'ocr') -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     统一的 MinerU API 调用方法，带错误重试机制。
 
@@ -965,7 +971,7 @@ def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, time
         'return_md': 'true',
         'return_images': 'false',
         'return_content_list': 'false',
-        'parse_method': 'ocr',
+        'parse_method': parse_method,
         'lang_list': 'ch',
         'table_enable': 'true',
         'formula_enable': 'true',
@@ -1037,8 +1043,15 @@ def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, time
     return None, f"Max retries exceeded. Last error: {last_error}"
 
 
-def _do_mineru_parse_work(task_id: str, project_id: str, filename: str):
-    """MinerU 解析的后台执行逻辑（并发写入 jsonl）"""
+def _do_mineru_parse_work(task_id: str, project_id: str, filename: str, parse_method: str = 'ocr'):
+    """MinerU 解析的后台执行逻辑（并发写入 jsonl）
+
+    Args:
+        task_id: 任务 ID
+        project_id: 项目 ID
+        filename: 文件名
+        parse_method: 解析方法，'auto' 或 'ocr'
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     task_manager = TaskManager()
@@ -1095,7 +1108,7 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str):
 
     task_manager.update_task(
         task_id,
-        message=f"📄 PDF 总页数: {total_pages}，开始并发解析...",
+        message=f"📄 PDF 总页数: {total_pages}，开始并发解析 (方法: {parse_method})...",
         progress=0,
         log=f"PDF 总页数: {total_pages}，并发数: {min(8, total_pages)}"
     )
@@ -1115,7 +1128,7 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str):
         # 提交所有页面的解析任务
         # MinerU API 期望 0-based 索引：start_page_id=0 表示第一页
         future_to_page = {
-            executor.submit(_parse_single_page, pdf_path, filename, page_idx): page_idx
+            executor.submit(_parse_single_page, pdf_path, filename, page_idx, parse_method): page_idx
             for page_idx in range(total_pages)
         }
 
@@ -1250,7 +1263,7 @@ def re_annotate():
     """
     重新标注：从 mineru_parsed.json 重新生成 chunks.json（异步任务）
 
-    请求: JSON { "project_id": "xxx" }
+    请求: JSON { "project_id": "xxx", "parse_method": "auto|ocr" }
     流程:
       1. 创建任务，立即返回 task_id
       2. 后台线程执行：读取/调用 MinerU → 解析 → 保存 chunks.json
@@ -1264,14 +1277,18 @@ def re_annotate():
     """
     data = request.get_json() or {}
     project_id = data.get('project_id')
+    parse_method = data.get('parse_method', 'ocr')
+
+    if parse_method not in ('auto', 'ocr'):
+        return jsonify({"success": False, "error": "parse_method 必须是 'auto' 或 'ocr'"}), 400
 
     if not project_id:
         return jsonify({"success": False, "error": "请提供 project_id"}), 400
 
     # 创建任务
     task_manager = TaskManager()
-    task_id = task_manager.create_task("re-annotate", metadata={"project_id": project_id})
-    task_manager.update_task(task_id, status=TaskStatus.PROCESSING, message="🚀 准备重新标注...")
+    task_id = task_manager.create_task("re-annotate", metadata={"project_id": project_id, "parse_method": parse_method})
+    task_manager.update_task(task_id, status=TaskStatus.PROCESSING, message=f"🚀 准备重新标注 (方法: {parse_method})...")
 
     # 异步执行
     def do_re_annotate():
@@ -1296,7 +1313,7 @@ def re_annotate():
                     logger.info(f"[re-annotate] 已删除旧文件: {old_file}")
 
             # 调用完整的 MinerU 解析流程
-            _do_mineru_parse_work(task_id, project_id, filename)
+            _do_mineru_parse_work(task_id, project_id, filename, parse_method)
         except Exception as e:
             logger.error(f"[re-annotate] 异常: {e}")
             task_manager.fail_task(task_id, str(e))

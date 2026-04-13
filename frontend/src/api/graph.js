@@ -341,12 +341,13 @@ export function getMineruChunks(projectId) {
 /**
  * 从 mineru_parsed.json 重新生成 chunks.json
  * @param {String} projectId - 项目ID
+ * @param {String} parseMethod - 解析方法，'auto' 或 'ocr'
  * @returns {Promise}
  */
-export function reAnnotateMineru(projectId) {
+export function reAnnotateMineru(projectId, parseMethod = 'ocr') {
   return service({
     url: '/api/graph/pdf/re-annotate',
     method: 'post',
-    data: { project_id: projectId }
+    data: { project_id: projectId, parse_method: parseMethod }
   })
 }
