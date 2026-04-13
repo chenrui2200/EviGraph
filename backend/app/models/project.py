@@ -91,6 +91,7 @@ class ChunkCheckpoint:
     chapter_plan: List[ChapterPlan] = field(default_factory=list)
     current_chapter_index: int = -1
     total_chapters: int = 0
+    total_clauses: int = 0  # 总条款数，用于细粒度进度计算
     completed_clauses: List[Dict] = field(default_factory=list)
     completed_elements: List[Dict] = field(default_factory=list)
     processing_clauses: List[Dict] = field(default_factory=list)
@@ -104,6 +105,7 @@ class ChunkCheckpoint:
             "chapter_plan": [c.to_dict() if isinstance(c, ChapterPlan) else c for c in self.chapter_plan],
             "current_chapter_index": self.current_chapter_index,
             "total_chapters": self.total_chapters,
+            "total_clauses": self.total_clauses,
             "completed_clauses": self.completed_clauses,
             "completed_elements": self.completed_elements,
             "processing_clauses": self.processing_clauses,
@@ -123,6 +125,7 @@ class ChunkCheckpoint:
             chapter_plan=chapter_plan,
             current_chapter_index=data.get('current_chapter_index', -1),
             total_chapters=data.get('total_chapters', 0),
+            total_clauses=data.get('total_clauses', 0),
             completed_clauses=data.get('completed_clauses', []),
             completed_elements=data.get('completed_elements', []),
             processing_clauses=data.get('processing_clauses', []),
@@ -934,13 +937,27 @@ class ProjectManager:
             if c.status == ChapterStatus.FAILED
         )
 
+        # 计算进度：优先使用条款细粒度，fallback 到章节粗粒度
+        total_clauses = checkpoint.total_clauses
+        completed_clauses_count = len(checkpoint.completed_clauses)
+        if total_clauses > 0:
+            # 基于条款的细粒度进度
+            progress_ratio = completed_clauses_count / total_clauses
+        elif total > 0:
+            # Fallback 到章节进度
+            progress_ratio = completed / total
+        else:
+            progress_ratio = 0
+
         return {
             "total_chapters": total,
             "completed_chapters": completed,
             "processing_chapters": processing,
             "failed_chapters": failed,
             "pending_chapters": total - completed - processing - failed,
-            "progress_ratio": completed / total if total > 0 else 0,
+            "total_clauses": total_clauses,
+            "completed_clauses_count": completed_clauses_count,
+            "progress_ratio": progress_ratio,
             "current_chapter_index": checkpoint.current_chapter_index,
             "current_chapter": (
                 checkpoint.chapter_plan[checkpoint.current_chapter_index].to_dict()
@@ -948,7 +965,6 @@ class ProjectManager:
                 else None
             ),
             "chapter_plan": [c.to_dict() for c in checkpoint.chapter_plan],
-            "completed_clauses_count": len(checkpoint.completed_clauses),
             "completed_elements_count": len(checkpoint.completed_elements),
             "created_at": checkpoint.created_at,
             "updated_at": checkpoint.updated_at

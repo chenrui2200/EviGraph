@@ -2241,6 +2241,7 @@ topic：{topic}
                 chapter_plan=chapter_plan,
                 current_chapter_index=-1,
                 total_chapters=chapter_count,
+                total_clauses=len(clauses_data),  # 总条款数用于细粒度进度
                 created_at=datetime.now().isoformat(),
                 updated_at=datetime.now().isoformat()
             )
@@ -2604,6 +2605,22 @@ topic：{topic}
         # 用于匹配大章节标题（如 "2 术语"）
         CHAPTER_PATTERN = re.compile(r'^(\d+(?:\.\d+)?)\s+(.+)')
 
+        # 编码修复：尝试将乱码内容转换为正确的中文
+        def _fix_encoding(content: str) -> str:
+            """
+            修复 MinerU 解析产生的编码问题。
+            MinerU 返回的 GBK 编码内容被当作 UTF-8 写入文件，导致中文显示为乱码。
+            此函数尝试用 GBK 重新解码 UTF-8 字节来修复。
+            """
+            if not content or not isinstance(content, str):
+                return content
+            try:
+                # 将 content 编码为 UTF-8 字节，再用 GBK 解码
+                fixed = content.encode('utf-8').decode('gbk')
+                return fixed
+            except (UnicodeDecodeError, UnicodeEncodeError):
+                return content
+
         # 用于匹配条款编号（如 "2.1"、"3.5.2"、"1.0.1"）
         CLAUSE_PATTERN = re.compile(r'^(\d+\.\d+(?:\.\d+)?)\s*(.*)')
 
@@ -2621,6 +2638,9 @@ topic：{topic}
             metadata = chunk.get('metadata', {})
             chunk_type = chunk.get('type') or metadata.get('type', '')
             content = chunk.get('content') or chunk.get('text') or metadata.get('content', '')
+
+            # 修复编码问题：GBK 编码内容被当作 UTF-8 写入
+            content = _fix_encoding(content)
 
             # 调试日志：打印前 5 条 chunk 的 type 和 content
             if i < 5:
@@ -2816,7 +2836,7 @@ topic：{topic}
             page_idx = chunk.get('page_idx', 0)
             bbox = chunk.get('bbox_viewport') or chunk.get('bbox_pdf') or []
             # 查找该 chunk 的 clause_id（通过 content 中的条款编号）
-            chunk_content = chunk.get('content', '')
+            chunk_content = _fix_encoding(chunk.get('content', ''))
             m = CLAUSE_PATTERN.match(chunk_content.strip())
             if m:
                 current_clause_id = m.group(1)
