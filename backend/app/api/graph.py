@@ -965,7 +965,7 @@ def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, time
         'return_md': 'true',
         'return_images': 'false',
         'return_content_list': 'false',
-        'parse_method': 'auto',
+        'parse_method': 'ocr',
         'lang_list': 'ch',
         'table_enable': 'true',
         'formula_enable': 'true',
