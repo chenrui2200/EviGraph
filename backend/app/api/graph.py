@@ -320,8 +320,7 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                             initial_chunks,
                             md_content=md_content,
                             chunks_data=chunks_data,
-                            mineru_data=mineru_data,
-                            pdf_path=project.source_path
+                            pdf_path=_resolve_pdf_path(project_id, '')
                         )
                         total_chunks = hierarchical_result.total_chunks
                         build_logger.info(f"Hierarchical chunking complete: {total_chunks} chunks")
@@ -337,8 +336,7 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                         hierarchical_result = TextProcessor.hierarchical_chunk_text(
                             text,
                             md_content=md_content,
-                            mineru_data=mineru_data,
-                            pdf_path=project.source_path
+                            pdf_path=_resolve_pdf_path(project_id, '')
                         )
                         total_chunks = hierarchical_result.total_chunks
 
@@ -1962,7 +1960,7 @@ def get_mineru_chunks(project_id: str):
     """
     获取 MinerU 解析结果（从 chunks.json）
 
-    chunks.json 由 ontology/generate 或 mineru_parse 产生，
+    chunks.json 由 mineru_parse 产生，
     包含 MinerU 的 layout + content + bbox + nouns 数据。
 
     Returns:

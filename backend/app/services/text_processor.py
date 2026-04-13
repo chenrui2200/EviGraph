@@ -268,7 +268,6 @@ class TextProcessor:
         progress_callback=None,
         md_content: Optional[str] = None,
         chunks_data: Optional[List[Dict]] = None,
-        mineru_data: Optional[Dict] = None,
         pdf_path: Optional[str] = None
     ) -> "HierarchicalChunkResult":
         """
@@ -286,7 +285,6 @@ class TextProcessor:
             progress_callback: 进度回调函数，格式: callback(progress, message)
             md_content: MinerU 解析的 Markdown 内容（用于条款引用识别）
             chunks_data: chunks.json 数据（用于 clause→chunk 位置匹配）
-            mineru_data: MinerU 原始数据（用于表格图片 OCR 替换）
             pdf_path: PDF 文件路径（用于表格 OCR）
 
         Returns:
@@ -306,7 +304,6 @@ class TextProcessor:
                 progress_callback,
                 md_content=md_content,
                 chunks_data=chunks_data,
-                mineru_data=mineru_data,
                 pdf_path=pdf_path
             )
 
@@ -323,7 +320,6 @@ class TextProcessor:
         progress_callback=None,
         md_content: Optional[str] = None,
         chunks_data: Optional[List[Dict]] = None,
-        mineru_data: Optional[Dict] = None,
         pdf_path: Optional[str] = None
     ) -> "HierarchicalChunkResult":
         """
@@ -335,7 +331,6 @@ class TextProcessor:
             progress_callback: 进度回调函数
             md_content: MinerU 解析的 Markdown 内容
             chunks_data: chunks.json 数据
-            mineru_data: MinerU 原始数据（用于表格图片 OCR 替换）
             pdf_path: PDF 文件路径（用于表格 OCR）
 
         Returns:
@@ -355,7 +350,6 @@ class TextProcessor:
                 progress_callback,
                 md_content=md_content,
                 chunks_data=chunks_data,
-                mineru_data=mineru_data,
                 pdf_path=pdf_path
             )
 

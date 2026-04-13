@@ -2150,7 +2150,6 @@ topic：{topic}
         project_id: Optional[str] = None,
         md_content: Optional[str] = None,
         chunks_data: Optional[List[Dict]] = None,
-        mineru_data: Optional[Dict] = None,
         pdf_path: Optional[str] = None
     ) -> HierarchicalChunkResult:
         """
@@ -2169,7 +2168,6 @@ topic：{topic}
             project_id: 项目ID（用于保存检查点）
             md_content: MinerU 解析的 Markdown 内容（可选，用于兼容）
             chunks_data: chunks.json 数据（核心数据源）
-            mineru_data: MinerU 原始数据（可选）
             pdf_path: PDF 文件路径（可选）
 
         Returns:
@@ -2423,7 +2421,6 @@ topic：{topic}
         progress_callback: Optional[Callable] = None,
         md_content: Optional[str] = None,
         chunks_data: Optional[List[Dict]] = None,
-        mineru_data: Optional[Dict] = None,
         pdf_path: Optional[str] = None
     ) -> HierarchicalChunkResult:
         """单文本分块入口"""
@@ -2435,7 +2432,6 @@ topic：{topic}
             [fake_chunk],
             md_content=md_content,
             chunks_data=chunks_data,
-            mineru_data=mineru_data,
             pdf_path=pdf_path
         )
 

@@ -147,7 +147,7 @@ def intelligent_chunk():
                 task_mgr.update_task(task_id, status=TaskStatus.PROCESSING, progress=0, message="🚀 开始 LLM 语义分块...")
 
                 chunker = LLMDrivenChunker(progress_callback=progress_callback)
-                result = chunker.chunk(text_chunks, progress_callback, checkpoint=checkpoint, project_id=project_id, md_content=md_content, chunks_data=chunks_data, pdf_path=pdf_path, mineru_data=mineru_data)
+                result = chunker.chunk(text_chunks, progress_callback, checkpoint=checkpoint, project_id=project_id, md_content=md_content, chunks_data=chunks_data, pdf_path=pdf_path)
 
                 chunks_result = None
                 save_success = False

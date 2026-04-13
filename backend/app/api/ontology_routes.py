@@ -4,16 +4,14 @@ Handles file upload, text extraction, and ontology generation
 """
 
 import os
-import json
 import shutil
 import traceback
 import threading
-import requests
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import request, jsonify
 
 from . import graph_bp
-from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.api_utils import api_handler
 from ..utils.file_parser import FileParser
@@ -23,87 +21,24 @@ from ..models.task import TaskManager, TaskStatus
 logger = get_logger('mirofish.api')
 
 
-def _parse_pdf_page(pdf_path: str, page_idx: int) -> tuple[int, dict, str]:
-    """
-    并发解析单个 PDF 页面，返回 (页码, 解析结果, 错误信息)
-    """
-    import uuid
-
-    temp_filename = f"temp_{uuid.uuid4().hex[:8]}.pdf"
-    api_page_num = page_idx + 1  # MinerU API 页码从 1 开始
-
-    try:
-        with open(pdf_path, 'rb') as f:
-            pdf_bytes = f.read()
-
-        data = {
-            'return_middle_json': 'true',
-            'return_model_output': 'false',
-            'return_md': 'true',
-            'return_images': 'false',
-            'return_content_list': 'false',
-            'parse_method': 'auto',
-            'lang_list': 'ch',
-            'table_enable': 'true',
-            'formula_enable': 'true',
-            'backend': 'pipeline',
-            'start_page_id': str(api_page_num),
-            'end_page_id': str(api_page_num),
-            'output_dir': './output',
-            'server_url': 'string',
-        }
-
-        response = requests.post(
-            Config.MINERU_API_URL,
-            files={'files': (temp_filename, pdf_bytes, 'application/pdf')},
-            data=data,
-            timeout=600
-        )
-
-        if response.status_code != 200:
-            return api_page_num, None, f"HTTP {response.status_code}: {response.text[:200]}"
-
-        result = response.json()
-        results = result.get('results', [])
-
-        if not results:
-            return api_page_num, None, "Empty results"
-
-        page_result = results[0]
-        return api_page_num, {
-            'page_num': page_idx,  # 0-based page index for internal use
-            'md_content': page_result.get('md_content', ''),
-            'middle_json': page_result.get('middle_json', {})
-        }, None
-
-    except Exception as e:
-        return api_page_num, None, str(e)
-
-
 @graph_bp.route('/ontology/generate', methods=['POST'])
 @api_handler
 def generate_ontology():
     """
     Interface 1: Upload files and extract text (Asynchronous)
 
-    流程（与手册一致）：
+    流程：
     1. 提取 PDF 文本块（chunks.json）
     2. 保存原始文本
     3. 设置状态为 ontology_generated
-
-    注意：MinerU 解析（Phase 2.1）和智能分析（Phase 2.2）是独立的用户操作步骤。
-    - 🧠 MinerU 解析 → POST /api/graph/pdf/mineru-parse（可选，用户手动触发）
-    - 🚀 开始智能分析 → POST /api/graph/chunk/intelligent（可选，用户手动触发）
     """
-    from .graph import allowed_file
+    from .graph import allowed_file, _call_mineru_api, _parse_mineru_jsonl
 
     try:
         logger.info("=== Starting 文件上传与文本提取流程 ===")
 
         # Get parameters
-        simulation_requirement = request.form.get('simulation_requirement', '')
         project_name = request.form.get('project_name', 'Unnamed Project')
-        additional_context = request.form.get('additional_context', '')
 
         # Get uploaded files
         uploaded_files = request.files.getlist('files')
@@ -115,7 +50,6 @@ def generate_ontology():
 
         # 1. 创建项目对象（仅内存中，不创建目录）
         project = ProjectManager.create_project(name=project_name)
-        project.simulation_requirement = simulation_requirement
 
         # 2. 先验证所有文件，全部有效后才写入磁盘（避免留下空目录）
         valid_files = [
@@ -133,7 +67,6 @@ def generate_ontology():
 
         # 4. 保存文件到磁盘
         saved_files = []
-        file_save_errors = []
         for file in valid_files:
             try:
                 file_info = ProjectManager.save_file_to_project(
@@ -149,10 +82,8 @@ def generate_ontology():
                 })
             except Exception as file_err:
                 logger.warning(f"Failed to save file {file.filename}: {file_err}")
-                file_save_errors.append(f"{file.filename}: {file_err}")
 
         if not saved_files:
-            # 清理刚创建的目录
             shutil.rmtree(ProjectManager._get_project_dir(project.project_id), ignore_errors=True)
             return jsonify({"success": False, "error": "No valid files uploaded"}), 400
 
@@ -173,17 +104,14 @@ def generate_ontology():
 
         # Start background thread
         def ontology_task():
-            from .graph import _parse_mineru_to_chunks
-
             try:
                 build_logger = get_logger('mirofish.ontology')
 
-                # ========== 阶段 1: MinerU PDF 解析 → chunks.json ==========
+                # ========== 阶段 1: MinerU PDF 解析 ==========
                 build_logger.info(f"[{task_id}] 阶段 1: MinerU PDF 解析...")
                 task_manager.update_task(task_id, status=TaskStatus.PROCESSING, progress=5, message="🚀 开始 MinerU PDF 解析...")
 
                 all_chunks = []
-                all_text_parts = []
 
                 for idx, file_info in enumerate(saved_files):
                     orig_name = file_info["original_filename"]
@@ -191,7 +119,8 @@ def generate_ontology():
                     build_logger.info(f"[{task_id}] 处理文件: {orig_name} ({idx + 1}/{len(saved_files)})")
 
                     if not orig_name.lower().endswith('.pdf'):
-                        build_logger.info(f"[{task_id}] 非 PDF 文件，跳过 MinerU: {orig_name}")
+                        # 非 PDF 文件，使用 FileParser 提取
+                        build_logger.info(f"[{task_id}] 非 PDF 文件，使用 FileParser: {orig_name}")
                         try:
                             chunks = FileParser.extract_chunks(file_info["path"], override_filename=orig_name)
                             for c in chunks:
@@ -207,7 +136,6 @@ def generate_ontology():
                                     "category_id": 1,
                                     "source": orig_name
                                 })
-                                all_text_parts.append(c.text)
                             build_logger.info(f"[{task_id}] FileParser 提取 {len(chunks)} 个文本块: {orig_name}")
                         except Exception as fe:
                             build_logger.warning(f"[{task_id}] FileParser 失败: {fe}")
@@ -218,30 +146,25 @@ def generate_ontology():
                         build_logger.warning(f"[{task_id}] PDF 文件不存在: {pdf_path}")
                         continue
 
+                    # 使用 fitz 获取 PDF 页数
                     import fitz
                     doc = fitz.open(pdf_path)
-                    total_pdf_pages = len(doc)
+                    total_pages = len(doc)
                     doc.close()
-                    build_logger.info(f"[{task_id}] PDF 总页数: {total_pdf_pages} for {orig_name}")
+                    build_logger.info(f"[{task_id}] PDF 总页数: {total_pages} for {orig_name}")
 
-                    mineru_url = Config.MINERU_API_URL
-                    build_logger.info(f"[{task_id}] 并发调用 MinerU API (max_workers=8): {mineru_url} for {orig_name}")
-
-                    # 构建 jsonl 路径（统一文件名，避免与 PDF 文件名冲突）
+                    # 构建 jsonl 路径
                     jsonl_path = os.path.join(ProjectManager._get_project_dir(project.project_id), 'mineru_parsed.jsonl')
-                    # 初始化/清空 jsonl 文件（每个 worker 追加写入）
-                    with open(jsonl_path, 'w', encoding='utf-8') as f:
-                        pass
 
+                    # 并发调用 MinerU API（使用 graph._call_mineru_api，带重试）
+                    max_workers = min(8, total_pages)
                     successful_pages = 0
                     completed_count = 0
 
-                    # 并发解析所有页面
-                    max_workers = min(8, total_pdf_pages)
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         future_to_page = {
-                            executor.submit(_parse_pdf_page, pdf_path, page_idx): page_idx
-                            for page_idx in range(total_pdf_pages)
+                            executor.submit(_call_mineru_api, open(pdf_path, 'rb').read(), page_idx): page_idx
+                            for page_idx in range(total_pages)
                         }
 
                         for future in as_completed(future_to_page):
@@ -249,42 +172,42 @@ def generate_ontology():
                             completed_count += 1
 
                             try:
-                                api_page_num, page_result, error_msg = future.result()
+                                page_result, error_msg = future.result()
 
                                 if error_msg:
-                                    build_logger.error(f"[{task_id}] 第 {api_page_num} 页失败: {error_msg}")
+                                    build_logger.error(f"[{task_id}] 第 {page_idx} 页失败: {error_msg}")
                                     task_manager.update_task(
                                         task_id,
-                                        message=f"⚠️ {orig_name}: 第 {api_page_num}/{total_pdf_pages} 页失败",
+                                        message=f"⚠️ {orig_name}: 第 {page_idx}/{total_pages} 页失败",
                                         progress=current_progress,
-                                        log=f"第 {api_page_num} 页失败: {error_msg}"
+                                        log=f"第 {page_idx} 页失败: {error_msg}"
                                     )
                                 else:
-                                    # 追加写入 jsonl（每条记录带 page_num，后续按 page_num 排序读取）
+                                    # 写入 jsonl
                                     with open(jsonl_path, 'a', encoding='utf-8') as jf:
                                         jf.write(json.dumps(page_result, ensure_ascii=False) + '\n')
                                     successful_pages += 1
 
                                     task_manager.update_task(
                                         task_id,
-                                        message=f"✅ {orig_name}: 第 {api_page_num}/{total_pdf_pages} 页成功 ({completed_count}/{total_pdf_pages})",
+                                        message=f"✅ {orig_name}: 第 {page_idx}/{total_pages} 页成功 ({completed_count}/{total_pages})",
                                         progress=current_progress,
-                                        log=f"第 {api_page_num}/{total_pdf_pages} 页成功 ({completed_count}/{total_pdf_pages})"
+                                        log=f"第 {page_idx}/{total_pages} 页成功"
                                     )
-                                    build_logger.info(f"[{task_id}] 第 {api_page_num}/{total_pdf_pages} 页成功 ({completed_count}/{total_pdf_pages})")
+                                    build_logger.info(f"[{task_id}] 第 {page_idx}/{total_pages} 页成功")
 
                             except Exception as req_err:
-                                build_logger.error(f"[{task_id}] 第 {page_idx + 1} 页异常: {req_err}")
+                                build_logger.error(f"[{task_id}] 第 {page_idx} 页异常: {req_err}")
                                 continue
 
-                    build_logger.info(f"[{task_id}] ✅ MinerU API 完成: {orig_name}, 成功 {successful_pages}/{total_pdf_pages} 页")
+                    build_logger.info(f"[{task_id}] ✅ MinerU API 完成: {orig_name}, 成功 {successful_pages}/{total_pages} 页")
 
                     if successful_pages == 0:
                         build_logger.error(f"[{task_id}] MinerU API 调用失败: {orig_name}, 成功页数 0")
                         continue
 
-                    # 直接从 JSONL 文件解析 chunks（流式读取，无需构造 mineru_data 字典）
-                    file_chunks = _parse_mineru_to_chunks(jsonl_path, orig_name, pdf_path)
+                    # 使用 graph._parse_mineru_jsonl 解析 chunks
+                    file_chunks = _parse_mineru_jsonl(jsonl_path, orig_name)
                     for c in file_chunks:
                         c["chunk_id"] = f"chunk_{idx}_{c['chunk_id'].split('_', 1)[-1]}"
                     all_chunks.extend(file_chunks)
@@ -292,8 +215,6 @@ def generate_ontology():
                     text_count = len([c for c in file_chunks if c['category_id'] in (0, 1)])
                     table_count = len([c for c in file_chunks if c['category_id'] == 2])
                     build_logger.info(f"[{task_id}] 文件 {orig_name} 提取 {text_count} 文本块 + {table_count} 表格块")
-                    msg = f"[{task_id}] ✅ {orig_name}: {text_count} 文本块 + {table_count} 表格块 (成功 {successful_pages}/{total_pdf_pages} 页)"
-                    task_manager.update_task(task_id, progress=current_progress, message=msg, log=msg)
 
                 if not all_chunks:
                     build_logger.error(f"[{task_id}] 未提取到任何 chunks")
