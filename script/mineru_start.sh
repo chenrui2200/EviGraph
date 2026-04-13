@@ -5,7 +5,7 @@ docker rm mineru_server
 
 docker run -itd --restart=always \
  --name=mineru_server \
- --gpus device=0 \
+ --gpus device=0,1 \
  -e NVIDIA_VISIBLE_DEVICES=0 \
  -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
  -p 8888:8888 \

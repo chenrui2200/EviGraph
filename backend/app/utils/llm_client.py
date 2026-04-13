@@ -164,7 +164,7 @@ class LLMClient:
         if self._supports_thinking_param():
             if "extra_body" not in kwargs:
                 kwargs["extra_body"] = {}
-            kwargs["extra_body"].setdefault("options", {})["enable_thinking"] = False
+            kwargs["extra_body"]["enable_thinking"] = False
 
         last_error = None
         for attempt in range(self.max_retries + 1):

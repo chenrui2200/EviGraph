@@ -754,12 +754,40 @@ class ProjectManager:
 
     @classmethod
     def get_mineru_parsed(cls, project_id: str) -> Optional[Dict[str, Any]]:
-        """Get raw MinerU parsed result"""
-        path = cls._get_mineru_parsed_path(project_id)
-        if not os.path.exists(path):
+        """Get raw MinerU parsed result from jsonl (reads mineru_parsed.jsonl)"""
+        jsonl_path = os.path.join(cls._get_project_dir(project_id), 'mineru_parsed.jsonl')
+        if not os.path.exists(jsonl_path):
+            # 兼容旧版：如果 jsonl 不存在，尝试读取旧的 json 文件
+            path = cls._get_mineru_parsed_path(project_id)
+            if not os.path.exists(path):
+                return None
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+
+        # 从 jsonl 读取并组装为原来的格式
+        results_map = {}
+        md_contents = []
+        with open(jsonl_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    page_data = json.loads(line)
+                    page_num = page_data.get('page_num', 0)
+                    results_map[page_num] = page_data
+                    if page_data.get('md_content'):
+                        md_contents.append((page_num, page_data['md_content']))
+
+        if not results_map:
             return None
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+
+        # 组装为兼容格式
+        # 按页码排序，合并 md_content
+        md_contents.sort(key=lambda x: x[0])
+        combined_md = '\n'.join(content for _, content in md_contents)
+
+        return {
+            "files": results_map,
+            "md_content": combined_md
+        }
 
     # =========================================================================
     # 检查点机制 - 用于断点恢复

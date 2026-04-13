@@ -45,7 +45,7 @@
           <div class="pdf-toolbar-actions">
             <!-- MinerU 标注开关 -->
             <button
-              v-if="mineruChunks.length > 0"
+              v-if="mineruChunks.length > 0 || mineruMode"
               class="mineru-toggle"
               :class="{ active: mineruMode }"
               @click="toggleMineruMode"
@@ -160,7 +160,7 @@
       <!-- ========== RIGHT: Analysis Panel ========== -->
       <div class="analysis-panel">
         <!-- ===== MinerU 解析结果面板 ===== -->
-        <div v-if="mineruMode && mineruChunks.length" class="mineru-panel">
+        <div v-if="mineruMode" class="mineru-panel">
           <div class="mineru-panel-header">
             <div class="mineru-panel-title">
               <span>🧠 MinerU 布局解析</span>
@@ -196,6 +196,13 @@
 
           <!-- Chunks 列表（联动 PDF 标注） -->
           <div class="mineru-chunk-list" ref="mineruchunkListRef">
+            <!-- 空状态 -->
+            <div v-if="mineruChunks.length === 0" class="mineru-empty">
+              <span>暂无 MinerU 解析数据</span>
+              <button class="re-annotate-btn" @click="handleReAnnotate" :disabled="reAnnotating">
+                {{ reAnnotating ? '标注中...' : '重新标注' }}
+              </button>
+            </div>
             <div
               v-for="chunk in mineruChunks"
               :key="chunk.chunk_id"
@@ -239,13 +246,10 @@
               <div class="detail-table-label">表注</div>
               <div class="detail-table-footnote-text">{{ mineruSelectedChunk.table_footnote }}</div>
             </div>
-            <div v-if="mineruSelectedChunk.bbox_viewport" class="detail-bbox">
-              <span class="detail-bbox-label">bbox_viewport:</span>
-              <span class="detail-bbox-val">{{ mineruSelectedChunk.bbox_viewport.join(', ') }}</span>
-            </div>
-            <div v-if="mineruSelectedChunk.bbox_pdf" class="detail-bbox">
-              <span class="detail-bbox-label">bbox_pdf:</span>
-              <span class="detail-bbox-val">{{ mineruSelectedChunk.bbox_pdf.join(', ') }}</span>
+            <div v-if="mineruSelectedChunk.bbox_viewport || mineruSelectedChunk.bbox_pdf" class="detail-bbox">
+              <div class="detail-bbox-line">page index: {{ (mineruSelectedChunk.page_idx || 0) + 1 }}</div>
+              <div class="detail-bbox-line" v-if="mineruSelectedChunk.bbox_viewport">bbox_viewport: [{{ mineruSelectedChunk.bbox_viewport.join(', ') }}]</div>
+              <div class="detail-bbox-line" v-if="mineruSelectedChunk.bbox_pdf">bbox_pdf: [{{ mineruSelectedChunk.bbox_pdf.join(', ') }}]</div>
             </div>
           </div>
         </div>
@@ -958,7 +962,7 @@ async function handleStartChunking() {
 
 async function handleReAnnotate() {
   if (reAnnotating.value) return
-  if (!confirm('确认重新标注？将从 mineru_parsed.json 重新生成 chunks.json。')) return
+  if (!confirm('确认重新标注？将重新调用 MinerU 解析 PDF 并生成 chunks.json。')) return
 
   reAnnotating.value = true
   realtimeLogs.value.push('🔄 开始重新标注...')
@@ -1594,9 +1598,8 @@ header.ca-header {
 .detail-table-caption-label { color: #9ca3af; }
 .detail-table-footnote { margin-top: 8px; }
 .detail-table-footnote-text { font-size: 11px; color: #374151; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 10px; line-height: 1.6; white-space: pre-wrap; }
-.detail-bbox { display: flex; align-items: center; gap: 6px; font-size: 10px; }
-.detail-bbox-label { color: #9ca3af; }
-.detail-bbox-val { color: #6b7280; font-family: monospace; }
+.detail-bbox { display: flex; flex-direction: column; gap: 2px; font-size: 10px; }
+.detail-bbox-line { color: #6b7280; font-family: monospace; }
 
 /* 章节树 */
 .chapter-tree { border-bottom: 1px solid #e0e0e0; flex-shrink: 0; }

@@ -71,7 +71,7 @@ def _parse_pdf_page(pdf_path: str, page_idx: int) -> tuple[int, dict, str]:
 
         page_result = results[0]
         return api_page_num, {
-            'page_num': api_page_num,
+            'page_num': page_idx,  # 0-based page index for internal use
             'md_content': page_result.get('md_content', ''),
             'middle_json': page_result.get('middle_json', {})
         }, None
@@ -227,8 +227,8 @@ def generate_ontology():
                     mineru_url = Config.MINERU_API_URL
                     build_logger.info(f"[{task_id}] 并发调用 MinerU API (max_workers=8): {mineru_url} for {orig_name}")
 
-                    # 构建 jsonl 路径（每个文件一个 jsonl）
-                    jsonl_path = os.path.join(ProjectManager._get_project_dir(project.project_id), f'mineru_{orig_name}.jsonl')
+                    # 构建 jsonl 路径（统一文件名，避免与 PDF 文件名冲突）
+                    jsonl_path = os.path.join(ProjectManager._get_project_dir(project.project_id), 'mineru_parsed.jsonl')
                     # 初始化/清空 jsonl 文件（每个 worker 追加写入）
                     with open(jsonl_path, 'w', encoding='utf-8') as f:
                         pass

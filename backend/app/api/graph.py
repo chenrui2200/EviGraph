@@ -977,15 +977,45 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str):
     task_manager = TaskManager()
 
     # === 1. 查找 PDF 文件 ===
+    project = ProjectManager.get_project(project_id)
     project_dir = ProjectManager._get_project_dir(project_id)
     pdf_path = None
-    for root, dirs, f_list in os.walk(project_dir):
-        for f in f_list:
-            if filename.lower() in f.lower() or f.lower() in filename.lower():
-                pdf_path = os.path.join(root, f)
+
+    # 方式1: 优先使用 project.files 中的 path（如果存在且是有效的 PDF）
+    if project and project.files:
+        pf_path = project.files[0].get('path', '')
+        if pf_path and os.path.isfile(pf_path):
+            with open(pf_path, 'rb') as f:
+                if f.read(5) == b'%PDF-':
+                    pdf_path = pf_path
+                    logger.info(f"[MinerU] 使用 project.files 中的 PDF 路径: {pdf_path}")
+
+    # 方式2: 使用文件名匹配
+    if not pdf_path:
+        for root, dirs, f_list in os.walk(project_dir):
+            for f in f_list:
+                if filename.lower() in f.lower() or f.lower() in filename.lower():
+                    pdf_path = os.path.join(root, f)
+                    break
+            if pdf_path:
                 break
-        if pdf_path:
-            break
+
+    # 方式3: 使用 magic bytes 查找
+    if not pdf_path:
+        for root, dirs, files in os.walk(project_dir):
+            for f in files:
+                fpath = os.path.join(root, f)
+                if os.path.isfile(fpath):
+                    try:
+                        with open(fpath, 'rb') as fh:
+                            if fh.read(5) == b'%PDF-':
+                                pdf_path = fpath
+                                logger.info(f"[MinerU] 通过 magic bytes 找到 PDF: {pdf_path}")
+                                break
+                    except Exception:
+                        pass
+            if pdf_path:
+                break
 
     if not pdf_path or not os.path.exists(pdf_path):
         task_manager.fail_task(task_id, f"PDF 文件未找到: {filename}")
@@ -1026,16 +1056,20 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str):
             completed_count += 1
 
             try:
-                page_num, page_result, error_msg = future.result()
+                api_page_num, page_result, error_msg = future.result()
 
                 if error_msg:
                     task_manager.update_task(
                         task_id,
-                        message=f"⚠️ 第 {page_num} 页解析失败: {error_msg}",
+                        message=f"⚠️ 第 {api_page_num} 页解析失败: {error_msg}",
                         progress=int((completed_count / total_pages) * 80),
-                        log=f"第 {page_num} 页失败: {error_msg}"
+                        log=f"第 {api_page_num} 页失败: {error_msg}"
                     )
                 else:
+                    # 不信任 MinerU 返回的 page_num（MinerU 的 page_idx 可能与实际 PDF 页码不符）
+                    # 使用 api_page_num - 1 作为确定性 0-based 页码
+                    page_idx_0based = api_page_num - 1
+                    page_result['page_num'] = page_idx_0based
                     # 写入 jsonl（每行一条记录）
                     with open(jsonl_path, 'a', encoding='utf-8') as jf:
                         jf.write(json.dumps(page_result, ensure_ascii=False) + '\n')
@@ -1092,15 +1126,6 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str):
         }
     }
 
-    # 保存 mineru_parsed.json
-    ProjectManager.save_mineru_parsed(project_id, mineru_data)
-    task_manager.update_task(
-        task_id,
-        message="💾 mineru_parsed.json 已保存",
-        progress=85,
-        log="mineru_parsed.json 已保存"
-    )
-
     # === 3. 解析 MinerU 返回结果 ===
     task_manager.update_task(
         task_id,
@@ -1109,7 +1134,8 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str):
         log="开始解析 chunks"
     )
 
-    chunks = _parse_mineru_to_chunks(mineru_data, filename, pdf_path)
+    # 使用 JSONL 路径（已按 page_num 排序），而非 mineru_data dict（并发乱序）
+    chunks = _parse_mineru_to_chunks(jsonl_path, filename)
 
     # === 4. 保存 raw_text.txt ===
     md_content = mineru_data.get('md_content', '')
@@ -1277,10 +1303,6 @@ def _call_mineru_api(project_id: str, filename: str) -> tuple[Dict[str, Any], st
         }
     }
 
-    # 保存原始 MinerU 解析结果
-    ProjectManager.save_mineru_parsed(project_id, mineru_data)
-    logger.info(f"[MinerU] 原始结果已保存: mineru_parsed.json")
-
     return mineru_data, pdf_path
 
 
@@ -1315,8 +1337,29 @@ def re_annotate():
     # 异步执行
     def do_re_annotate():
         try:
-            _do_re_annotate_work(task_id, project_id)
+            # 获取项目信息以获取文件名
+            project = ProjectManager.get_project(project_id)
+            if not project or not project.files:
+                task_manager.fail_task(task_id, "项目不存在或没有文件")
+                return
+
+            filename = project.files[0].get('filename', '') or project.files[0].get('original_filename', '')
+            if not filename:
+                task_manager.fail_task(task_id, "无法获取文件名")
+                return
+
+            # 删除旧的解析文件，强制重新解析
+            project_dir = ProjectManager._get_project_dir(project_id)
+            for old_file in ['mineru_parsed.jsonl', 'chunks.json', 'raw_text.txt']:
+                old_path = os.path.join(project_dir, old_file)
+                if os.path.exists(old_path):
+                    os.remove(old_path)
+                    logger.info(f"[re-annotate] 已删除旧文件: {old_file}")
+
+            # 调用完整的 MinerU 解析流程
+            _do_mineru_parse_work(task_id, project_id, filename)
         except Exception as e:
+            logger.error(f"[re-annotate] 异常: {e}")
             task_manager.fail_task(task_id, str(e))
 
     threading.Thread(target=do_re_annotate, daemon=True).start()
@@ -1635,12 +1678,12 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
     sorted_pages.sort(key=lambda x: x[0])
 
     # page_size 映射（page_num -> [width, height]）
+    # 统一使用外层 page_num（0-based），不依赖 MinerU 的 pdf_info.page_idx
     page_sizes: dict[int, list] = {}
-    for _, page_data in sorted_pages:
+    for page_num, page_data in sorted_pages:
         middle_json = page_data.get('middle_json', {})
         for info in middle_json.get('pdf_info', []):
-            info_page_idx = info.get('page_idx', 0)
-            page_sizes[info_page_idx] = info.get('page_size', [595, 842])
+            page_sizes[page_num] = info.get('page_size', [595, 842])
 
     # 解析 chunks
     for page_num, page_data in sorted_pages:
@@ -1648,8 +1691,8 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
         pdf_info_list = middle_json.get('pdf_info', [])
 
         for info in pdf_info_list:
-            info_page_idx = info.get('page_idx', page_num)
-            page_w, page_h = page_sizes.get(info_page_idx, [595, 842])
+            # 统一使用外层 page_num（0-based），不依赖 MinerU 的 pdf_info.page_idx
+            page_w, page_h = page_sizes.get(page_num, [595, 842])
 
             for block in info.get('preproc_blocks', []):
                 bt = block.get('type', 'text')
@@ -1663,10 +1706,10 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                     ).strip()
                     if not lines_text:
                         continue
-                    bbox = _merge_line_bboxes(lines, info_page_idx, block.get('bbox', []))
+                    bbox = _merge_line_bboxes(lines, page_num, block.get('bbox', []))
                     chunks.append({
                         "chunk_id": f"chunk_{len(chunks)}",
-                        "page_idx": info_page_idx,
+                        "page_idx": page_num,
                         "type": bt,
                         "content": lines_text,
                         "bbox_pdf": bbox,
@@ -1685,7 +1728,7 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                     table_html = ''
                     table_footnote = ''
                     all_sub_lines = list(block.get('lines', []))
-                    outer_bbox = _merge_line_bboxes(block.get('lines', []), info_page_idx, block.get('bbox', []))
+                    outer_bbox = _merge_line_bboxes(block.get('lines', []), page_num, block.get('bbox', []))
 
                     for sub in block.get('blocks', []):
                         sub_type = sub.get('type', '')
@@ -1714,7 +1757,7 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                                         table_footnote += content + '\n'
 
                     if len(all_sub_lines) > len(block.get('lines', [])):
-                        merged_sub_bbox = _merge_line_bboxes(all_sub_lines, info_page_idx, block.get('bbox', []))
+                        merged_sub_bbox = _merge_line_bboxes(all_sub_lines, page_num, block.get('bbox', []))
                     else:
                         merged_sub_bbox = outer_bbox
 
@@ -1726,7 +1769,7 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
 
                     chunks.append({
                         "chunk_id": f"chunk_{len(chunks)}",
-                        "page_idx": info_page_idx,
+                        "page_idx": page_num,
                         "type": "table",
                         "content": caption or '[表格]',
                         "bbox_pdf": final_bbox,

@@ -262,76 +262,63 @@ def get_project_document(project_id: str, filename: str):
                 project = p
                 break
 
-    actual_folder_id = project.project_id if project else project_id
-    base_dir = os.path.abspath(os.path.join(current_app.root_path, '../uploads/projects', actual_folder_id))
+    # 优先使用 project.files 中记录的 path（确保是有效的 PDF 文件）
+    if project and project.files:
+        for pf in project.files:
+            pf_path = pf.get('path', '')
+            if pf_path:
+                # 标准化路径并验证
+                pf_path = os.path.normpath(pf_path)
+                if os.path.isfile(pf_path):
+                    # 验证 magic bytes
+                    with open(pf_path, 'rb') as f:
+                        header = f.read(5)
+                    if header == b'%PDF-':
+                        logger.info(f"Using file from project.files: {pf_path}")
+                        target_file_path = pf_path
+                        target_dir = os.path.dirname(pf_path)
+                        found_filename = os.path.basename(pf_path)
+                    else:
+                        logger.warning(f"File in project.files is not a PDF: {pf_path}, header: {header}")
 
-    logger.info(f"Looking for document '{filename}' in project folder: {base_dir}")
-
-    if not os.path.exists(base_dir):
-        return jsonify({
-            "success": False,
-            "error": f"Project directory not found: {base_dir}"
-        }), 404
-
-    target_file_path = None
-    target_dir = None
-    found_filename = None
-
-    search_name = filename.lower().strip()
-    logger.info(f"Searching for '{search_name}' in {base_dir}...")
-
-    for root, dirs, files in os.walk(base_dir):
-        for f in files:
-            f_lower = f.lower().strip()
-            if f_lower == search_name or search_name in f_lower or f_lower in search_name:
-                target_file_path = os.path.join(root, f)
-                target_dir = root
-                found_filename = f
-                break
-        if target_file_path:
-            break
-
+    # Fallback: 如果 project.files 中没有有效 PDF，则从项目目录递归搜索
     if not target_file_path:
-        logger.warning(f"File lookup failed for '{search_name}'. Trying fallback: finding first PDF file...")
+        actual_folder_id = project.project_id if project else project_id
+        base_dir = os.path.abspath(os.path.join(current_app.root_path, '../uploads/projects', actual_folder_id))
+
+        if not os.path.exists(base_dir):
+            return jsonify({
+                "success": False,
+                "error": f"Project directory not found: {base_dir}"
+            }), 404
+
+        logger.info(f"Searching for PDF by magic bytes in {base_dir}...")
+        all_files = []
         for root, dirs, files in os.walk(base_dir):
             for f in files:
-                f_lower = f.lower().strip()
-                if f_lower.endswith('.pdf') or f == 'pdf':
-                    target_file_path = os.path.join(root, f)
-                    target_dir = root
-                    found_filename = f
-                    logger.info(f"Fallback found PDF by extension/heuristic: {f}")
-                    break
+                fpath = os.path.join(root, f)
+                all_files.append(f)
+                if os.path.isfile(fpath):
+                    try:
+                        with open(fpath, 'rb') as fh:
+                            if fh.read(5) == b'%PDF-':
+                                target_file_path = fpath
+                                target_dir = root
+                                found_filename = f
+                                logger.info(f"Found PDF by magic bytes: {fpath}")
+                                break
+                    except Exception:
+                        pass
             if target_file_path:
                 break
 
         if not target_file_path:
-            all_files = []
-            for root, dirs, files in os.walk(base_dir):
-                for f in files:
-                    fpath = os.path.join(root, f)
-                    try:
-                        with open(fpath, 'rb') as fh:
-                            header = fh.read(5)
-                            if header == b'%PDF-':
-                                target_file_path = fpath
-                                target_dir = root
-                                found_filename = f
-                                logger.info(f"Fallback found PDF by magic bytes: {f}")
-                                break
-                    except Exception:
-                        pass
-                    all_files.append(f)
-                if target_file_path:
-                    break
-
-        if not target_file_path:
-            logger.warning(f"File lookup failed. Files present in project: {all_files}")
+            logger.warning(f"File lookup failed. Files present in project: {all_files[:10] if all_files else 'none'}")
             return jsonify({
                 "success": False,
-                "error": f"Document not found: {filename}. Searched {base_dir}. Found files: {all_files[:10]}...",
+                "error": f"Document not found: {filename}. Searched {base_dir}. Found files: {all_files[:10] if all_files else 'none'}...",
                 "searched_id": project_id,
-                "mapped_id": actual_folder_id
+                "mapped_id": actual_folder_id if 'actual_folder_id' in dir() else project_id
             }), 404
 
     logger.info(f"Serving document: {found_filename} from {target_dir}")
