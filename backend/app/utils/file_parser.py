@@ -369,14 +369,6 @@ class FileParser:
             return []
 
     @staticmethod
-    def _perform_ocr(page) -> Optional[str]:
-        """Legacy OCR method - returns just text"""
-        chunks = FileParser._perform_ocr_with_bboxes(page, "unknown", 0, 0)
-        if not chunks:
-            return None
-        return "\n".join([c.text for c in chunks])
-
-    @staticmethod
     def _extract_chunks_with_pypdf(file_path: str, filename: str) -> List[TextChunk]:
         """Fallback extraction using pypdf library"""
         import logging
@@ -419,20 +411,14 @@ class FileParser:
         return chunks
 
     @classmethod
-    def extract_text(cls, file_path: str) -> str:
-        """Legacy support: extract all text as single string"""
-        chunks = cls.extract_chunks(file_path)
-        return "\n\n".join([c.text for c in chunks])
-
-    @classmethod
     def extract_from_multiple(cls, file_paths: List[str]) -> str:
-        """Legacy support: extract from multiple files"""
+        """Extract text from multiple files"""
         all_texts = []
         for i, file_path in enumerate(file_paths, 1):
             try:
-                text = cls.extract_text(file_path)
+                chunks = cls.extract_chunks(file_path)
+                text = "\n\n".join([c.text for c in chunks])
                 filename = Path(file_path).name
-                # Use a less prominent separator to avoid LLM misinterpreting it as an entity
                 all_texts.append(f"Source Document {i} ({filename}):\n{text}")
             except Exception as e:
                 all_texts.append(f"Source Document {i} ({file_path}) [Extraction failed: {str(e)}]")

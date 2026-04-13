@@ -192,13 +192,7 @@
 
           <!-- Chunks 列表（联动 PDF 标注） -->
           <div class="mineru-chunk-list" ref="mineruchunkListRef">
-            <!-- 空状态 -->
-            <div v-if="mineruChunks.length === 0" class="mineru-empty">
-              <span>暂无 MinerU 解析数据</span>
-              <button class="re-annotate-btn" @click="handleReAnnotate" :disabled="reAnnotating">
-                {{ reAnnotating ? '标注中...' : '重新标注' }}
-              </button>
-            </div>
+
             <div
               v-for="chunk in mineruChunks"
               :key="chunk.chunk_id"
@@ -754,8 +748,8 @@ async function loadExistingProject() {
       tasks.push(loadAnalysis())
       startTaskSSE()
       startProgressPolling()
-    } else if (res.data.status === 'ontology_generated' || res.data.status === 'created') {
-      // ontology_generation 状态下也可能 MinerU 正在解析，需要建立 SSE 接收日志
+    } else if (res.data.status === 'ontology_generation' || res.data.status === 'ontology_generated' || res.data.status === 'created') {
+      // ontology_generation 状态下 MinerU 正在解析，需要建立 SSE 接收日志
       if (res.data.ontology_task_id) {
         taskId.value = res.data.ontology_task_id
         startTaskSSE()

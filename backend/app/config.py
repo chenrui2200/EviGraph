@@ -75,14 +75,3 @@ class Config:
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
     REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
 
-    @classmethod
-    def validate(cls):
-        """Validate required configuration"""
-        errors = []
-        if not cls.LLM_API_KEY:
-            errors.append("LLM_API_KEY not configured (set to any non-empty value, e.g. 'ollama')")
-        if not cls.NEO4J_URI:
-            errors.append("NEO4J_URI not configured")
-        if not cls.NEO4J_PASSWORD:
-            errors.append("NEO4J_PASSWORD not configured")
-        return errors

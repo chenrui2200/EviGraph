@@ -1867,12 +1867,6 @@ def _parse_mineru_to_chunks(mineru_data_or_jsonl_path: Union[dict, str], filenam
     return chunks
 
 
-def _mineru_cat_to_type(cat_id: int) -> str:
-    """MinerU category_id -> 类型字符串"""
-    return {0: 'title', 1: 'text', 2: 'table', 3: 'figure', 4: 'table', 5: 'figure', 6: 'math'}.get(cat_id, 'text')
-
-
-
 def _build_sections_from_chunks(chunks: list) -> list:
     """从 chunks 中提取章节信息（基于标题类型）"""
     sections = []

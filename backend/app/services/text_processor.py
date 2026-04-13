@@ -219,42 +219,6 @@ class TextProcessor:
             chunks.append(" ".join(current_chunk_sentences))
 
         return chunks
-    
-    @staticmethod
-    def preprocess_text(text: str) -> str:
-        """
-        preatmanageText
-        - moveexceptmanyremainingspacewhite
-        - markprepareconvertswitchperform
-        
-        Args:
-            text: sourcestartText
-            
-        Returns:
-            atmanageaftersText
-        """
-        import re
-        
-        # Normalize line breaks
-        text = text.replace('\r\n', '\n').replace('\r', '\n')
-        
-        # Remove consecutive blank lines (keep at most two line breaks)
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        
-        # Remove leading/trailing whitespace
-        lines = [line.strip() for line in text.split('\n')]
-        text = '\n'.join(lines)
-        
-        return text.strip()
-    
-    @staticmethod
-    def get_text_stats(text: str) -> dict:
-        """Get text statistics"""
-        return {
-            "total_chars": len(text),
-            "total_lines": text.count('\n') + 1,
-            "total_words": len(text.split()),
-        }
 
     # ========================================================================
     # 多层级语义分块（新增）

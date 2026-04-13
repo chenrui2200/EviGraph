@@ -202,12 +202,6 @@ class EmbeddingService:
                 del self._cache[key]
         self._cache[text] = vector
 
-    def health_check(self) -> bool:
-        try:
-            vec = self.embed("health check")
-            return len(vec) > 0
-        except Exception:
-            return False
 
 
 class EmbeddingError(Exception):

@@ -22,15 +22,6 @@ from app.config import Config
 
 def main():
     """Main function"""
-    # Validate configuration
-    errors = Config.validate()
-    if errors:
-        print("Configuration errors:")
-        for err in errors:
-            print(f"  - {err}")
-        print("\nPlease check configuration in .env file")
-        sys.exit(1)
-
     # Create application
     app = create_app()
 

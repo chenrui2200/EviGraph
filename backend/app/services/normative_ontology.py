@@ -172,44 +172,6 @@ class NormativeOntology:
         return NORMATIVE_ONTOLOGY
 
     @staticmethod
-    def get_entity_types() -> List[Dict[str, str]]:
-        """获取实体类型列表"""
-        return ENTITY_TYPES
-
-    @staticmethod
-    def get_edge_types() -> List[Dict[str, str]]:
-        """获取关系类型列表"""
-        return EDGE_TYPES
-
-    @staticmethod
-    def get_entity_type_names() -> List[str]:
-        """获取所有实体类型名称"""
-        return [e["name"] for e in ENTITY_TYPES]
-
-    @staticmethod
-    def get_edge_type_names() -> List[str]:
-        """获取所有关系类型名称"""
-        return [e["name"] for e in EDGE_TYPES]
-
-    @staticmethod
-    def validate_entity_type(entity_type: str) -> bool:
-        """验证实体类型是否合法"""
-        return entity_type in NormativeOntology.get_entity_type_names()
-
-    @staticmethod
-    def validate_edge_type(edge_type: str) -> bool:
-        """验证关系类型是否合法"""
-        return edge_type in NormativeOntology.get_edge_type_names()
-
-    @staticmethod
-    def get_edge_sources_targets(edge_type: str) -> Optional[tuple]:
-        """获取关系类型的源和目标类型"""
-        for edge in EDGE_TYPES:
-            if edge["name"] == edge_type:
-                return (edge["source"], edge["target"])
-        return None
-
-    @staticmethod
     def get_prompt_context() -> str:
         """
         生成用于LLM抽取的本体上下文提示词
@@ -233,9 +195,3 @@ class NormativeOntology:
 ### 关系类型（{len(EDGE_TYPES)}种）：
 {chr(10).join(edge_lines)}
 """
-
-    @staticmethod
-    def get_ontology_json() -> str:
-        """获取本体JSON字符串（用于存储）"""
-        import json
-        return json.dumps(NORMATIVE_ONTOLOGY, ensure_ascii=False, indent=2)
