@@ -2621,6 +2621,10 @@ topic：{topic}
             metadata = chunk.get('metadata', {})
             chunk_type = chunk.get('type') or metadata.get('type', '')
             content = chunk.get('content') or chunk.get('text') or metadata.get('content', '')
+
+            # 调试日志：打印前 5 条 chunk 的 type 和 content
+            if i < 5:
+                self.logger.info(f"[章节构建] chunk[{i}] type={chunk_type!r}, content={str(content)[:60]!r}")
             if isinstance(content, str):
                 content = content.strip()
             else:
@@ -2639,6 +2643,7 @@ topic：{topic}
                 m = CHAPTER_PATTERN.match(content)
                 chapter_num_str = m.group(1)
                 title = m.group(2).strip()
+                self.logger.info(f"[章节构建] ✅ 识别到一级标题: page={page_idx}, idx={i}, chapter={chapter_num_str}, title={title!r}")
 
                 # 转换章节编号
                 parts = chapter_num_str.split('.')
@@ -2679,7 +2684,9 @@ topic：{topic}
 
             # 如果 type=='title' 但不符合编号格式（如 "前 言"、"目 录"），跳过
             # 不影响 current_chapter，条款仍归属到前一个有效章节
-            if chunk_type == 'title':
+            elif chunk_type == 'title' and not CHAPTER_PATTERN.match(content):
+                self.logger.info(f"[章节构建] ⏭️ type=title 但无章节编号，跳过: page={page_idx}, idx={i}, content={content[:50]!r}")
+            elif chunk_type == 'title':
                 # X.0.Y 格式的术语标题（如 "2.0.1 预期接触电压"），应作为条款处理
                 term_title_m = re.match(r'^(\d+\.\d+\.\d+)\s+(.+)', content)
                 if term_title_m and current_chapter is not None:

@@ -1,6 +1,7 @@
 # Knowledge EviGraph 架构文档
 
 ## 变更记录 (Changelog)
+- **2026-04-13**: 新增 MinerU `parse_method` 参数（auto/ocr）、智能分析进度回调与实时日志推送、并发解析 mineru_parsed.jsonl（多线程 append 无锁）。
 - **2026-04-12**: 更新架构文档，反映 QA Pipeline、BGE-reranker、JSONL 解析、智能分块等新功能。
 - **2026-03-24**: 初始化项目架构文档，识别后端 (Python/Flask) 与前端 (Vue 3/Vite) 模块。
 
@@ -151,3 +152,31 @@ graph TD
 - **智能分块**: 支持 LLM 驱动分块 (`llm_driven_chunker.py`) 和层级分块 (`hierarchical_chunker.py`)。
 - **JSONL 支持**: 条款解析支持直接读取 JSONL 格式。
 - **核心模型应用**: 必须严格遵循上述 **Normative KG Schema** 进行实体提取和建模，以支持”遇到什么情况应该怎么做”的情景化查询。
+
+## MinerU PDF 解析流程
+
+### 解析模式
+- `parse_method='auto'`: 自动选择解析策略
+- `parse_method='ocr'`: 强制启用 OCR（默认）
+
+### 并发解析（`/pdf/re-annotate`）
+- `ThreadPoolExecutor(max_workers=8)` 并发调用 MinerU API 解析每一页
+- 每页结果以 append 模式写入 `mineru_parsed.jsonl`（多线程并发写入，**无锁**）
+- 解析完成后按页码顺序拼接 md_content，保存 `chunks.json`
+
+### 关键数据结构
+| 文件 | 来源 | 内容 |
+| :--- | :--- | :--- |
+| `mineru_parsed.jsonl` | MinerU API 并发解析 | 每行一页的原始 JSON（含 md_content、preproc_blocks） |
+| `chunks.json` | `_parse_mineru_to_chunks()` | 标准化后结构：`chunk_id`、`type`（title/text/table）、`content`、`page_idx`、`bbox_viewport`、`category_id` |
+| `intelligent_chunks.json` | `LLMDrivenChunker.chunk()` | LLM 语义分析结果，含章节、条款、实体、三元组 |
+
+### 智能分析章节构建逻辑（`_build_sections_and_clauses_from_chunks`）
+1. 遍历 `chunks.json`，识别 `type='title'` + 章节编号格式（如 `”3 电气和导体的选择”`）→ 创建一级章节
+2. 识别 `type='text'` + 条款编号格式（如 `”3.1.1 导体应采用...”`）→ 挂到当前活跃 `current_chapter` 下
+3. `type='title'` 但无编号格式（如”前 言”）→ 跳过，不影响条款归属
+4. 逐章 LLM 提取 Topic + 实体（通过 `progress_callback` 实时推送日志，progress=-1 时仅写日志不更新进度）
+
+### 项目数据文件
+- `Config` 类：配置管理，导入时自动验证，**无需手动调用 `validate()`**
+- `EntityReader` 类：**已移除**（相关功能整合至 `LLMDrivenChunker`）
