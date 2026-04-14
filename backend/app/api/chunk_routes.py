@@ -333,7 +333,30 @@ def get_chunk_analysis(project_id: str):
     for clause in clauses:
         clause_id = clause.get('clause_id', '')
         related_elements = [e for e in elements if e.get('source_clause_id') == clause_id or e.get('chunk_id', '').startswith(f"chunk_{clause.get('page_idx', '')}")]
-        clause_details.append({"clause_id": clause_id, "clause_title": clause.get('clause_title', ''), "content": clause.get('content', ''), "requirement_type": clause.get('requirement_type', 'recommended'), "parent_chapter": clause.get('parent_chapter'), "parent_chapter_title": _get_chapter_title(chapter_tree, clause.get('parent_chapter')), "conditions": clause.get('conditions', []), "actions": clause.get('actions', []), "components": clause.get('components', []), "objects": clause.get('objects', []), "entities": [e if isinstance(e, str) else {"element_type": e.get("entity_type", "unknown"), "key": e.get("name", ""), "value": e.get("value", ""), "unit": e.get("unit", "")} for e in clause.get('entities', [])], "related_elements": related_elements + [e if isinstance(e, str) else {"element_type": e.get("entity_type", "unknown"), "key": e.get("name", ""), "value": e.get("value", ""), "unit": e.get("unit", "")} for e in clause.get('entities', [])], "bboxs": clause.get('bboxs', []), "page": clause.get('page'), "page_idx": clause.get('page_idx')})
+        # 当前 clause.entities 来自 clause_to_dict()，为扁平字符串列表（LLM 提取的知识实体）
+        raw_entities = clause.get('entities', [])
+        entities_list = [{"element_type": "noun_entity", "key": e} if isinstance(e, str) else e for e in raw_entities]
+        clause_details.append({
+            "clause_id": clause_id,
+            "clause_title": clause.get('clause_title', ''),
+            "content": clause.get('content', ''),
+            "requirement_type": clause.get('requirement_type', 'recommended'),
+            "parent_chapter": clause.get('parent_chapter'),
+            "parent_chapter_title": _get_chapter_title(chapter_tree, clause.get('parent_chapter')),
+            # 以下字段当前未被 LLM 提取，预留接口
+            "conditions": clause.get('conditions', []),
+            "actions": clause.get('actions', []),
+            "components": clause.get('components', []),
+            "objects": clause.get('objects', []),
+            # LLM 提取的知识实体（扁平名词列表）
+            "entities": entities_list,
+            # 来源 elements 表的关联实体（与 entities 来源不同）
+            "related_elements": related_elements,
+            "bboxs": clause.get('bboxs', []),
+            "page": clause.get('page'),
+            "page_idx": clause.get('page_idx'),
+            "topic": clause.get('topic', ''),
+        })
 
     element_details = []
     for element in elements:

@@ -645,16 +645,14 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
     """
     将 ClauseSegment 转换为完整字典
 
-    简化版：entities 替代 triplets，edges 替代 clause_items 层级结构
-    """
-    # 从 triplets 自动提取 conditions/actions/components/objects（供前端展示）
-    # LLM 输出语义三元组，前端需要散列字段，通过此转换兼容两边
-    triplets_list = clause.triplets if clause.triplets else []
-    extracted_conditions = sorted(set(t.condition for t in triplets_list if t.condition)) if triplets_list else []
-    extracted_actions = sorted(set(t.action for t in triplets_list if t.action)) if triplets_list else []
-    extracted_components = sorted(set(t.component for t in triplets_list if t.component)) if triplets_list else []
-    extracted_objects = sorted(set(t.obj for t in triplets_list if t.obj)) if triplets_list else []
+    当前实际提取的字段：
+    - topic：条款语义摘要（_process_single_clause 提取）
+    - entities：知识实体列表（_process_single_clause 提取）
 
+    以下字段当前未被提取，保持为空列表：
+    - terms, conditions, actions, components, objects
+    - triplets, clause_items
+    """
     return {
         "clause_id": clause.clause_id,
         "clause_title": clause.clause_title,
@@ -667,11 +665,11 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         # 来源 chunks.json 的 chunk_id（可能有多个，聚合跟踪）
         "chunks": clause.metadata.get("chunks", []) if clause.metadata else [],
         "requirement_type": clause.requirement_type.value if hasattr(clause.requirement_type, 'value') else str(clause.requirement_type),
-        # 优先使用显式字段，空则从 triplets 提取（兼容 LLM 只输出 triplets 的情况）
-        "conditions": clause.conditions if clause.conditions else extracted_conditions,
-        "actions": clause.actions if clause.actions else extracted_actions,
-        "components": clause.components if clause.components else extracted_components,
-        "objects": clause.objects if clause.objects else extracted_objects,
+        # 以下字段当前未被 LLM 提取，预留接口
+        "conditions": clause.conditions if clause.conditions else [],
+        "actions": clause.actions if clause.actions else [],
+        "components": clause.components if clause.components else [],
+        "objects": clause.objects if clause.objects else [],
         "parent_chapter": clause.metadata.get("parent_chapter") if clause.metadata else None,
         # 知识域字段（SATO 级别查询支持）
         "scope_prefix": clause.metadata.get("scope_prefix") if clause.metadata else None,
@@ -694,44 +692,13 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
             for r in clause.referenced_clauses
         ] if clause.referenced_clauses else [],
         "referenced_standards": clause.referenced_standards or [],
-        # 简化版：实体列表（替代 triplets）
+        # 当前 LLM 实际提取的知识实体
         "entities": clause.metadata.get("entities", []) if clause.metadata else [],
-        # topic（条款语义摘要）
+        # 条款语义摘要
         "topic": clause.metadata.get("topic", "") if clause.metadata else "",
-        # 语义三元组（保留兼容，但为空）
-        "triplets": [
-            {
-                "component": t.component,
-                "action": t.action,
-                "obj": t.obj,
-                "condition": t.condition,
-                "requirement": t.requirement
-            }
-            for t in clause.triplets
-        ] if clause.triplets else [],
-        # 款/项结构化（简化版为空）
-        "clause_items": [
-            {
-                "item_number": ci.item_number,
-                "item_content": ci.item_content,
-                # 从 triplets 提取（兼容 LLM 只输出 triplets 的情况）
-                "components": ci.components if ci.components else sorted(set(t.component for t in (ci.triplets or []) if t.component)),
-                "actions": ci.actions if ci.actions else sorted(set(t.action for t in (ci.triplets or []) if t.action)),
-                "conditions": ci.conditions if ci.conditions else sorted(set(t.condition for t in (ci.triplets or []) if t.condition)),
-                "objects": ci.objects if ci.objects else sorted(set(t.obj for t in (ci.triplets or []) if t.obj)),
-                "triplets": [
-                    {
-                        "component": t.component,
-                        "action": t.action,
-                        "obj": t.obj,
-                        "condition": t.condition,
-                        "requirement": t.requirement
-                    }
-                    for t in ci.triplets
-                ] if ci.triplets else []
-            }
-            for ci in clause.clause_items
-        ] if clause.clause_items else [],
+        # 以下字段当前未启用，预留接口
+        "triplets": [],
+        "clause_items": [],
     }
 
 

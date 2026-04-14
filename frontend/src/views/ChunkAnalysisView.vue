@@ -266,11 +266,23 @@
           <div class="chapter-tree" v-if="analysisData">
           <div class="tree-header">
             <span>章节树</span>
-            <span class="tree-stats" v-if="analysisData.summary">
-              ({{ analysisData.summary.total_clauses }}条款 ·
-               {{ analysisData.summary.total_terms }}术语 ·
-               {{ analysisData.summary.total_entities }}实体)
-            </span>
+            <div class="tree-stats" v-if="analysisData.summary">
+              <span class="stat-badge clauses">
+                <span class="stat-icon">⚖️</span>
+                <span class="stat-num">{{ analysisData.summary.total_clauses }}</span>
+                <span class="stat-label">条款</span>
+              </span>
+              <span class="stat-badge terms">
+                <span class="stat-icon">📖</span>
+                <span class="stat-num">{{ analysisData.summary.total_terms }}</span>
+                <span class="stat-label">术语</span>
+              </span>
+              <span class="stat-badge entities">
+                <span class="stat-icon">💎</span>
+                <span class="stat-num">{{ analysisData.summary.total_entities }}</span>
+                <span class="stat-label">实体</span>
+              </span>
+            </div>
             <div class="tree-actions">
               <button class="expand-all-btn" @click="toggleAllChapters">
                 {{ allExpanded ? '全部收起' : '全部展开' }}
@@ -397,10 +409,10 @@
                       </div>
                     </div>
 
-                    <!-- 语义三元组 -->
-                    <div class="triplets-section" v-if="clause.metadata?.triplets?.length">
+                    <!-- 语义三元组（triplets 字段当前为空，此区块不渲染） -->
+                    <div class="triplets-section" v-if="clause.triplets?.length">
                       <div class="triplet-label">📌 语义三元组</div>
-                      <div v-for="(triplet, ti) in clause.metadata.triplets" :key="ti" class="triplet-row">
+                      <div v-for="(triplet, ti) in clause.triplets" :key="ti" class="triplet-row">
                         <span class="triplet-comp">{{ triplet.component || '—' }}</span>
                         <span class="triplet-arrow">—{{ triplet.requirement?.[0]?.toUpperCase() || 'M' }}→</span>
                         <span class="triplet-obj">{{ triplet.obj || '—' }}</span>
@@ -415,9 +427,9 @@
                         <span class="topic-label">📝 摘要</span>
                         <span class="topic-content">{{ clause.topic }}</span>
                       </div>
-                      <!-- 实体列表 -->
-                      <div v-if="clause.entities?.length || clause.related_elements?.length" class="entity-section-label">📎 知识实体</div>
-                      <div class="entity-item-row" v-for="(elem, ei) in (clause.entities || clause.related_elements || [])" :key="ei">
+                      <!-- LLM 提取的知识实体（来自 clause.entities） -->
+                      <div v-if="clause.entities?.length" class="entity-section-label">📎 知识实体</div>
+                      <div class="entity-item-row" v-for="(elem, ei) in clause.entities" :key="'entity-' + ei">
                         <template v-if="typeof elem === 'string'">
                           <span class="entity-type-tag">noun</span>
                           <span class="entity-key">{{ elem }}</span>
@@ -1730,12 +1742,45 @@ header.ca-header {
 .tree-header > span:first-child { flex-shrink: 0; }
 .tree-stats {
   flex: 1;
-  text-align: center;
-  font-size: 12px;
-  font-weight: 400;
-  color: #6b7280;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
   margin: 0 12px;
+  font-size: 12px;
 }
+.stat-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px 3px 8px;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 500;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.stat-badge:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+.stat-badge.clauses {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  color: #92400e;
+  border: 1px solid #fcd34d;
+}
+.stat-badge.terms {
+  background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+  color: #1e40af;
+  border: 1px solid #93c5fd;
+}
+.stat-badge.entities {
+  background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+  color: #065f46;
+  border: 1px solid #6ee7b7;
+}
+.stat-icon { font-size: 13px; }
+.stat-num { font-weight: 700; font-size: 13px; }
+.stat-label { opacity: 0.8; }
 .tree-actions { display: flex; align-items: center; gap: 6px; }
 .expand-all-btn { background: none; border: 1px solid #d0d7de; color: #6b7280; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
 .expand-all-btn:hover { background: #f0f0f0; color: #1a1a2e; }
