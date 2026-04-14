@@ -230,9 +230,9 @@
                   <span class="threshold-value" :class="getThresholdClass(workflowData.rerankMinScore)">{{ workflowData.rerankMinScore }}分</span>
                 </div>
                 <div class="thermometer-container">
-                  <input type="range" v-model.number="workflowData.rerankMinScore" min="50" max="100" step="5" class="thermometer-input" />
+                  <input type="range" v-model.number="workflowData.rerankMinScore" min="0" max="100" step="5" class="thermometer-input" />
                   <div class="thermometer-track">
-                    <div class="thermometer-fill" :style="{ width: ((workflowData.rerankMinScore - 50) / 50 * 100) + '%', background: getThresholdColor(workflowData.rerankMinScore) }"></div>
+                    <div class="thermometer-fill" :style="{ width: (workflowData.rerankMinScore / 100 * 100) + '%', background: getThresholdColor(workflowData.rerankMinScore) }"></div>
                   </div>
                 </div>
                 <p class="config-hint">过滤掉 bge-reranker-v2-m3 打分低于阈值的不相关事实，再取 Top K</p>
@@ -901,7 +901,7 @@ const workflowData = ref({
   temperature: 0.7,
   similarityThreshold: 50,   // 相似度阈值：检索后预过滤，减少 reranking 数量
   topK: 5,                 // top_k：bge-reranker-v2-m3 精排后保留得分最高的 K 条
-  rerankMinScore: 50,        // 重排分数阈值：低于此分数的 facts 会被过滤（默认50）
+  rerankMinScore: 0,        // 重排分数阈值：低于此分数的 facts 会被过滤（默认0）
   rootTypes: ['Entity', 'Term'],  // 根节点类型（与 hit-test 对齐）
 })
 
@@ -911,7 +911,7 @@ const results = ref({
   searchTimings: { object_s: 0, term_s: 0, total_s: 0 },  // 与 hit-test 对齐
   similarityThreshold: 0,   // 相似度阈值（retrieval 用）
   topK: 5,               // top_k（rerank 用）
-  rerankMinScore: 50,      // 重排分数阈值（rerank 用）
+  rerankMinScore: 0,      // 重排分数阈值（rerank 用）
   answer: '',
   rerank_results: [],
   prompts: {

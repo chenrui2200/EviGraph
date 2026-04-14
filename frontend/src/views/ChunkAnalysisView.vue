@@ -17,12 +17,7 @@
           <span class="dot" :style="{ background: statusDotColor }"></span>
           {{ statusLabel }}
         </span>
-        <div v-if="analysisStatus === 'graph_chunking'" class="progress-wrapper">
-          <div class="progress-bar">
-            <div class="progress-fill" :style="{ width: progressPercent + '%' }"></div>
-          </div>
-          <span class="progress-text">{{ progressPercent }}%</span>
-        </div>
+
         <button
           v-if="analysisStatus === 'graph_chunked' || analysisStatus === 'graph_completed'"
           class="goto-build-btn"

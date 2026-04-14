@@ -5,6 +5,10 @@
         <span class="app-icon">📚</span>
         <h1 class="app-title">{{ appName }}</h1>
       </div>
+      <div class="header-query" v-if="currentQuery">
+        <span class="query-label">问：</span>
+        <span class="query-text">{{ currentQuery }}</span>
+      </div>
       <div class="header-status" v-if="loading">
         <div class="spinner-sm"></div>
         <span>{{ loadingMessage }}</span>
@@ -101,7 +105,7 @@ const appConfig = ref({
   rootTypes: ['Entity', 'Term'],
   similarityThreshold: 0,
   topK: 5,
-  rerankMinScore: 50,
+  rerankMinScore: 0,
   temperature: 0.7,
 })
 
@@ -111,6 +115,7 @@ const loading = ref(false)
 const loadingMessage = ref('正在分析中...')
 const scrollContainer = ref(null)
 const textareaRef = ref(null)
+const currentQuery = ref('')
 
 // Results state
 const results = ref({
@@ -280,7 +285,7 @@ const loadApp = async () => {
         rootTypes: wf.rootTypes || ['Entity', 'Term'],
         similarityThreshold: wf.similarityThreshold ?? 50,
         topK: wf.topK ?? 5,
-        rerankMinScore: wf.rerankMinScore ?? 50,
+        rerankMinScore: wf.rerankMinScore ?? 0,
         temperature: wf.temperature || 0.7,
       }
     } else {
@@ -302,6 +307,7 @@ const handleSearch = async () => {
   }
 
   const query = userInput.value.trim()
+  currentQuery.value = query
   loading.value = true
   loadingMessage.value = '正在检索...'
   userInput.value = ''
@@ -415,6 +421,24 @@ onMounted(loadApp)
 .app-title { font-size: 16px; font-weight: 800; margin: 0; color: #333; }
 
 .header-status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #409eff; font-weight: 600; }
+
+.header-query {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 24px;
+  overflow: hidden;
+}
+.query-label { font-size: 13px; color: #909399; font-weight: 600; flex-shrink: 0; }
+.query-text {
+  font-size: 13px;
+  color: #303133;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .report-body {
   flex: 1;

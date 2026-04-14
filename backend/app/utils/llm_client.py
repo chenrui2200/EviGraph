@@ -276,19 +276,126 @@ class LLMClient:
         """
         json_str = json_str.strip()
 
-        # 1. Handle common truncation artifacts
+        # Strategy 1: Try simple cleanup first
+        result = self._try_simple_repair(json_str)
+        if self._is_valid_json(result):
+            return result
+
+        # Strategy 2: Aggressive repair - find last complete key-value pair
+        result = self._aggressive_repair(json_str)
+        if self._is_valid_json(result):
+            return result
+
+        # Strategy 3: Balancing with smart truncation
+        result = self._smart_balance_repair(json_str)
+        return result
+
+    def _is_valid_json(self, s: str) -> bool:
+        """Check if string is valid JSON"""
+        try:
+            json.loads(s)
+            return True
+        except Exception:
+            return False
+
+    def _try_simple_repair(self, json_str: str) -> str:
+        """Strategy 1: Simple cleanup - remove trailing commas and balance"""
         # Remove trailing commas
         json_str = re.sub(r',[\s\n]*$', '', json_str)
 
-        # Remove partial keys/values: look for a trailing quote that isn't preceded by a colon or start of object
-        # If the string ends with something like "key": "val... or "key": ...
-        # We try to find the last complete structural element.
-
-        # 2. Balance brackets and braces
+        # Balance brackets and braces
         stack = []
         in_string = False
         escaped = False
         fixed_str = ""
+
+        for char in json_str:
+            if char == '"' and not escaped:
+                in_string = not in_string
+            if not in_string:
+                if char == '{':
+                    stack.append('}')
+                elif char == '[':
+                    stack.append(']')
+                elif char == '}' or char == ']':
+                    if stack and stack[-1] == char:
+                        stack.pop()
+            if char == '\\' and not escaped:
+                escaped = True
+            else:
+                escaped = False
+            fixed_str += char
+
+        # Handle the case where we stopped inside a string
+        if in_string:
+            fixed_str += '"'
+
+        # Close all remaining scopes in reverse order
+        while stack:
+            fixed_str += stack.pop()
+
+        return fixed_str
+
+    def _aggressive_repair(self, json_str: str) -> str:
+        """Strategy 2: Find last complete key-value pair and truncate there"""
+        # Remove trailing commas first
+        json_str = re.sub(r',[\s\n]*$', '', json_str)
+
+        # Strategy: Find last complete structural element
+        # Look for patterns that indicate a complete value followed by either comma, }, or ]
+        patterns = [
+            # Ends with complete object
+            (r'^(.+\})', 'ends_brace'),
+            # Ends with complete array
+            (r'^(.+\])', 'ends_bracket'),
+            # Ends with complete string value (quoted)
+            (r'^(.+":\s*"[^"]*")', 'ends_string'),
+            # Ends with complete number/boolean/null
+            (r'^(.+":\s*(?:[0-9.]+|true|false|null)(?:\s*[}\]],))', 'ends_primitive'),
+            # Last complete key-value before incomplete
+            (r'^(.+,\s*"[^"]+":\s*"[^"]*")(?=,\s*"[^"]+":)', 'complete_kv'),
+        ]
+
+        for pattern, name in patterns:
+            match = re.search(pattern, json_str, re.DOTALL)
+            if match:
+                truncated = match.group(1).strip()
+                # Try to balance it
+                balanced = self._try_simple_repair(truncated)
+                if self._is_valid_json(balanced):
+                    self.logger.debug(f"Aggressive repair [{name}]: {truncated[:50]}...")
+                    return balanced
+
+        # Fallback: try to find last safe position at top level
+        last_complete = self._find_last_complete_structure(json_str)
+        if last_complete:
+            balanced = self._try_simple_repair(last_complete)
+            if self._is_valid_json(balanced):
+                return balanced
+
+        return json_str
+
+    def _find_last_complete_structure(self, json_str: str) -> str:
+        """Find the last complete JSON structure by parsing backwards"""
+        json_str = re.sub(r',[\s\n]*$', '', json_str)
+
+        # Try removing trailing characters one by one until we find valid JSON
+        for i in range(len(json_str), 0, -1):
+            truncated = json_str[:i].strip()
+            if self._is_valid_json(truncated):
+                return truncated
+
+        return json_str
+
+    def _smart_balance_repair(self, json_str: str) -> str:
+        """Strategy 3: Parse character by character, find valid truncation point"""
+        json_str = re.sub(r',[\s\n]*$', '', json_str)
+
+        stack = []
+        in_string = False
+        escaped = False
+        fixed_str = ""
+        last_valid_pos = 0
 
         for i, char in enumerate(json_str):
             if char == '"' and not escaped:
@@ -299,9 +406,14 @@ class LLMClient:
                     stack.append('}')
                 elif char == '[':
                     stack.append(']')
-                elif char == '}' or char == ']':
-                    if stack and stack[-1] == char:
+                elif char == '}':
+                    if stack and stack[-1] == '}':
                         stack.pop()
+                        last_valid_pos = i + 1
+                elif char == ']':
+                    if stack and stack[-1] == ']':
+                        stack.pop()
+                        last_valid_pos = i + 1
 
             if char == '\\' and not escaped:
                 escaped = True
@@ -310,19 +422,26 @@ class LLMClient:
 
             fixed_str += char
 
-        # 3. Handle the case where we stopped inside a string
+        # If we ended inside a string, find the last safe truncation point
+        if in_string and last_valid_pos > 0:
+            # Truncate before the incomplete string
+            fixed_str = fixed_str[:last_valid_pos]
+            stack = []
+            in_string = False
+
+        # Handle incomplete string at end
         if in_string:
-            # If we were in a string, we might have half a key or value.
-            # Easiest fix is to close the quote and let the stack close the objects.
-            fixed_str += '"'
+            # Find the last complete key-value or structural element
+            # Remove the incomplete trailing part
+            fixed_str = re.sub(r',?\s*"[^"]*$', '', fixed_str)
+            fixed_str = fixed_str.rstrip()
 
-        # 4. Final cleaning: if we ended up with something like "key": " or "key": , remove the dangling key
-        # This is a bit complex, but simple repair often works:
-        fixed_str = re.sub(r',?\s*\"[^"]+\"\s*:\s*\"?$', '', fixed_str)
-        fixed_str = re.sub(r',?\s*\"[^"]+\"\s*:\s*$', '', fixed_str)
-
-        # Close all remaining scopes in reverse order
+        # Balance remaining scopes
         while stack:
             fixed_str += stack.pop()
 
-        return fixed_str
+        # Final cleanup for dangling keys
+        fixed_str = re.sub(r',?\s*"[^"]+":\s*$', '', fixed_str)
+        fixed_str = re.sub(r',?\s*"[^"]+":\s*"[^"]*$', '', fixed_str)
+
+        return fixed_str.strip()

@@ -9,10 +9,13 @@
             <span class="step-title">知识图谱构建 (GraphRAG)</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase > 0" class="badge success">已完成</span>
-            <div v-else-if="currentPhase === 0 && buildProgress" class="status-with-action">
+            <!-- 图谱构建进行中（phase=1 且有 buildProgress）：显示进度 -->
+            <div v-if="currentPhase === 1 && buildProgress" class="status-with-action">
               <span class="badge processing">{{ buildProgress?.progress || 0 }}%</span>
             </div>
+            <!-- 图谱已完成（phase>1 且无进行中的构建）或 hit test 阶段：显示已完成 -->
+            <span v-else-if="currentPhase > 0 && !buildProgress" class="badge success">已完成</span>
+            <!-- 图谱构建还未开始 -->
             <div v-else class="badge pending">等待中</div>
           </div>
         </div>
