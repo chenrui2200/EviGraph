@@ -245,6 +245,9 @@ class ClauseSegment(HierarchicalChunk):
     referenced_clauses: List[ReferencedClause] = field(default_factory=list)  # 引用的其他条款
     referenced_standards: List[str] = field(default_factory=list)              # 引用的外部标准
 
+    # 条款关联的图片（从 chunks.json 的 type=image 块附加）
+    images: List[Dict] = field(default_factory=list)  # [{"caption": "...", "content": "base64", "img_path": "...", "chunk_id": "..."}]
+
     # 兼容字段：从 triplets 推导而来（仅用于序列化）
     conditions: List[str] = field(default_factory=list)
     actions: List[str] = field(default_factory=list)

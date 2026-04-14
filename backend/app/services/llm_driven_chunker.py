@@ -161,6 +161,8 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "formula_content": clause.formula_content,
         "referenced_tables": clause.metadata.get("referenced_tables", []) if clause.metadata else [],
         "referenced_formulas": clause.metadata.get("referenced_formulas", []) if clause.metadata else [],
+        # 条款关联的图片（从 chunks.json 的 type=image 块附加）
+        "images": clause.metadata.get("images", []) if clause.metadata else clause.images or [],
         # 条款引用
         "referenced_clauses": [
             {
@@ -1973,6 +1975,43 @@ topic：{topic}
         current_chapter = None
         current_chapter_idx = -1
 
+        # =====================================================================
+        # Fallback：当没有任何 title 块时，创建虚拟章节让所有条款都能挂上来
+        # =====================================================================
+        # 后续遍历中如果识别到真实章节会替换这个虚拟章节
+        virtual_chapter_created = False
+
+        # =====================================================================
+        # Fallback：预先创建虚拟章节，确保即使没有 title 块条款也能挂上来
+        # =====================================================================
+        # 从 source_info 获取文件名作为标题
+        source_name = source_info.get('source', '') if 'source_info' in dir() else ''
+        if not source_name:
+            source_name = chunks_data[0].get('source', '') if chunks_data else ''
+        virtual_title = source_name or '文档内容'
+        virtual_chapter_num = 1.0
+
+        current_chapter = {
+            'chapter_number': virtual_chapter_num,
+            'title': virtual_title,
+            'page_idx': 0,
+            'start_idx': 0,
+            'end_idx': len(chunks_data) - 1,
+            'level': 1,
+            'sub_chapters': []
+        }
+        sections.append(current_chapter)
+        chapter_plan.append(ChapterPlan(
+            chapter_number=virtual_chapter_num,
+            title=virtual_title,
+            start_position=0,
+            end_position=len(chunks_data),
+            status=ChapterStatus.PENDING,
+            chapter_type='normative'
+        ))
+        virtual_chapter_created = True
+        self.logger.info(f"[章节构建] ⏺ [预创建虚拟章节] {virtual_chapter_num}. {virtual_title}")
+
         for i, chunk in enumerate(chunks_data):
             # 兼容多种 chunk 格式
             # 1. 顶层字段：chunk.get('type'), chunk.get('content')
@@ -2021,7 +2060,11 @@ topic：{topic}
                     # 不创建新章节，保留 current_chapter
                     pass
                 else:
-                    # 创建新章节
+                    # 创建新章节，清除虚拟章节标记和之前积累的 clauses
+                    virtual_chapter_created = False
+                    clauses.clear()  # 清除虚拟章节下积累的 clauses
+                    sections.clear()  # 清除虚拟章节
+                    chapter_plan.clear()  # 清除虚拟章节 plan
                     current_chapter_idx += 1
                     current_chapter = {
                         'chapter_number': chapter_num,
@@ -2139,6 +2182,43 @@ topic：{topic}
                     self.logger.debug(f"[章节构建] 跳过无编号标题: {content[:30]}")
                 continue
 
+            # 如果没有当前章节，检查 text 块是否本身是章节标题（MinerU 将章节标题也识别为 text）
+            # 条件：匹配 CLAUSE_PATTERN 且只有 1-2 段（如 "5.12.5标题" 是章节；"5.12.5.1标题" 是条款）
+            if current_chapter is None and chunk_type == 'text':
+                clause_m = CLAUSE_PATTERN.match(content)
+                if clause_m:
+                    chapter_num_str = clause_m.group(1)
+                    parts = chapter_num_str.split('.')
+                    # 只有 1-2 段的是章节（如 5.12 或 5.12.5），3段及以上是条款（如 5.12.5.1）
+                    if len(parts) <= 2:
+                        title = clause_m.group(2).strip()
+                        chapter_num = float(chapter_num_str)
+                        virtual_chapter_created = False  # 清除虚拟章节标记
+                        clauses.clear()  # 清除虚拟章节下积累的 clauses
+                        sections.clear()  # 清除虚拟章节
+                        chapter_plan.clear()  # 清除虚拟章节 plan
+                        current_chapter_idx += 1
+                        current_chapter = {
+                            'chapter_number': chapter_num,
+                            'title': title,
+                            'page_idx': page_idx,
+                            'start_idx': i,
+                            'end_idx': i,
+                            'level': 1 if len(parts) == 1 else 2,
+                            'sub_chapters': []
+                        }
+                        sections.append(current_chapter)
+                        chapter_plan.append(ChapterPlan(
+                            chapter_number=chapter_num,
+                            title=title,
+                            start_position=i,
+                            end_position=len(chunks_data),
+                            status=ChapterStatus.PENDING,
+                            chapter_type='normative'
+                        ))
+                        self.logger.info(f"[章节构建] ✅ [text→章节] {chapter_num}. {title} (page={page_idx})")
+                        # 不 continue，继续走下面的条款处理逻辑
+
             # 如果有当前章节，处理条款
             if current_chapter is not None:
                 # 更新章节的结束位置
@@ -2215,11 +2295,13 @@ topic：{topic}
         # =====================================================================
         clause_bbox_map: Dict[str, List[tuple]] = {}
         clause_chunk_map: Dict[str, List[str]] = {}
+        clause_image_map: Dict[str, List[Dict]] = {}  # clause_id → [{caption, content, img_path, chunk_id}]
         current_clause_id: Optional[str] = None
         for chunk in chunks_data:
             chunk_id = chunk.get('chunk_id', '')
             page_idx = chunk.get('page_idx', 0)
             bbox = chunk.get('bbox_viewport') or chunk.get('bbox_pdf') or []
+            chunk_type = chunk.get('type', '')
             # 查找该 chunk 的 clause_id（通过 content 中的条款编号）
             chunk_content = _fix_encoding(chunk.get('content', ''))
             m = CLAUSE_PATTERN.match(chunk_content.strip())
@@ -2240,6 +2322,17 @@ topic：{topic}
                     clause_chunk_map[current_clause_id] = []
                 if chunk_id:
                     clause_chunk_map[current_clause_id].append(chunk_id)
+                # 图片：收集 type=image 的块到 clause_image_map
+                if chunk_type == 'image':
+                    if current_clause_id not in clause_image_map:
+                        clause_image_map[current_clause_id] = []
+                    clause_image_map[current_clause_id].append({
+                        "caption": chunk.get('image_caption', ''),
+                        "content": chunk.get('image_content', ''),  # base64
+                        "img_path": chunk.get('image_img_path', ''),
+                        "chunk_id": chunk_id,
+                        "page_idx": page_idx,
+                    })
 
         # 将聚合的 bboxs 和多 chunk 文本写入各 clause
         chunk_content_map: Dict[str, str] = {}
@@ -2270,6 +2363,10 @@ topic：{topic}
             elif cid in clause_chunk_map:
                 # 无 bbox 但有 chunk 映射：仍需记录 chunks 元数据
                 clause.metadata['chunks'] = list(dict.fromkeys(clause_chunk_map.get(cid, [])))
+
+            # 图片：附加到 clause metadata
+            if cid in clause_image_map:
+                clause.metadata['images'] = clause_image_map[cid]
 
             # 合并同一 clause 下所有 chunk 的文本到 content
             if cid in clause_chunk_map:

@@ -953,7 +953,7 @@ def _parse_single_page(pdf_path: str, filename: str, api_page_num: int, parse_me
     return api_page_num, page_result, error_msg
 
 
-def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, timeout: int = 600, parse_method: str = 'ocr') -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, timeout: int = 600, parse_method: str = 'auto') -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     统一的 MinerU API 调用方法，带错误重试机制。
 
@@ -977,7 +977,7 @@ def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, time
         'return_md': 'true',
         'return_images': 'true',
         'return_content_list': 'false',
-        'parse_method': 'auto',
+        'parse_method': parse_method,
         'lang_list': 'ch',
         'table_enable': 'true',
         'formula_enable': 'true',

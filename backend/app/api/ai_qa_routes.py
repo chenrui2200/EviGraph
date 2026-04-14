@@ -5,6 +5,8 @@ Handles multi-hop knowledge graph QA with streaming responses
 
 import json
 import time
+import traceback
+
 from flask import request, Response, stream_with_context
 
 from . import graph_bp

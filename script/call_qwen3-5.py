@@ -102,9 +102,9 @@ def multi_turn_chat():
 
 
 def multimodal_chat_with_base64():
-    """使用预定义的 base64 图片测试多模态对话"""
+    """使用预定义的 base64 图片测试多模态对话（单张图片）"""
     print("\n" + "=" * 60)
-    print("测试: 多模态对话（使用预定义 Base64 图片）")
+    print("测试: 多模态对话（单张图片）")
     print("=" * 60)
     
     # API 配置
@@ -119,7 +119,7 @@ def multimodal_chat_with_base64():
     try:
         print(f"\n使用预定义的 Base64 图片 (长度: {len(image_base64)} 字符)")
         
-        # 构建多模态消息
+        # 构建多模态消息 - 单张图片
         messages = [
             {
                 "role": "user",
@@ -136,6 +136,91 @@ def multimodal_chat_with_base64():
         ]
         
         print("\n发送多模态请求...")
+        payload = {
+            "model": "qwen3.5-plus",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 2048,
+            "stream": False,
+            "enable_thinking": False
+        }
+        
+        response = requests.post(api_url, headers=headers, json=payload, timeout=120)
+        response.raise_for_status()
+        result = response.json()
+        
+        if "choices" in result and len(result["choices"]) > 0:
+            reply = result["choices"][0]["message"]["content"]
+            print("\n" + "=" * 60)
+            print("AI 回复:")
+            print("=" * 60)
+            print(reply)
+        else:
+            print("未获取到有效响应")
+            print("\n完整响应:")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+    
+    except Exception as e:
+        print(f"\n多模态调用失败: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"错误响应: {e.response.text}")
+
+
+def multimodal_chat_multiple_images():
+    """测试多张图片的多模态对话"""
+    print("\n" + "=" * 60)
+    print("测试: 多模态对话（多张图片）")
+    print("=" * 60)
+    
+    # API 配置
+    api_url = "http://192.168.1.246:3000/v1/chat/completions"
+    api_key = "sk-OC5Y16Hcm6FTkd4TF1B891Ec53Be4940AdF2Bb15C8Ad90Ca"
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    try:
+        # 示例：如果有多个 Base64 图片，可以这样构建
+        # image_base64_2 = "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
+        # image_base64_3 = "data:image/png;base64,iVBORw0KGgo..."
+        
+        # 构建多模态消息 - 支持多张图片
+        content_list = [
+            {"type": "text", "text": "请比较这几张图片的内容，找出它们的异同点。"}
+        ]
+        
+        # 添加第一张图片
+        content_list.append({
+            "type": "image_url",
+            "image_url": {
+                "url": image_base64
+            }
+        })
+        
+        # 如果有更多图片，可以继续添加
+        # content_list.append({
+        #     "type": "image_url",
+        #     "image_url": {
+        #         "url": image_base64_2
+        #     }
+        # })
+        # content_list.append({
+        #     "type": "image_url",
+        #     "image_url": {
+        #         "url": image_base64_3
+        #     }
+        # })
+        
+        messages = [
+            {
+                "role": "user",
+                "content": content_list
+            }
+        ]
+        
+        print(f"\n发送 {len(content_list) - 1} 张图片进行分析...")
         payload = {
             "model": "qwen3.5-plus",
             "messages": messages,
@@ -206,9 +291,11 @@ for line in response.iter_lines():
 if __name__ == "__main__":
     print("开始测试 Qwen3.5-Plus API 调用\n")
     
-    # 使用预定义的 base64 图片进行多模态测试
+    # 使用预定义的 base64 图片进行多模态测试（单张）
     multimodal_chat_with_base64()
-
+    
+    # 测试多张图片（需要取消注释并添加更多图片数据）
+    # multimodal_chat_multiple_images()
     
     print("\n" + "=" * 60)
     print("测试完成")
