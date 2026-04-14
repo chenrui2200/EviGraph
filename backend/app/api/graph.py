@@ -1,6 +1,6 @@
 """
 Graph-related API Routes
-Uses project context mechanism with server-side state persistence
+通过 ProjectManager 管理项目状态，服务端 JSON 持久化存储。
 """
 
 import os
@@ -90,7 +90,12 @@ def _resolve_pdf_path(project_id: str, filename: str = '') -> str:
 
 
 def _get_storage():
-    """Get Neo4jStorage from Flask app extensions."""
+    """
+    从 Flask app extensions 获取 Neo4jStorage 实例。
+
+    Raises:
+        ValueError: 如果 storage 未初始化（Neo4j 连接异常）
+    """
     storage = current_app.extensions.get('neo4j_storage')
     if not storage:
         raise ValueError("GraphStorage not initialized — check Neo4j connection")
@@ -352,7 +357,7 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                 else:
                     task_manager.update_task(
                         task_id,
-                        message="Creating Zep graph...",
+                        message="Creating Neo4j graph...",
                         progress=10
                     )
                     graph_id = builder.create_graph(name=project.name or 'Knowledge EviGraph')
@@ -869,7 +874,7 @@ def mineru_parse():
     """
     MinerU PDF 解析接口（异步任务，通过 SSE 推送进度）
 
-    请求: JSON { "project_id": "xxx", "filename": "xxx.pdf" }
+    请求: JSON { "project_id": "xxx", "filename": "xxx.pdf", "parse_method": "auto|ocr" }
     流程:
       1. 创建任务，立即返回 task_id
       2. 后台线程执行：逐页调用 MinerU API → 解析 → 保存 chunks.json
@@ -884,6 +889,7 @@ def mineru_parse():
     data = request.get_json() or {}
     project_id = data.get('project_id')
     filename = data.get('filename')
+    parse_method = data.get('parse_method', 'auto')  # 默认用 auto 以支持 return_images
 
     if not project_id or not filename:
         return jsonify({"success": False, "error": "请提供 project_id 和 filename"}), 400
@@ -896,7 +902,7 @@ def mineru_parse():
     # 异步执行
     def do_mineru_parse():
         try:
-            _do_mineru_parse_work(task_id, project_id, filename)
+            _do_mineru_parse_work(task_id, project_id, filename, parse_method)
         except Exception as e:
             task_manager.fail_task(task_id, str(e))
 
@@ -971,14 +977,13 @@ def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, time
         'return_md': 'true',
         'return_images': 'true',
         'return_content_list': 'false',
-        'parse_method': parse_method,
+        'parse_method': 'auto',
         'lang_list': 'ch',
         'table_enable': 'true',
         'formula_enable': 'true',
         'backend': 'pipeline',
         'start_page_id': str(page_num),
         'end_page_id': str(page_num),
-        'output_dir': './output',
         'server_url': 'string',
     }
 
@@ -1008,6 +1013,7 @@ def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, time
 
             page_result = results[0]
             md_content = page_result.get('md_content', '')
+            raw_images = page_result.get('images', {})
             middle_json = page_result.get('middle_json', {})
 
             # 如果内容为空，返回错误（不重试）
@@ -1020,7 +1026,8 @@ def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, time
             return {
                 'page_num': page_num,
                 'md_content': md_content,
-                'middle_json': middle_json
+                'middle_json': middle_json,
+                'images': raw_images
             }, None
 
         except requests.exceptions.Timeout:
@@ -1277,7 +1284,7 @@ def re_annotate():
     """
     data = request.get_json() or {}
     project_id = data.get('project_id')
-    parse_method = data.get('parse_method', 'ocr')
+    parse_method = data.get('parse_method', 'auto')
 
     if parse_method not in ('auto', 'ocr'):
         return jsonify({"success": False, "error": "parse_method 必须是 'auto' 或 'ocr'"}), 400
@@ -1448,9 +1455,17 @@ def _build_table_chunk(
     filename: str
 ) -> dict:
     """
-    构建单个表格 chunk。
+    构建单个表格 chunk（唯一入口）。
 
-    这是构建表格 chunk 的唯一入口，所有解析路径都调用此函数。
+    Args:
+        table_item: 表格项（含 page_idx, table_caption, img_path）
+        table_bboxes_by_img: 图片名 → bbox 映射
+        table_first_by_page: 页码 → 该页第一个表格信息
+        pdf_path: PDF 文件路径
+        filename: 文件名
+
+    Returns:
+        表格 chunk 字典（含 bbox, page_idx, chunk_id 等）
     """
     page_idx = table_item.get('page_idx', 0)
     caption = table_item.get('table_caption', '') or ''
@@ -1747,7 +1762,7 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                 elif bt == 'image':
                     caption = ''
                     img_path = ''
-                    img_base64 = ''
+                    img_content = ''
                     all_sub_lines = list(block.get('lines', []))
                     outer_bbox = _merge_line_bboxes(block.get('lines', []), page_num, block.get('bbox', []))
 
@@ -1769,9 +1784,9 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                                         img_path = span['image_path']
                                 all_sub_lines.append(line)
 
-                    # 用 image_path 查找 base64
+                    # 用 image_path 查找 base64 作为 image_content
                     if img_path and img_path in images_base64:
-                        img_base64 = images_base64[img_path]
+                        img_content = images_base64[img_path]
 
                     if len(all_sub_lines) > len(block.get('lines', [])):
                         merged_sub_bbox = _merge_line_bboxes(all_sub_lines, page_num, block.get('bbox', []))
@@ -1797,8 +1812,8 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                         "block_type": "image",
                         "source": filename,
                         "image_caption": caption,
-                        "image_path": img_path,
-                        "image_base64": img_base64,
+                        "image_img_path": img_path,
+                        "image_content": img_content,
                     })
 
     return chunks

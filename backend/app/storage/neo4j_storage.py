@@ -31,7 +31,7 @@ from . import neo4j_schema
 
 logger = logging.getLogger('mirofish.neo4j_storage')
 
-# Action 过滤器：识别非实操性词汇（状态描述而非具体操作）
+# Action 过滤器：识别非实操性词汇（状态描述、被动含义或抽象动词）
 # 这些词汇不应作为 Action 实体提取
 ACTION_FILTER_WORDS = {
     # 状态描述词 - 这些是"符合性"要求，不是具体动作

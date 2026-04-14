@@ -277,7 +277,7 @@ class ProjectManager:
         """
         Create new project (in-memory only, no directory/file I/O).
 
-        Directory structure is created separately in generate_ontology after files are saved.
+        目录结构由 init_project_dirs() 在 create_project 之后单独创建。
 
         Args:
             name: Project name

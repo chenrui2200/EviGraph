@@ -231,6 +231,20 @@
               <div class="detail-table-label">表注</div>
               <div class="detail-table-footnote-text">{{ mineruSelectedChunk.table_footnote }}</div>
             </div>
+            <!-- 图片块渲染 -->
+            <div v-if="mineruSelectedChunk.type === 'image'" class="detail-image-section">
+              <div class="detail-image-caption" v-if="mineruSelectedChunk.image_caption">
+                <span class="detail-image-caption-label">图注：</span>
+                <span>{{ mineruSelectedChunk.image_caption }}</span>
+              </div>
+              <div class="detail-image-preview" v-if="mineruSelectedChunk.image_content">
+                <img :src="mineruSelectedChunk.image_content" :alt="mineruSelectedChunk.image_caption || '图片'" style="max-width: 300px; max-height: 200px; object-fit: contain; border: 1px solid #ddd; border-radius: 4px;" />
+              </div>
+              <div class="detail-image-meta" v-if="mineruSelectedChunk.image_img_path">
+                <span class="detail-image-meta-label">文件：</span>
+                <span class="detail-image-meta-value">{{ mineruSelectedChunk.image_img_path }}</span>
+              </div>
+            </div>
             <div v-if="mineruSelectedChunk.bbox_viewport || mineruSelectedChunk.bbox_pdf" class="detail-bbox">
               <div class="detail-bbox-line">page index: {{ (mineruSelectedChunk.page_idx || 0) + 1 }}</div>
               <div class="detail-bbox-line" v-if="mineruSelectedChunk.bbox_viewport">bbox_viewport: [{{ mineruSelectedChunk.bbox_viewport.join(', ') }}]</div>
@@ -500,7 +514,7 @@
     <div v-if="showStartButton" class="start-overlay">
       <div class="start-card">
         <div class="start-icon">📊</div>
-        <h3>智能Chunks标注分析</h3>
+        <h3>智能分块标注分析</h3>
         <p>项目 <strong>{{ projectName }}</strong> 已上传完成，开始执行 LLM 智能分块与知识实体标注。</p>
         <div class="start-actions">
           <button class="start-btn" @click="handleStartChunking" :disabled="starting">
@@ -1721,6 +1735,14 @@ header.ca-header {
 .detail-table-caption-label { color: #9ca3af; }
 .detail-table-footnote { margin-top: 8px; }
 .detail-table-footnote-text { font-size: 11px; color: #374151; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 10px; line-height: 1.6; white-space: pre-wrap; }
+/* 图片块详情 */
+.detail-image-section { margin-top: 8px; }
+.detail-image-caption { font-size: 11px; color: #6b7280; margin-bottom: 6px; }
+.detail-image-caption-label { color: #9ca3af; }
+.detail-image-preview { margin: 6px 0; }
+.detail-image-meta { font-size: 10px; color: #9ca3af; margin-top: 4px; }
+.detail-image-meta-label { color: #9ca3af; }
+.detail-image-meta-value { font-family: monospace; }
 .detail-bbox { display: flex; flex-direction: column; gap: 2px; font-size: 10px; }
 .detail-bbox-line { color: #6b7280; font-family: monospace; }
 

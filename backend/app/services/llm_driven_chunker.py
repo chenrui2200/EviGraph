@@ -13,38 +13,28 @@ SOTA 知识图谱构建模式：
 3. 层级关联：通过位置和语义双重关联
 
 增强特性（V2）：
-- 章节位置边界精确划分
-- 完整的状态跟踪
-- 断点恢复增强
+- 基于 MinerU chunks.json 的章节条款结构
+- 通过 checkpoint 机制实现断点恢复
+- 附录（A/B/...）章节识别支持
 """
 
-import json
 import logging
+import random
 import re
 import time
-import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any, Optional, Callable
-from dataclasses import asdict
 from datetime import datetime
+from typing import List, Dict, Any, Optional, Callable
 
 from ..models.clause import (
     HierarchicalChunkResult,
     SectionSegment,
     ClauseSegment,
-    ClauseItem,
-    SemanticTriplet,
     ElementSegment,
-    ChunkLevel,
     ElementType,
     RequirementType,
     CrossReference,
     ReferencedClause,
-    SystemApplicability
-)
-from ..models.normative_entity import (
-    EntityType,
-    RelationType
 )
 from ..models.project import (
     ChunkCheckpoint,
@@ -140,6 +130,10 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
     - topic：条款语义摘要（_process_single_clause 提取）
     - entities：知识实体列表（_process_single_clause 提取）
     - terms：术语定义列表（_process_single_clause 提取）
+
+    预留字段（暂未填充）：
+    - triplets：语义三元组
+    - clause_items：条款细项
     """
     return {
         "clause_id": clause.clause_id,
@@ -209,18 +203,17 @@ def element_to_dict(element: "ElementSegment") -> Dict[str, Any]:
 
 class LLMDrivenChunker:
     """
-    基于 LLM 的智能三级分块引擎
+    基于 LLM 的智能分块引擎
 
-    工作流程（渐进式）：
-    1. Level-1: 读取目录（章节结构）
-    2. Level-2: 提取条文 + 语义要素
-    3. Level-3: 提取技术要素
-    4. 关联分析: 建立三层级的双向关联
+    工作流程：
+    1. 从 MinerU chunks.json 构建章节和条款结构（含附录识别）
+    2. 逐章并行调用 LLM 提取 topic + entities + terms
+    3. 通过 checkpoint 机制支持断点恢复
 
     核心特点：
-    - 不使用正则备用方案，完全依赖 LLM
+    - 正则识别章节条款结构（附录支持），LLM 提取语义
     - 可靠的指数退避重试机制
-    - 进度实时回调，支持前端显示
+    - 进度实时回调，支持前端 SSE 流式显示
     """
 
     # =========================================================================
@@ -895,7 +888,6 @@ topic：{topic}
         Returns:
             (完整条款文本, 合并bbox列表, scope_prefix)
         """
-        import re
 
         def get_scope_prefix(cid: str, registry: Dict[str, Dict]) -> str:
             """从 clause_id 推导 scope_prefix: '2.0.1'→'2.0', '3.1'→'3.1'（若有子条款）/'3'（若无）, 'A.0.7'→'A.0'"""
