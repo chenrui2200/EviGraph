@@ -1,5 +1,6 @@
 """
-Textatmanageserveservice
+Text Processor Service - 文本处理与分块服务
+提供文档文本提取、分块及元数据管理功能。
 """
 
 from typing import List, Optional, Union, Dict, Any

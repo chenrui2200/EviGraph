@@ -344,7 +344,7 @@ def _backfill_page_info(project_id: str, intelligent_chunks_data: dict, logger) 
     从 chunks.json（MinerU 解析产物）中查找对应 clause_id 的 page_idx，
     填充到 clauses 的 page 字段中。确保旧数据也能支持定位到文档页面。
 
-    支持多trunk合并的clause：同一个clause_id可能跨多个chunk/pages，
+    支持多chunk合并的clause：同一个clause_id可能跨多个chunk/pages，
     需要收集所有相关的bbox并按页合并。
     """
     chunks_data = ProjectManager.get_chunks(project_id)

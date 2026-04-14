@@ -969,7 +969,7 @@ def _call_mineru_api(pdf_bytes: bytes, page_num: int, max_retries: int = 3, time
         'return_middle_json': 'true',
         'return_model_output': 'false',
         'return_md': 'true',
-        'return_images': 'false',
+        'return_images': 'true',
         'return_content_list': 'false',
         'parse_method': parse_method,
         'lang_list': 'ch',
@@ -1487,7 +1487,7 @@ def _build_table_chunk(
         logger.info(f"[表格提取] 修正颠倒bbox: {bbox} -> [{bbox[0]},{bbox[3]},{bbox[2]},{bbox[1]}]")
         bbox = [bbox[0], bbox[3], bbox[2], bbox[1]]
 
-    # MinerU 直接返回表格内容，不再需要 PaddleOCR
+    # 表格内容已迁移至 MinerU table_html 字段，table_content 不再使用
     table_content = ''
 
     return {
@@ -1645,6 +1645,8 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
     for page_num, page_data in sorted_pages:
         middle_json = page_data.get('middle_json', {})
         pdf_info_list = middle_json.get('pdf_info', [])
+        # 该页所有图片的 base64（key: image_path, value: base64 data URI）
+        images_base64: dict = page_data.get('images', {})
 
         for info in pdf_info_list:
             # 统一使用外层 page_num（0-based），不依赖 MinerU 的 pdf_info.page_idx
@@ -1741,6 +1743,64 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                         "table_footnote": table_footnote.rstrip('\n') if table_footnote else '',
                     })
 
+                # ---- 图片块 ----
+                elif bt == 'image':
+                    caption = ''
+                    img_path = ''
+                    img_base64 = ''
+                    all_sub_lines = list(block.get('lines', []))
+                    outer_bbox = _merge_line_bboxes(block.get('lines', []), page_num, block.get('bbox', []))
+
+                    for sub in block.get('blocks', []):
+                        sub_type = sub.get('type', '')
+                        if sub_type == 'image_caption':
+                            # 图片标题
+                            for line in sub.get('lines', []):
+                                for span in line.get('spans', []):
+                                    content = span.get('content', '')
+                                    if content:
+                                        caption += content
+                                all_sub_lines.append(line)
+                        elif sub_type == 'image_body':
+                            # 图片本体：提取 image_path（用于匹配 base64）
+                            for line in sub.get('lines', []):
+                                for span in line.get('spans', []):
+                                    if span.get('image_path'):
+                                        img_path = span['image_path']
+                                all_sub_lines.append(line)
+
+                    # 用 image_path 查找 base64
+                    if img_path and img_path in images_base64:
+                        img_base64 = images_base64[img_path]
+
+                    if len(all_sub_lines) > len(block.get('lines', [])):
+                        merged_sub_bbox = _merge_line_bboxes(all_sub_lines, page_num, block.get('bbox', []))
+                    else:
+                        merged_sub_bbox = outer_bbox
+
+                    use_bbox = merged_sub_bbox if merged_sub_bbox and len(merged_sub_bbox) >= 4 else outer_bbox
+
+                    final_bbox = list(use_bbox)
+                    if len(final_bbox) >= 4 and final_bbox[1] > final_bbox[3]:
+                        final_bbox = [final_bbox[0], final_bbox[3], final_bbox[2], final_bbox[1]]
+
+                    chunks.append({
+                        "chunk_id": f"chunk_{len(chunks)}",
+                        "page_idx": page_num,
+                        "type": "image",
+                        "content": caption or '[图片]',
+                        "bbox_pdf": final_bbox,
+                        "bbox_viewport": final_bbox,
+                        "page_width": page_w,
+                        "page_height": page_h,
+                        "category_id": 3,
+                        "block_type": "image",
+                        "source": filename,
+                        "image_caption": caption,
+                        "image_path": img_path,
+                        "image_base64": img_base64,
+                    })
+
     return chunks
 
 
@@ -1756,7 +1816,7 @@ def _parse_mineru_to_chunks(mineru_data_or_jsonl_path: Union[dict, str], filenam
     - 正文/标题：preproc_blocks 中 type=title/text，提取 lines/spans 的 content
     - 表格：preproc_blocks 中 type=table，从 blocks.table_caption 提取标题，
             从 blocks.table_body 提取 img_path 和 bbox，
-            表格内容由 PaddleOCR 从 PDF 提取
+            表格内容从 MinerU 的 table_html 字段直接提取
     """
     # 新路径：直接读取 JSONL 文件
     if isinstance(mineru_data_or_jsonl_path, str):
