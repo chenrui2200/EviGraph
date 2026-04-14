@@ -253,7 +253,8 @@
               <span class="inline-progress-text">{{ progressPercent }}%</span>
             </div>
             <button class="re-analyse-btn" @click="handleResetChunking" :disabled="starting">
-              🔄 重新分析
+              <span v-if="!starting">🔄 重新分析</span>
+              <span v-else class="spinner-sm"></span>
             </button>
           </div>
 
@@ -507,7 +508,8 @@
             <span v-else class="spinner-sm"></span>
           </button>
           <button class="reset-btn" @click="handleResetChunking" :disabled="starting">
-            重置并重新分析
+            <span v-if="!starting">重置并重新分析</span>
+            <span v-else class="spinner-sm"></span>
           </button>
         </div>
       </div>

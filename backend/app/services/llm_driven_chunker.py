@@ -1069,7 +1069,7 @@ OCR 工具提取的文本可能带有以下格式噪声，**必须正确处理**
 - 不要提取动词、形容词、副词等
 - 不要提取条文编号、日期等非实体内容
 - 实体应该是技术相关的：设备、系统、材料、参数、场所等
-- 严格控制数量，最多 3-5 个，只保留最核心的实体
+- 严格控制数量，提取 5-15 个与 topic 高度相关的知识实体
 
 ## 输出格式
 请输出 JSON 格式：
@@ -1085,10 +1085,37 @@ topic：{topic}
 
 要求：
 1. topic 描述了这条条文的核心主题，实体必须与 topic 高度相关
-2. 严格控制数量，最多 3-5 个，只保留最核心的实体
+2. 严格控制数量，提取 5-15 个与 topic 高度相关的知识实体
 3. 无关的实体不要提取
 
 请输出 JSON："""
+
+    # ============================================================
+    # 知识实体数量启发式配置
+    # ============================================================
+    # 条款数量 → 目标实体数量映射
+    ENTITY_COUNT_HEURISTIC = [
+        (3,   (3, 5)),
+        (8,   (5, 10)),
+        (15,  (8, 15)),
+        (999, (10, 20)),
+    ]
+
+    @staticmethod
+    def calc_target_entity_count(clause_count: int) -> tuple:
+        """
+        根据章节内条款数量启发式计算目标实体提取数量。
+
+        Args:
+            clause_count: 该章节的条款数量
+
+        Returns:
+            (min, max) 元组
+        """
+        for threshold, (min_cnt, max_cnt) in LLMDrivenChunker.ENTITY_COUNT_HEURISTIC:
+            if clause_count <= threshold:
+                return (min_cnt, max_cnt)
+        return (10, 20)  # fallback
 
     # 要素提取 Prompt
     ELEMENT_SYSTEM_PROMPT = """你是一个工程规范文档的要素提取专家。
@@ -2071,7 +2098,11 @@ topic：{topic}
     # 并行处理工具（用于章节内 clause 并行 LLM 调用）
     # =========================================================================
 
-    def _process_single_clause(self, clause) -> None:
+    def _process_single_clause(
+        self,
+        clause,
+        entity_count_range: tuple = (5, 15)
+    ) -> None:
         """处理单个 clause 的 topic + entities 提取（串行两阶段 LLM）"""
         if not clause.content:
             clause.metadata['topic'] = ""
@@ -2082,7 +2113,7 @@ topic：{topic}
         topic = self._extract_topic_from_text(clause.content)
         clause.metadata['topic'] = topic
 
-        entities = self._extract_entities_by_topic(clause.content, topic)
+        entities = self._extract_entities_by_topic(clause.content, topic, entity_count_range)
         clause.metadata['entities'] = entities
         clause.metadata['semantics_enriched'] = True
 
@@ -2091,7 +2122,7 @@ topic：{topic}
             try:
                 self.progress_callback(
                     -1,  # 不更新进度百分比
-                    f"📝 {clause.clause_id}: {topic[:20] if topic else '(无)'} | 实体: {', '.join(entities[:3])}{'...' if len(entities) > 3 else ''}"
+                    f"📝 {clause.clause_id}: {topic[:20] if topic else '(无)'} | 实体: {', '.join(entities[:10])}{'...' if len(entities) > 10 else ''}"
                 )
             except Exception:
                 pass  # 忽略回调错误
@@ -2282,11 +2313,19 @@ topic：{topic}
 
             # 获取该章节的条款
             chapter_clauses = [c for c in clauses_data if c.parent_chapter == chapter_num]
+            chapter_clause_count = len(chapter_clauses)
+
+            # 启发式计算该章节的目标实体数量范围
+            entity_count_range = self.calc_target_entity_count(chapter_clause_count)
+            self.logger.info(f"[LLM分块] 章节 {chapter_num} 条款数={chapter_clause_count}, 目标实体数量={entity_count_range[0]}-{entity_count_range[1]}")
 
             # 并行执行：章节内所有 clause 的 LLM 调用同时进行
             para_start = time.time()
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(self._process_single_clause, clause): clause for clause in chapter_clauses}
+                futures = {
+                    executor.submit(self._process_single_clause, clause, entity_count_range): clause
+                    for clause in chapter_clauses
+                }
                 for future in as_completed(futures):
                     # 等待所有 clause 完成（结果在 clause.metadata 中直接修改）
                     pass
@@ -2461,7 +2500,8 @@ topic：{topic}
     def _extract_entities_by_topic(
         self,
         clause_text: str,
-        topic: str
+        topic: str,
+        entity_count_range: tuple = (5, 15)
     ) -> List[str]:
         """
         基于 topic 从条款中提取实体（阶段 B）
@@ -2469,6 +2509,7 @@ topic：{topic}
         Args:
             clause_text: 条款文本
             topic: 条款的 topic
+            entity_count_range: 目标实体数量范围 (min, max)，用于动态调整 prompt
 
         Returns:
             实体名称列表（扁平字符串列表）
@@ -2476,14 +2517,28 @@ topic：{topic}
         if not clause_text or len(clause_text.strip()) < 10:
             return []
 
+        min_cnt, max_cnt = entity_count_range
+
         try:
-            self.logger.info(f"[LLM 实体提取] 开始, clause_text长度={len(clause_text)}, topic={topic if topic else '(空)'}")
+            self.logger.info(f"[LLM 实体提取] 开始, clause_text长度={len(clause_text)}, topic={topic if topic else '(空)'}, 目标数量={min_cnt}-{max_cnt}")
+            # 动态构建用户 prompt，注入目标数量范围
+            user_prompt = f"""请提取以下条文中的知识实体：
+
+条文内容：{clause_text[:2000]}
+
+topic：{topic}
+
+要求：
+1. topic 描述了这条条文的核心主题，实体必须与 topic 高度相关
+2. 严格控制数量，提取 {min_cnt}-{max_cnt} 个与 topic 高度相关的知识实体
+3. 无关的实体不要提取
+
+请输出 JSON格式：{{"entities": ["实体1", "实体2", "实体3"]}}"""
+
             response = self._call_llm_with_retry(
                 messages=[
                     {"role": "system", "content": self.ENTITY_SYSTEM_PROMPT},
-                    {"role": "user", "content": self.ENTITY_USER_PROMPT
-                        .replace("{clause_text}", clause_text[:2000])
-                        .replace("{topic}", topic)}
+                    {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.3
             )
@@ -2572,6 +2627,9 @@ topic：{topic}
         # 用于匹配大章节标题（如 "2 术语"）
         CHAPTER_PATTERN = re.compile(r'^(\d+(?:\.\d+)?)\s+(.+)')
 
+        # 用于匹配附录标题（如 "附录A"、"附录 A"、"附录A 系数k值"）
+        APPENDIX_PATTERN = re.compile(r'^附录[A-Z](?:\s+(.+))?$')
+
         # 编码修复：尝试将乱码内容转换为正确的中文
         def _fix_encoding(content: str) -> str:
             """
@@ -2590,6 +2648,9 @@ topic：{topic}
 
         # 用于匹配条款编号（如 "2.1"、"3.5.2"、"1.0.1"）
         CLAUSE_PATTERN = re.compile(r'^(\d+\.\d+(?:\.\d+)?)\s*(.*)')
+
+        # 用于匹配附录条款编号（如 "A.0.7"、"B.1.3"）
+        APPENDIX_CLAUSE_PATTERN = re.compile(r'^([A-Z]\.\d+(?:\.\d+)?)\s*(.*)')
 
         # 用于匹配子章节信号（如 "3.1"、"3.1.1"）- 只要有 . 就是子章节
         SUB_CHAPTER_PATTERN = re.compile(r'^\d+\.\d+')
@@ -2669,6 +2730,41 @@ topic：{topic}
                     self.logger.info(f"[章节构建] {chapter_num}. {title} (page={page_idx})")
                 continue
 
+            # 判断是否为附录标题（如 "附录A"、"附录A 系数k值"）
+            if chunk_type == 'title' and APPENDIX_PATTERN.match(content):
+                m = APPENDIX_PATTERN.match(content)
+                appendix_letter = m.group(0)[2]  # 从 "附录A" 提取 "A"
+                title = m.group(1).strip() if m.group(1) else appendix_letter
+                self.logger.info(f"[章节构建] ✅ 识别到附录标题: page={page_idx}, idx={i}, appendix={appendix_letter}, title={title!r}")
+
+                # 创建附录章节（使用字母编号，chapter_number 存储为负数或特殊值以区分）
+                # 使用 100 + ord(letter) - ord('A') 作为章节编号，附录A=165, 附录B=166...
+                chapter_num = 200 + ord(appendix_letter) - ord('A')
+                current_chapter_idx += 1
+                current_chapter = {
+                    'chapter_number': chapter_num,
+                    'chapter_letter': appendix_letter,  # 保存原始字母
+                    'title': f"附录{appendix_letter}" + (f" {title}" if title else ""),
+                    'page_idx': page_idx,
+                    'start_idx': i,
+                    'end_idx': i,
+                    'level': 1,
+                    'sub_chapters': [],
+                    'chapter_type': 'appendix'
+                }
+                sections.append(current_chapter)
+                chapter_plan.append(ChapterPlan(
+                    chapter_number=chapter_num,
+                    title=current_chapter['title'],
+                    start_position=i,
+                    end_position=len(chunks_data),
+                    status=ChapterStatus.PENDING,
+                    chapter_type='appendix'
+                ))
+
+                self.logger.info(f"[章节构建] 附录 {appendix_letter}: {title} (page={page_idx})")
+                continue
+
             # 如果 type=='title' 但不符合编号格式（如 "前 言"、"目 录"），跳过
             # 不影响 current_chapter，条款仍归属到前一个有效章节
             elif chunk_type == 'title' and not CHAPTER_PATTERN.match(content):
@@ -2731,15 +2827,19 @@ topic：{topic}
                 # 更新章节的结束位置
                 current_chapter['end_idx'] = i
 
-                # 检查是否为条款
-                m = CLAUSE_PATTERN.match(content)
+                # 检查是否为条款（先检查普通条款，再检查附录条款）
+                clause_match = CLAUSE_PATTERN.match(content)
+                appendix_match = APPENDIX_CLAUSE_PATTERN.match(content) if not clause_match else None
+
+                m = clause_match or appendix_match
                 if m:
                     clause_id = m.group(1)
                     clause_title = m.group(2).strip()[:80] if m.group(2) else ''
 
-                    # 判断条款层级
+                    # 判断条款层级（附录条款不算 sub_chapter）
                     parts = clause_id.split('.')
-                    is_sub_chapter = len(parts) == 3 and parts[2] == '0'
+                    is_appendix_clause = clause_id[0].isalpha()
+                    is_sub_chapter = not is_appendix_clause and len(parts) == 3 and parts[2] == '0'
 
                     # 判断 requirement_type（基于关键词）
                     req_type = RequirementType.RECOMMENDED
@@ -2785,7 +2885,8 @@ topic：{topic}
                     if is_sub_chapter:
                         current_chapter['sub_chapters'].append(clause_id)
 
-                    self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx})")
+                    clause_type = "附录条款" if is_appendix_clause else "条款"
+                    self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx}) [{clause_type}]")
 
         # 更新 chapter_plan 的 end_position
         for plan in chapter_plan:
@@ -2805,6 +2906,9 @@ topic：{topic}
             # 查找该 chunk 的 clause_id（通过 content 中的条款编号）
             chunk_content = _fix_encoding(chunk.get('content', ''))
             m = CLAUSE_PATTERN.match(chunk_content.strip())
+            if not m:
+                # 尝试附录条款（如 A.0.1）
+                m = APPENDIX_CLAUSE_PATTERN.match(chunk_content.strip())
             if m:
                 current_clause_id = m.group(1)
             # 当前 chunk 归属到 current_clause_id（直到遇到新的条款编号）
