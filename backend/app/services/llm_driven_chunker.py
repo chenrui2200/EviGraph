@@ -648,10 +648,7 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
     当前实际提取的字段：
     - topic：条款语义摘要（_process_single_clause 提取）
     - entities：知识实体列表（_process_single_clause 提取）
-
-    以下字段当前未被提取，保持为空列表：
-    - terms, conditions, actions, components, objects
-    - triplets, clause_items
+    - terms：术语定义列表（_process_single_clause 提取）
     """
     return {
         "clause_id": clause.clause_id,
@@ -675,7 +672,7 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "scope_prefix": clause.metadata.get("scope_prefix") if clause.metadata else None,
         "chapter": clause.metadata.get("chapter") if clause.metadata else None,
         "is_term_definition": clause.is_term_definition,
-        "terms": clause.terms or [],
+        "terms": clause.metadata.get("terms", []) if clause.metadata else clause.terms or [],
         "formula_content": clause.formula_content,
         "referenced_tables": clause.metadata.get("referenced_tables", []) if clause.metadata else [],
         "referenced_formulas": clause.metadata.get("referenced_formulas", []) if clause.metadata else [],
@@ -1089,6 +1086,42 @@ topic：{topic}
 3. 无关的实体不要提取
 
 请输出 JSON："""
+
+    # ============================================================
+    # 术语提取 Prompt（阶段 C）- 新增
+    # ============================================================
+    TERM_SYSTEM_PROMPT = """你是一个工程规范文档的术语定义专家。
+
+你的任务是从条文中识别并提取专业术语定义。
+
+## 术语定义格式
+- 术语名称（term_name）：条文中明确定义的技术术语
+- 缩写（abbreviation）：术语的缩写（如 RCD、TN-S）
+- 定义（definition）：条文中对该术语的完整解释
+
+## 要求
+- 只提取条文中明确给出定义的术语，不要提取未定义的简称
+- 术语应该是技术相关的核心概念：保护措施、设备类型、系统形式等
+- 定义必须引用条文中对应的原文解释
+- 数量：每条条文最多提取 1-3 个核心术语
+
+## 输出格式
+请输出 JSON 格式：
+{{"terms": [{{"term_name": "术语名称", "abbreviation": "缩写", "definition": "定义原文"}}]}}
+
+如果没有明确的术语定义，输出：{{"terms": []}}"""
+
+    TERM_USER_PROMPT = """请从以下条文中提取术语定义：
+
+条文内容：{clause_text}
+
+要求：
+1. 只提取条文中明确给出定义的术语（如"本规范所指XXX，是指..."、"XXX定义为..."）
+2. 缩写和全称同时存在时一并提取
+3. 每条条文最多提取 1-3 个核心术语
+4. 定义必须引用条文中对应的原文
+
+请输出 JSON格式：{{"terms": [{{"term_name": "...", "abbreviation": "...", "definition": "..."}}]}}"""
 
     # ============================================================
     # 知识实体数量启发式配置
@@ -2103,26 +2136,35 @@ topic：{topic}
         clause,
         entity_count_range: tuple = (5, 15)
     ) -> None:
-        """处理单个 clause 的 topic + entities 提取（串行两阶段 LLM）"""
+        """处理单个 clause 的 topic + entities + terms 提取（三阶段 LLM）"""
         if not clause.content:
             clause.metadata['topic'] = ""
             clause.metadata['entities'] = []
+            clause.metadata['terms'] = []
             clause.metadata['semantics_enriched'] = True
             return
 
+        # 阶段 A: 提取 topic
         topic = self._extract_topic_from_text(clause.content)
         clause.metadata['topic'] = topic
 
+        # 阶段 B: 提取 entities
         entities = self._extract_entities_by_topic(clause.content, topic, entity_count_range)
         clause.metadata['entities'] = entities
+
+        # 阶段 C: 提取 terms（术语定义）
+        terms = self._extract_terms_from_text(clause.content)
+        clause.metadata['terms'] = terms
+
         clause.metadata['semantics_enriched'] = True
 
         # 通过进度回调推送详细日志到前端
         if self.progress_callback and entities:
             try:
+                term_info = f" | 术语: {', '.join([t['term_name'] for t in terms[:2]])}" if terms else ""
                 self.progress_callback(
                     -1,  # 不更新进度百分比
-                    f"📝 {clause.clause_id}: {topic[:20] if topic else '(无)'} | 实体: {', '.join(entities[:10])}{'...' if len(entities) > 10 else ''}"
+                    f"📝 {clause.clause_id}: {topic[:20] if topic else '(无)'} | 实体: {', '.join(entities[:10])}{'...' if len(entities) > 10 else ''}{term_info}"
                 )
             except Exception:
                 pass  # 忽略回调错误
@@ -2561,6 +2603,57 @@ topic：{topic}
             return []
         except Exception as e:
             self.logger.warning(f"[LLM 实体提取] 失败: {e}")
+            return []
+
+    def _extract_terms_from_text(self, clause_text: str) -> List[Dict]:
+        """
+        从条款文本中提取术语定义（阶段 C）
+
+        Args:
+            clause_text: 条款文本
+
+        Returns:
+            术语列表 [{"term_name": ..., "abbreviation": ..., "definition": ...}]
+        """
+        if not clause_text or len(clause_text.strip()) < 10:
+            return []
+
+        try:
+            self.logger.info(f"[LLM 术语提取] 开始, clause_text长度={len(clause_text)}")
+            user_prompt = self.TERM_USER_PROMPT.replace("{clause_text}", clause_text[:2000])
+            response = self._call_llm_with_retry(
+                messages=[
+                    {"role": "system", "content": self.TERM_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3
+            )
+            # 兼容处理
+            if isinstance(response, dict):
+                terms = response.get("terms", [])
+            elif isinstance(response, list):
+                self.logger.warning(f"[LLM 术语提取] 响应为 list，直接作为结果")
+                terms = response
+            else:
+                self.logger.warning(f"[LLM 术语提取] 响应类型异常: {type(response)}")
+                terms = []
+            # 确保返回的是列表
+            if isinstance(terms, list):
+                result = []
+                for t in terms:
+                    if isinstance(t, dict):
+                        result.append({
+                            "term_name": str(t.get("term_name", "")),
+                            "abbreviation": str(t.get("abbreviation", "")),
+                            "definition": str(t.get("definition", ""))
+                        })
+                    elif isinstance(t, str):
+                        result.append({"term_name": t, "abbreviation": "", "definition": ""})
+                self.logger.info(f"[LLM 术语提取] 完成, terms_count={len(result)}")
+                return result
+            return []
+        except Exception as e:
+            self.logger.warning(f"[LLM 术语提取] 失败: {e}")
             return []
 
     def _extract_entities_from_text(
