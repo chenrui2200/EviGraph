@@ -2,11 +2,14 @@
  * 公共检索方法 - 固定 2 跳路径检索（Entity/Term → Topic → Clause）
  *
  * Hit Test 和 AI Q&A 共用，确保检索行为一致。
+ *
+ * 优化：单次后端请求同时搜索 Entity 和 Term，共享 embedding 计算，
+ * 减少网络往返和重复计算。
  */
 import { searchEntityTopicClause } from '../api/graph'
 
 /**
- * 执行 2 跳路径检索
+ * 执行 2 跳路径检索（单次 API 调用）
  *
  * @param {Object} options
  * @param {string|string[]} options.graphId - 单个 graph_id 或数组
@@ -24,40 +27,35 @@ export async function hitTestSearch({
   rootTypes = ['Entity', 'Term'],
 }) {
   const graphIds = Array.isArray(graphId) ? graphId : [graphId]
-  const useEntity = rootTypes.includes('Entity')
-  const useTerm = rootTypes.includes('Term')
 
   const startTime = Date.now()
   const allRows = []
   const seenUuids = new Set()
 
   for (const gid of graphIds) {
-    // 并行查询 Entity 和 Term
-    const promises = []
-    if (useEntity) {
-      promises.push(searchEntityTopicClause({ graph_id: gid, query, limit, root_type: 'Entity' }))
-    }
-    if (useTerm) {
-      promises.push(searchEntityTopicClause({ graph_id: gid, query, limit, root_type: 'Term' }))
-    }
-    const responses = await Promise.all(promises)
+    // 单次请求同时搜索 Entity 和 Term，后端共享 embedding 计算
+    const res = await searchEntityTopicClause({
+      graph_id: gid,
+      query,
+      limit,
+      root_types: rootTypes,
+    })
 
-    const entityRes = useEntity ? responses[0] : null
-    const termRes = useTerm ? responses[useEntity ? 1 : 0] : null
+    if (res?.success) {
+      const rows = (res.data.rows || [])
+        .filter(r => (r.relevance_score || 0) >= similarityThreshold)
+        // 标注 root_type（后端 Term 优先排列，通过 labels 判断）
+        .map(r => ({
+          ...r,
+          root_type: r.object_node?.labels?.includes('Term') ? 'Term' : 'Entity',
+        }))
 
-    // Term 排前，Entity 排后，按 similarityThreshold 过滤，按 uuid 去重
-    const termRows = (termRes?.success ? termRes.data.rows || [] : [])
-      .filter(r => (r.relevance_score || 0) >= similarityThreshold)
-      .map(r => ({ ...r, root_type: 'Term' }))
-    const entityRows = (entityRes?.success ? entityRes.data.rows || [] : [])
-      .filter(r => (r.relevance_score || 0) >= similarityThreshold)
-      .map(r => ({ ...r, root_type: 'Entity' }))
-
-    for (const row of [...termRows, ...entityRows]) {
-      const uuid = row.object_node?.uuid
-      if (uuid && !seenUuids.has(uuid)) {
-        seenUuids.add(uuid)
-        allRows.push(row)
+      for (const row of rows) {
+        const uuid = row.object_node?.uuid
+        if (uuid && !seenUuids.has(uuid)) {
+          seenUuids.add(uuid)
+          allRows.push(row)
+        }
       }
     }
   }

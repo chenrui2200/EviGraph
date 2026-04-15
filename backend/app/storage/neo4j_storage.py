@@ -13,7 +13,7 @@ import logging
 import traceback
 import concurrent.futures
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Callable, Union, TYPE_CHECKING
+from typing import Dict, Any, List, Optional, Callable, Union, Tuple, TYPE_CHECKING
 
 from neo4j import GraphDatabase, Session as Neo4jSession
 from neo4j.exceptions import (
@@ -1143,45 +1143,156 @@ class Neo4jStorage(GraphStorage):
         self,
         entity_uuids: List[str],
         graph_id: str,
-    ) -> Dict[str, List[Dict[str, Any]]]:
+        include_clause_data: bool = False,
+    ) -> Union[Dict[str, List[Dict[str, Any]]], Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, Dict[str, Any]]]]:
         """
         直接查询 Entity → Topic → Clause 路径。
 
         路径: (e:Entity)-[:MENTIONS]-(t:Topic)-[:HAS_TOPIC]-(c:Clause)
-        返回格式: { entity_uuid: [ {topic_uuid, clause_uuid}, ... ], ... }
 
         Args:
             entity_uuids: Entity 节点 UUID 列表
             graph_id: 图谱 ID（用于过滤）
+            include_clause_data: 是否同时返回 Clause 节点完整数据（合并查询减少 DB 往返）
 
         Returns:
-            Dict mapping entity_uuid to list of {topic_uuid, clause_uuid} path info
+            include_clause_data=False: { entity_uuid: [ {topic_uuid, clause_uuid}, ... ] }
+            include_clause_data=True:  (paths_map, clause_nodes_map)
         """
         if not entity_uuids:
+            if include_clause_data:
+                return {}, {}
             return {}
 
-        def _read(tx):
-            result = tx.run(
-                """
-                MATCH (e:Entity)-[:MENTIONS]-(t:Topic)-[:HAS_TOPIC]-(c:Clause)
-                WHERE e.uuid IN $uuids
-                  AND e.graph_id = $gid
-                  AND t.graph_id = $gid
-                  AND c.graph_id = $gid
-                RETURN e.uuid AS entity_uuid, t.uuid AS topic_uuid, c.uuid AS clause_uuid
-                """,
-                uuids=entity_uuids,
-                gid=graph_id,
-            )
-            paths_map: Dict[str, List[Dict[str, Any]]] = {uid: [] for uid in entity_uuids}
+        if include_clause_data:
+            def _read_with_data(tx):
+                result = tx.run(
+                    """
+                    MATCH (e:Entity)<-[:MENTIONS]-(t:Topic)<-[:HAS_TOPIC]-(c:Clause)
+                    WHERE e.uuid IN $uuids
+                      AND e.graph_id = $gid
+                      AND t.graph_id = $gid
+                      AND c.graph_id = $gid
+                    RETURN e.uuid AS entity_uuid, t.uuid AS topic_uuid,
+                           c.uuid AS clause_uuid, c AS clause_node, labels(c) AS clause_labels
+                    """,
+                    uuids=entity_uuids,
+                    gid=graph_id,
+                )
+                paths_map: Dict[str, List[Dict[str, Any]]] = {uid: [] for uid in entity_uuids}
+                clause_nodes_map: Dict[str, Dict[str, Any]] = {}
+                for record in result:
+                    entity_uuid = record["entity_uuid"]
+                    clause_uuid = record["clause_uuid"]
+                    if entity_uuid in paths_map:
+                        paths_map[entity_uuid].append({
+                            "topic_uuid": record["topic_uuid"],
+                            "clause_uuid": clause_uuid,
+                        })
+                    # 收集 Clause 节点数据（去重）
+                    if clause_uuid and clause_uuid not in clause_nodes_map:
+                        node = record["clause_node"]
+                        clause_labels = record["clause_labels"]
+                        clause_nodes_map[clause_uuid] = self._node_to_dict(node, clause_labels)
+                return paths_map, clause_nodes_map
+
+            with self._driver.session() as session:
+                return self._call_with_retry(session.execute_read, _read_with_data)
+        else:
+            def _read(tx):
+                result = tx.run(
+                    """
+                    MATCH (e:Entity)<-[:MENTIONS]-(t:Topic)<-[:HAS_TOPIC]-(c:Clause)
+                    WHERE e.uuid IN $uuids
+                      AND e.graph_id = $gid
+                      AND t.graph_id = $gid
+                      AND c.graph_id = $gid
+                    RETURN e.uuid AS entity_uuid, t.uuid AS topic_uuid, c.uuid AS clause_uuid
+                    """,
+                    uuids=entity_uuids,
+                    gid=graph_id,
+                )
+                paths_map: Dict[str, List[Dict[str, Any]]] = {uid: [] for uid in entity_uuids}
+                for record in result:
+                    entity_uuid = record["entity_uuid"]
+                    if entity_uuid in paths_map:
+                        paths_map[entity_uuid].append({
+                            "topic_uuid": record["topic_uuid"],
+                            "clause_uuid": record["clause_uuid"],
+                        })
+                return paths_map
+
+            with self._driver.session() as session:
+                return self._call_with_retry(session.execute_read, _read)
+
+    def get_term_defines_clauses(
+        self,
+        term_uuids: List[str],
+        graph_id: str,
+        include_clause_data: bool = False,
+    ) -> Union[Dict[str, List[str]], Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]]:
+        """
+        查询 Term -[:DEFINES]-> Clause 直连路径。
+
+        Args:
+            term_uuids: Term 节点 UUID 列表
+            graph_id: 图谱 ID
+            include_clause_data: 是否同时返回 Clause 节点完整数据
+
+        Returns:
+            include_clause_data=False: Dict[term_uuid -> [clause_uuid, ...]]
+            include_clause_data=True:  (defines_map, clause_nodes_map)
+        """
+        if not term_uuids:
+            if include_clause_data:
+                return {}, {}
+            return {}
+
+        if include_clause_data:
+            def _read_with_data(tx):
+                result = tx.run(
+                    """
+                    MATCH (t:Entity:Term)-[:DEFINES]->(c:Clause)
+                    WHERE t.uuid IN $uuids AND t.graph_id = $gid
+                    RETURN t.uuid AS term_uuid, c.uuid AS clause_uuid,
+                           c AS clause_node, labels(c) AS clause_labels
+                    """,
+                    uuids=term_uuids,
+                    gid=graph_id,
+                )
+                defines_map: Dict[str, List[str]] = {uid: [] for uid in term_uuids}
+                clause_nodes_map: Dict[str, Dict[str, Any]] = {}
+                for record in result:
+                    term_uuid = record["term_uuid"]
+                    clause_uuid = record["clause_uuid"]
+                    if term_uuid in defines_map:
+                        defines_map[term_uuid].append(clause_uuid)
+                    if clause_uuid and clause_uuid not in clause_nodes_map:
+                        clause_nodes_map[clause_uuid] = self._node_to_dict(
+                            record["clause_node"], record["clause_labels"]
+                        )
+                return defines_map, clause_nodes_map
+
+            with self._driver.session() as session:
+                return self._call_with_retry(session.execute_read, _read_with_data)
+        else:
+            def _read(tx):
+                result = tx.run(
+                    """
+                    MATCH (t:Entity:Term)-[:DEFINES]->(c)
+                    WHERE t.uuid IN $uuids AND t.graph_id = $gid
+                    RETURN t.uuid AS term_uuid, c.uuid AS clause_uuid
+                    """,
+                    uuids=term_uuids,
+                    gid=graph_id,
+                )
+            defines_map: Dict[str, List[str]] = {uid: [] for uid in term_uuids}
             for record in result:
-                entity_uuid = record["entity_uuid"]
-                if entity_uuid in paths_map:
-                    paths_map[entity_uuid].append({
-                        "topic_uuid": record["topic_uuid"],
-                        "clause_uuid": record["clause_uuid"],
-                    })
-            return paths_map
+                term_uuid = record["term_uuid"]
+                clause_uuid = record["clause_uuid"]
+                if term_uuid in defines_map:
+                    defines_map[term_uuid].append(clause_uuid)
+            return defines_map
 
         with self._driver.session() as session:
             return self._call_with_retry(session.execute_read, _read)
@@ -1375,6 +1486,68 @@ class Neo4jStorage(GraphStorage):
                         })
 
             return episodes
+
+        with self._driver.session() as session:
+            return self._call_with_retry(session.execute_read, _read)
+
+    def batch_get_node_pdf_info(self, node_uuids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        批量获取 Clause 节点的 PDF 定位信息。
+
+        PDF 位置信息仅存储在 Clause 节点上（pdf_source, pdf_page, pdf_bboxes 等），
+        因此直接匹配 :Clause 标签即可利用 clause_uuid 唯一约束索引。
+
+        Returns:
+            Dict[node_uuid -> pdf_info dict]
+        """
+        if not node_uuids:
+            return {}
+
+        def _read(tx):
+            result_map: Dict[str, Dict[str, Any]] = {}
+            records = tx.run(
+                """
+                MATCH (c:Clause) WHERE c.uuid IN $uuids
+                RETURN c.uuid AS node_uuid,
+                       c.pdf_source AS source,
+                       c.pdf_page AS page,
+                       c.pdf_bboxes AS pdf_bboxes_raw,
+                       c.pdf_page_width AS page_width,
+                       c.pdf_page_height AS page_height,
+                       c.summary AS episode_text
+                """,
+                uuids=node_uuids
+            )
+            for record in records:
+                uid = record["node_uuid"]
+                if not uid or uid in result_map:
+                    continue
+                pdf_bboxes_raw = record.get("pdf_bboxes_raw")
+                pdf_bboxes = None
+                if pdf_bboxes_raw:
+                    if isinstance(pdf_bboxes_raw, str):
+                        try:
+                            pdf_bboxes = json.loads(pdf_bboxes_raw)
+                        except (json.JSONDecodeError, TypeError):
+                            pdf_bboxes = None
+                    elif isinstance(pdf_bboxes_raw, list):
+                        pdf_bboxes = pdf_bboxes_raw
+
+                bbox = None
+                page = record.get("page")
+                if pdf_bboxes and len(pdf_bboxes) > 0 and len(pdf_bboxes[0]) >= 5:
+                    page = pdf_bboxes[0][0]
+                    bbox = pdf_bboxes[0][1:5]
+
+                result_map[uid] = {
+                    "source": record.get("source"),
+                    "page": page,
+                    "bbox": bbox,
+                    "page_width": record.get("page_width"),
+                    "page_height": record.get("page_height"),
+                    "episode_text": record.get("episode_text"),
+                }
+            return result_map
 
         with self._driver.session() as session:
             return self._call_with_retry(session.execute_read, _read)

@@ -113,8 +113,8 @@
                 <p class="summary-content">
                   本次检索命中了 {{ allObjectFirstRows.length }} 个根节点（Term: {{ allObjectFirstRows.filter(r => r.root_type === 'Term').length }}, Entity: {{ allObjectFirstRows.filter(r => r.root_type === 'Entity').length }}），
                   共 {{ allObjectFirstRows.reduce((s, r) => s + (r.facts?.length || 0), 0) }} 条关联事实。Term 优先排在前面。
-                  <template v-if="searchTimings.object_s || searchTimings.term_s">
-                    耗时：Object搜索 {{ searchTimings.object_s.toFixed(2) }}s，Term搜索 {{ searchTimings.term_s.toFixed(2) }}s。
+                  <template v-if="searchTimings.object_s">
+                    耗时：{{ searchTimings.object_s.toFixed(2) }}s。
                   </template>
                 </p>
               </div>

@@ -65,13 +65,17 @@ def search_entity_topic_clause():
     用于 Hit-Test 视图，固定 2 跳路径，不走通用 DFS。
 
     POST body:
-        graph_id, query, limit, root_type
+        graph_id, query, limit, root_type (str, 兼容旧接口)
+        或 root_types (list[str], 批量搜索多种根节点类型)
+
+    当 root_types 提供时，一次性计算 embedding 并并行搜索所有类型。
     """
     data = request.get_json() or {}
     graph_id = data.get('graph_id')
     query = data.get('query', '')
     limit = int(data.get('limit', 10))
     root_type = data.get('root_type', 'Entity')
+    root_types = data.get('root_types')  # 新参数: ['Entity', 'Term']
 
     if not graph_id:
         return jsonify({"success": False, "error": "graph_id is required"}), 400
@@ -85,11 +89,15 @@ def search_entity_topic_clause():
 
     try:
         tools = GraphToolsService(storage=storage)
-        result = tools.search_term_entity_to_clause(
+
+        # 确定要搜索的根节点类型列表
+        types_to_search = root_types if root_types else [root_type]
+
+        result = tools.search_term_entity_to_clause_batch(
             graph_id=graph_id,
             query=query,
             limit=limit,
-            root_type=root_type,
+            root_types=types_to_search,
         )
         result_dict = result.to_dict() if hasattr(result, 'to_dict') else result
         logger.info(f"[DEBUG] search_entity_topic_clause result: rows={len(result_dict.get('rows', []))}, data={json.dumps(result_dict, ensure_ascii=False)[:500]}")

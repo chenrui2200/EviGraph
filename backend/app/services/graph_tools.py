@@ -11,8 +11,9 @@ Core Retrieval Tools (Optimized):
 """
 
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..utils.logger import get_logger
 from ..utils.llm_client import LLMClient
@@ -1663,6 +1664,258 @@ Your response:"""
                 total_facts=0,
             )
 
+    def search_term_entity_to_clause_batch(
+        self,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+        root_types: List[str] = None,
+    ) -> ObjectFirstSearchResult:
+        """
+        批量路径检索：一次请求同时搜索多种根节点类型（Entity/Term）。
+
+        检索路径：
+        - Entity: Entity ←MENTIONS→ Topic ←HAS_TOPIC← Clause
+        - Term:   Term ←MENTIONS→ Topic ←HAS_TOPIC← Clause
+                  或  Term -DEFINES→ Clause (直连)
+
+        优化：
+        1. 单次请求共享 embedding 计算
+        2. 路径查询与 Clause 节点数据合并为单次 Cypher
+        3. PDF 信息直接从 Clause 节点属性提取，不做 Episode 回退
+        """
+        if root_types is None:
+            root_types = ["Entity", "Term"]
+        valid_types = [t for t in root_types if t in ("Entity", "Term")]
+        if not valid_types:
+            valid_types = ["Entity"]
+
+        logger.info(f"Batch search: graph_id={graph_id}, query={query[:50]}..., types={valid_types}")
+
+        try:
+            # Step 1: 搜索根节点
+            all_root_nodes: List[Dict[str, Any]] = []
+            # 并行搜索所有根节点类型
+            def _search_type(root_type: str) -> List[Dict[str, Any]]:
+                if root_type == "Term":
+                    nodes = self.storage.search_term_nodes(
+                        graph_id=graph_id, query=query, limit=limit,
+                    )
+                else:
+                    nodes = self.storage.search_object_nodes(
+                        graph_id=graph_id, query=query, limit=limit,
+                    )
+                for n in nodes:
+                    n["_root_type"] = root_type
+                return nodes
+
+            with ThreadPoolExecutor(max_workers=len(valid_types)) as executor:
+                futures = {executor.submit(_search_type, rt): rt for rt in valid_types}
+                for future in as_completed(futures):
+                    all_root_nodes.extend(future.result())
+
+            if not all_root_nodes:
+                return ObjectFirstSearchResult(query=query, rows=[], total_objects=0, total_facts=0)
+
+            root_uuids = [n.get("uuid") for n in all_root_nodes if n.get("uuid")]
+            logger.info(f"Batch search found {len(root_uuids)} root nodes ({valid_types})")
+
+            # Step 2: 单次查询路径 + Clause 节点完整数据（含 PDF 信息）
+            paths_map, clause_nodes_map = self.storage.get_entity_topic_clause_paths(
+                root_uuids, graph_id, include_clause_data=True,
+            )
+
+            # Step 3: 构建 ObjectFirstRow
+            term_rows = []
+            entity_rows = []
+            seen_fact_texts: set = set()
+
+            for root_node in all_root_nodes:
+                root_uuid = root_node.get("uuid", "")
+                root_type = root_node.get("_root_type", "Entity")
+                if not root_uuid:
+                    continue
+
+                root_score = root_node.get("score", 0.0)
+                relevance_score = root_score * 100
+
+                paths = paths_map.get(root_uuid, [])
+                if not paths:
+                    continue
+
+                traversal_nodes: List[ObjectPathNode] = []
+                traversal_edges: List[ObjectPathEdge] = []
+                facts: List[Dict[str, Any]] = []
+
+                traversal_nodes.append(ObjectPathNode(
+                    uuid=root_uuid,
+                    name=root_node.get("name", ""),
+                    labels=root_node.get("labels", []),
+                    summary=root_node.get("summary", ""),
+                    depth=0,
+                ))
+
+                # 按 topic 分组
+                topic_groups: Dict[str, Tuple[str, List[str]]] = {}
+                for path in paths:
+                    topic_uuid = path.get("topic_uuid")
+                    clause_uuid = path.get("clause_uuid")
+                    if clause_uuid and topic_uuid:
+                        if topic_uuid not in topic_groups:
+                            topic_groups[topic_uuid] = (topic_uuid, [])
+                        topic_groups[topic_uuid][1].append(clause_uuid)
+
+                for group_key, (topic_uuid, clause_list) in topic_groups.items():
+                    # Topic 节点
+                    traversal_nodes.append(ObjectPathNode(
+                        uuid=topic_uuid, name="Topic", labels=["Topic"], summary="", depth=1,
+                    ))
+                    traversal_edges.append(ObjectPathEdge(
+                        uuid=f"{topic_uuid}-{root_uuid}", name="MENTIONS",
+                        fact="提及实体", source_node_uuid=topic_uuid,
+                        target_node_uuid=root_uuid, depth=0,
+                    ))
+
+                    for clause_uuid in clause_list:
+                        clause_data = clause_nodes_map.get(clause_uuid, {})
+                        clause_name = clause_data.get("name", "") or f"Clause-{clause_uuid[:8]}"
+                        clause_labels = clause_data.get("labels", [])
+                        clause_summary = clause_data.get("summary", "") or clause_data.get("data", "")
+
+                        traversal_nodes.append(ObjectPathNode(
+                            uuid=clause_uuid, name=clause_name, labels=clause_labels,
+                            summary=clause_summary, depth=2,
+                        ))
+                        traversal_edges.append(ObjectPathEdge(
+                            uuid=f"{clause_uuid}-{topic_uuid}", name="HAS_TOPIC",
+                            fact="条款关联主题", source_node_uuid=clause_uuid,
+                            target_node_uuid=topic_uuid, depth=1,
+                        ))
+
+                        # PDF 信息直接从 Clause 节点属性提取（无额外 DB 查询）
+                        pdf_info = self._extract_clause_pdf_info(clause_data)
+
+                        fact_text = f"条款: {clause_name}\n{clause_summary}" if clause_summary else f"条款: {clause_name}"
+                        norm = self.normalize_text(fact_text)
+                        if norm and norm not in seen_fact_texts:
+                            seen_fact_texts.add(norm)
+                            fact_entry: Dict[str, Any] = {
+                                "uuid": clause_uuid,
+                                "text": fact_text,
+                                "original_text": clause_summary,
+                                "source": pdf_info.get("source") or "Graph",
+                                "page": pdf_info.get("page"),
+                                "bbox": pdf_info.get("bbox"),
+                                "page_width": pdf_info.get("page_width"),
+                                "page_height": pdf_info.get("page_height"),
+                                "graph_id": graph_id,
+                                "source_node_uuid": clause_uuid,
+                                "target_node_uuid": root_uuid,
+                                "relation_name": "HAS_TOPIC",
+                                "traversal_depth": 2,
+                                "similarity_score": 0.0,
+                            }
+                            if pdf_info.get("pdf_bboxes"):
+                                fact_entry["pdf_bboxes"] = pdf_info["pdf_bboxes"]
+                            facts.append(fact_entry)
+
+                if not facts:
+                    continue
+
+                obj_detail: Dict[str, Any] = {
+                    "uuid": root_uuid,
+                    "name": root_node.get("name", ""),
+                    "labels": root_node.get("labels", []),
+                    "summary": root_node.get("summary", ""),
+                    "pdf_info": {},
+                    "graph_id": graph_id,
+                }
+
+                row = ObjectFirstRow(
+                    object_node=obj_detail,
+                    traversal_paths=traversal_nodes,
+                    traversal_edges=traversal_edges,
+                    facts=facts,
+                    relevance_score=relevance_score,
+                )
+
+                # 根节点 PDF 定位（从第一个 fact 继承）
+                first_fact = facts[0]
+                if first_fact.get("pdf_bboxes"):
+                    fb = first_fact["pdf_bboxes"]
+                    first_bbox = fb[0]
+                    if len(first_bbox) >= 5:
+                        obj_detail["pdf_info"] = {
+                            "source": first_fact.get("source"),
+                            "page": first_bbox[0],
+                            "bbox": [first_bbox[1], first_bbox[2], first_bbox[3], first_bbox[4]],
+                            "page_width": first_fact.get("page_width"),
+                            "page_height": first_fact.get("page_height"),
+                            "pdf_bboxes": fb,
+                        }
+
+                if root_type == "Term":
+                    term_rows.append(row)
+                else:
+                    entity_rows.append(row)
+
+            # Term 优先，按 facts 数量排序
+            term_rows.sort(key=lambda r: len(r.facts), reverse=True)
+            entity_rows.sort(key=lambda r: len(r.facts), reverse=True)
+            all_rows = term_rows[:limit] + entity_rows[:limit]
+
+            logger.info(
+                f"Batch search complete: {len(all_rows)} rows "
+                f"(Term={len(term_rows[:limit])}, Entity={len(entity_rows[:limit])}), "
+                f"total facts={sum(len(r.facts) for r in all_rows)}"
+            )
+
+            return ObjectFirstSearchResult(
+                query=query,
+                rows=all_rows,
+                total_objects=len(all_rows),
+                total_facts=sum(len(r.facts) for r in all_rows),
+            )
+
+        except Exception as e:
+            logger.error(f"Batch search failed: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return ObjectFirstSearchResult(query=query, rows=[], total_objects=0, total_facts=0)
+
+    @staticmethod
+    def _extract_clause_pdf_info(clause_data: Dict[str, Any]) -> Dict[str, Any]:
+        """从 Clause 节点属性直接提取 PDF 信息（无 DB 查询）。"""
+        # pdf_bboxes 可能是 JSON 字符串或列表
+        pdf_bboxes_raw = clause_data.get("pdf_bboxes")
+        pdf_bboxes = None
+        if pdf_bboxes_raw:
+            if isinstance(pdf_bboxes_raw, str):
+                try:
+                    pdf_bboxes = json.loads(pdf_bboxes_raw)
+                except (json.JSONDecodeError, TypeError):
+                    pdf_bboxes = None
+            elif isinstance(pdf_bboxes_raw, list):
+                pdf_bboxes = pdf_bboxes_raw
+
+        page = clause_data.get("pdf_page") or clause_data.get("page")
+        bbox = clause_data.get("pdf_bbox") or clause_data.get("bbox")
+        source = clause_data.get("pdf_source") or clause_data.get("source")
+
+        # 从 pdf_bboxes 提取 page/bbox（更精确）
+        if pdf_bboxes and len(pdf_bboxes) > 0 and len(pdf_bboxes[0]) >= 5:
+            page = pdf_bboxes[0][0]
+            bbox = pdf_bboxes[0][1:5]
+
+        return {
+            "source": source,
+            "page": page,
+            "bbox": bbox,
+            "page_width": clause_data.get("pdf_page_width") or clause_data.get("page_width"),
+            "page_height": clause_data.get("pdf_page_height") or clause_data.get("page_height"),
+            "pdf_bboxes": pdf_bboxes,
+        }
+
     def search_term_entity_to_clause(
         self,
         graph_id: str,
@@ -1781,6 +2034,10 @@ Your response:"""
                         if topic_uuid not in topic_to_clauses_map:
                             topic_to_clauses_map[topic_uuid] = []
                         topic_to_clauses_map[topic_uuid].append(clause_uuid)
+
+                # 跳过没有 Entity→Topic→Clause 路径的根节点
+                if not topic_to_clauses_map:
+                    continue
 
                 # 遍历 Topic → Clause 路径
                 for topic_uuid, clause_list in topic_to_clauses_map.items():
@@ -2335,6 +2592,7 @@ Your response:"""
     def _batch_get_node_pdf_info(
         self,
         node_uuids: List[str],
+        pre_fetched_nodes: Dict[str, Dict[str, Any]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """
         批量获取多个节点的 PDF 定位信息。
@@ -2343,6 +2601,7 @@ Your response:"""
 
         Args:
             node_uuids: 节点 UUID 列表
+            pre_fetched_nodes: 已获取的节点数据（避免重复 DB 查询）
 
         Returns:
             Dict[node_uuid -> pdf_info dict]
@@ -2352,12 +2611,15 @@ Your response:"""
         if not node_uuids:
             return result
 
-        # Step 1: Batch fetch all nodes
-        try:
-            nodes_map = self.storage.get_nodes_batch(node_uuids)
-        except Exception as e:
-            logger.debug(f"Batch get nodes for PDF info failed: {e}")
-            nodes_map = {}
+        # Step 1: 使用已获取的节点数据，或重新查询
+        if pre_fetched_nodes is not None:
+            nodes_map = pre_fetched_nodes
+        else:
+            try:
+                nodes_map = self.storage.get_nodes_batch(node_uuids)
+            except Exception as e:
+                logger.debug(f"Batch get nodes for PDF info failed: {e}")
+                nodes_map = {}
 
         # Step 1: Quick path — use node's own pdf_* properties if bbox is available
         complete_uuids: List[str] = []
@@ -2426,45 +2688,27 @@ Your response:"""
             else:
                 partial_uuids.append(node_uuid)
 
-        # Step 2: Enrich partial nodes — try node's own episodes first, then Term->Clause
-        for node_uuid in partial_uuids:
-            if node_uuid in result:
-                continue  # already complete from Step 1
-            pdf_info: Dict[str, Any] = {
-                "source": None, "page": None, "bbox": None,
-                "page_width": None, "page_height": None, "episode_text": None,
-            }
+        # Step 2: Enrich partial nodes — batch query instead of per-node loops
+        if partial_uuids:
             try:
-                # Try node's own episodes (MENTIONS relationship)
-                node_eps = self.storage.get_node_episodes(node_uuid, limit=1)
-                if node_eps:
-                    ep = node_eps[0]
-                    meta = ep.get("metadata", {})
-                    pdf_info.update({
-                        "source": ep.get("source") or meta.get("source"),
-                        "page": ep.get("page") or meta.get("page"),
-                        "bbox": meta.get("bbox"),
-                        "page_width": meta.get("page_width") or meta.get("pageWidth"),
-                        "page_height": meta.get("page_height") or meta.get("pageHeight"),
-                        "episode_text": ep.get("text"),
-                    })
-                else:
-                    # Term nodes: follow DEFINES to find Clause, then get its episodes
-                    clause_eps = self.storage.get_term_clause_episodes(node_uuid, limit=1)
-                    if clause_eps:
-                        clause_ep = clause_eps[0]
-                        meta = clause_ep.get("metadata", {})
-                        pdf_info.update({
-                            "source": clause_ep.get("source") or meta.get("source"),
-                            "page": clause_ep.get("page") or meta.get("page"),
-                            "bbox": meta.get("bbox"),
-                            "page_width": meta.get("page_width") or meta.get("pageWidth"),
-                            "page_height": meta.get("page_height") or meta.get("pageHeight"),
-                            "episode_text": clause_ep.get("text"),
-                        })
-            except Exception:
-                pass
-            result[node_uuid] = pdf_info
+                batch_results = self.storage.batch_get_node_pdf_info(partial_uuids)
+                for node_uuid, pdf_data in batch_results.items():
+                    if node_uuid not in result:
+                        result[node_uuid] = {
+                            "source": None, "page": None, "bbox": None,
+                            "page_width": None, "page_height": None, "episode_text": None,
+                        }
+                        result[node_uuid].update(pdf_data)
+            except Exception as e:
+                logger.debug(f"Batch PDF info fallback failed: {e}")
+
+        # Fill remaining partial_uuids not found by batch query
+        for node_uuid in partial_uuids:
+            if node_uuid not in result:
+                result[node_uuid] = {
+                    "source": None, "page": None, "bbox": None,
+                    "page_width": None, "page_height": None, "episode_text": None,
+                }
 
         return result
 

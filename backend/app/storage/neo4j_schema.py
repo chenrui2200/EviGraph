@@ -113,6 +113,38 @@ CREATE INDEX entity_name_lower IF NOT EXISTS
 FOR (n:Entity) ON (n.name_lower)
 """
 
+# Topic indexes
+CREATE_TOPIC_UUID_CONSTRAINT = """
+CREATE CONSTRAINT topic_uuid IF NOT EXISTS
+FOR (t:Topic) REQUIRE t.uuid IS UNIQUE
+"""
+
+CREATE_TOPIC_GRAPH_ID_INDEX = """
+CREATE INDEX topic_graph_id IF NOT EXISTS
+FOR (t:Topic) ON (t.graph_id)
+"""
+
+CREATE_TOPIC_CLAUSE_ID_INDEX = """
+CREATE INDEX topic_clause_id IF NOT EXISTS
+FOR (t:Topic) ON (t.clause_id)
+"""
+
+# Clause indexes
+CREATE_CLAUSE_UUID_CONSTRAINT = """
+CREATE CONSTRAINT clause_uuid IF NOT EXISTS
+FOR (c:Clause) REQUIRE c.uuid IS UNIQUE
+"""
+
+CREATE_CLAUSE_GRAPH_ID_INDEX = """
+CREATE INDEX clause_graph_id IF NOT EXISTS
+FOR (c:Clause) ON (c.graph_id)
+"""
+
+CREATE_CLAUSE_CLAUSE_ID_INDEX = """
+CREATE INDEX clause_clause_id IF NOT EXISTS
+FOR (c:Clause) ON (c.clause_id)
+"""
+
 # All schema queries (as functions or constants)
 def get_all_schema_queries(dimension: int = 768) -> list:
     return [
@@ -121,6 +153,8 @@ def get_all_schema_queries(dimension: int = 768) -> list:
         CREATE_EPISODE_UUID_CONSTRAINT,
         CREATE_DOCUMENT_UUID_CONSTRAINT,
         CREATE_PAGE_UUID_CONSTRAINT,
+        CREATE_TOPIC_UUID_CONSTRAINT,
+        CREATE_CLAUSE_UUID_CONSTRAINT,
         CREATE_ENTITY_GRAPH_ID_INDEX,
         CREATE_ENTITY_NAME_LOWER_INDEX,
         CREATE_DOC_GRAPH_ID_INDEX,
@@ -128,6 +162,10 @@ def get_all_schema_queries(dimension: int = 768) -> list:
         CREATE_EPISODE_GRAPH_ID_INDEX,
         CREATE_EPISODE_SOURCE_INDEX,
         CREATE_EPISODE_CHUNK_INDEX,
+        CREATE_TOPIC_GRAPH_ID_INDEX,
+        CREATE_TOPIC_CLAUSE_ID_INDEX,
+        CREATE_CLAUSE_GRAPH_ID_INDEX,
+        CREATE_CLAUSE_CLAUSE_ID_INDEX,
         get_entity_vector_index_query(dimension),
         get_relation_vector_index_query(dimension),
         get_episode_vector_index_query(dimension),
