@@ -2364,7 +2364,7 @@ class Neo4jStorage(GraphStorage):
                     clause_id = metadata.get("clause_id", "")
                     if clause_id:
                         # 创建 Clause 节点，同时 inline 创建 Topic/Entity（Topic/Entity 创建已合并到 _create_clause_entity_only）
-                        self._create_clause_entity_only(tx, graph_id, episode_id, clause_id, content, embedding, metadata)
+                        self._create_clause_entity_only(tx, graph_id, episode_id, clause_id, content, embedding, metadata, now)
                 elif chunk_type == "section":
                     title = metadata.get("title", content[:50])
                     self._create_section_entity(tx, graph_id, episode_id, title, metadata, embedding)
@@ -2640,7 +2640,8 @@ class Neo4jStorage(GraphStorage):
 
     def _create_clause_entity_only(self, tx, graph_id: str, episode_id: str,
                                    clause_id: str, content: str,
-                                   embedding: List[float], metadata: Dict):
+                                   embedding: List[float], metadata: Dict,
+                                   now: str):
         """为Clause创建节点（不创建Component/Action/Condition实体）
 
         当没有 intelligent_chunks 数据时使用此方法。
