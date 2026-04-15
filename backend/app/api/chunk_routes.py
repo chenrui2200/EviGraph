@@ -42,6 +42,7 @@ def intelligent_chunk():
         data = request.get_json() or {}
         project_id = data.get('project_id')
         reset = data.get('reset', False)
+        chapter_patterns = data.get('chapter_patterns', ['x.x'])  # 默认 x.x 模式
 
         if not project_id:
             return jsonify({"success": False, "error": "请提供 project_id"}), 400
@@ -152,7 +153,7 @@ def intelligent_chunk():
                 task_mgr.update_task(task_id, status=TaskStatus.PROCESSING, progress=0, message="🚀 开始 LLM 语义分块...")
 
                 chunker = LLMDrivenChunker(progress_callback=progress_callback)
-                result = chunker.chunk(text_chunks, progress_callback, checkpoint=checkpoint, project_id=project_id, md_content=md_content, chunks_data=chunks_data, pdf_path=pdf_path)
+                result = chunker.chunk(text_chunks, progress_callback, checkpoint=checkpoint, project_id=project_id, md_content=md_content, chunks_data=chunks_data, pdf_path=pdf_path, chapter_patterns=chapter_patterns)
 
                 chunks_result = None
                 save_success = False

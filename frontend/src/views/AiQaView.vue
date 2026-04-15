@@ -990,7 +990,7 @@ const loadProjects = async () => {
     const res = await getProjectList()
     if (res.success) {
       projects.value = res.data?.projects || []
-      const projectId = (!props.id?.startsWith('app_') && props.id !== 'default') ? props.id : null
+      const projectId = (!props.id?.startsWith('app_') && props.id !== 'default' && props.id !== 'new') ? props.id : null
       if (projectId) {
         const currentProj = projects.value.find(p => p.project_id === projectId)
         if (currentProj && currentProj.graph_id && !workflowData.value.selectedGraphIds.includes(currentProj.graph_id)) {
@@ -1283,7 +1283,7 @@ const loadAppConfig = async (id) => {
       }
 
       // 额外检查：如果路由带了 projectId，确保该项目最新 graph_id 被选中
-      const projectId = (!props.id?.startsWith('app_') && props.id !== 'default') ? props.id : null
+      const projectId = (!props.id?.startsWith('app_') && props.id !== 'default' && props.id !== 'new') ? props.id : null
       if (projectId) {
         const proj = projects.value.find(p => p.project_id === projectId)
         if (proj?.graph_id && !workflowData.value.selectedGraphIds.includes(proj.graph_id)) {

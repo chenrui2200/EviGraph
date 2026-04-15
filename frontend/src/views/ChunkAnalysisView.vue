@@ -496,6 +496,46 @@
       </div>
     </div>
 
+    <!-- 章节匹配模式选择弹窗 -->
+    <div v-if="showChapterPatternModal" class="modal-overlay" @click.self="showChapterPatternModal = false">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>选择章节匹配模式</h3>
+          <button class="modal-close" @click="showChapterPatternModal = false">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-desc">重新分析将清除已有数据。请选择作为一级章节的匹配方式（可多选），满足任一条件的都作为父节点：</p>
+          <div class="method-options">
+            <label class="method-option" :class="{ active: selectedChapterPatterns.includes('x') }">
+              <input type="checkbox" :checked="selectedChapterPatterns.includes('x')" @change="togglePattern('x')" />
+              <div class="method-content">
+                <span class="method-name">一级模式 (x)</span>
+                <span class="method-desc">如 "3"、"4"，匹配纯数字章节编号</span>
+              </div>
+            </label>
+            <label class="method-option" :class="{ active: selectedChapterPatterns.includes('x.x') }">
+              <input type="checkbox" :checked="selectedChapterPatterns.includes('x.x')" @change="togglePattern('x.x')" />
+              <div class="method-content">
+                <span class="method-name">二级模式 (x.x)</span>
+                <span class="method-desc">如 "3.1"、"3.2"，匹配两位数字章节编号</span>
+              </div>
+            </label>
+            <label class="method-option" :class="{ active: selectedChapterPatterns.includes('x.x.x') }">
+              <input type="checkbox" :checked="selectedChapterPatterns.includes('x.x.x')" @change="togglePattern('x.x.x')" />
+              <div class="method-content">
+                <span class="method-name">三级模式 (x.x.x)</span>
+                <span class="method-desc">如 "3.1.1"、"3.1.2"，匹配三位数字章节编号</span>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="modal-btn cancel" @click="showChapterPatternModal = false">取消</button>
+          <button class="modal-btn confirm" @click="confirmChapterPattern">确认并开始分析</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 实时日志抽屉 -->
     <div class="log-drawer" :class="{ open: logDrawerOpen }">
       <div class="log-drawer-header" @click="logDrawerOpen = !logDrawerOpen">
@@ -601,6 +641,10 @@ const logScrollEl = ref(null)
 // 重新标注模态窗口
 const showParseMethodModal = ref(false)
 const selectedParseMethod = ref('ocr')
+
+// 章节匹配模式选择弹窗
+const showChapterPatternModal = ref(false)
+const selectedChapterPatterns = ref(['x.x'])  // 多选模式
 
 // 实体编辑
 const editingClauseId = ref(null)
@@ -1048,16 +1092,38 @@ async function doReAnnotate(parseMethod) {
   }
 }
 
+function togglePattern(pattern) {
+  const idx = selectedChapterPatterns.value.indexOf(pattern)
+  if (idx >= 0) {
+    selectedChapterPatterns.value.splice(idx, 1)
+  } else {
+    selectedChapterPatterns.value.push(pattern)
+  }
+}
+
 async function handleResetChunking() {
   if (starting.value) return
-  if (!confirm('确认重置？所有已有的分析数据将被清除。')) return
+  // 弹出章节匹配模式选择框
+  selectedChapterPatterns.value = ['x.x']  // 默认值
+  showChapterPatternModal.value = true
+}
 
+async function confirmChapterPattern() {
+  if (selectedChapterPatterns.value.length === 0) {
+    alert('请至少选择一种匹配模式')
+    return
+  }
+  showChapterPatternModal.value = false
   starting.value = true
   hasAutoExpanded.value = false
-  realtimeLogs.value.push('🔄 重置并重新分析...')
+  realtimeLogs.value.push(`🔄 重置并重新分析 (模式: ${selectedChapterPatterns.value.join(', ')})...`)
 
   try {
-    const res = await startChunking({ project_id: currentProjectId.value, reset: true })
+    const res = await startChunking({
+      project_id: currentProjectId.value,
+      reset: true,
+      chapter_patterns: selectedChapterPatterns.value
+    })
     if (res.success) {
       taskId.value = res.data.task_id
       analysisStatus.value = 'graph_chunking'

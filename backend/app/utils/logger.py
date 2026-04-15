@@ -8,6 +8,35 @@ import sys
 import logging
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
+import time
+
+
+class SafeRotatingFileHandler(RotatingFileHandler):
+    """
+    Windows-safe RotatingFileHandler.
+
+    On Windows, os.rename() fails with PermissionError when the current log file
+    is still open (which is always the case in a long-running Flask process).
+    This subclass catches the error and retries once after a brief delay,
+    then falls back to skipping rotation rather than crashing.
+    """
+
+    def doRollover(self):
+        if self.stream:
+            self.stream.flush()
+        try:
+            super().doRollover()
+        except PermissionError:
+            # Windows: file still open, retry after brief delay
+            time.sleep(0.5)
+            try:
+                super().doRollover()
+            except PermissionError:
+                # Still locked, skip rotation silently
+                # Re-open stream in case it was closed
+                if not self.stream or self.stream.closed:
+                    self.mode = 'a'
+                    self.stream = self._open()  # type: ignore[assignment]
 
 
 def _ensure_utf8_stdout():
@@ -65,14 +94,20 @@ def setup_logger(name: str = 'mirofish', level: int = logging.DEBUG) -> logging.
 
     # 1. File handler - detailed logs (named by date, with rotation)
     log_filename = datetime.now().strftime('%Y-%m-%d') + '.log'
-    file_handler = RotatingFileHandler(
-        os.path.join(LOG_DIR, log_filename),
-        maxBytes=10 * 1024 * 1024,  # 10MB
-        backupCount=5,
-        encoding='utf-8'
-    )
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(detailed_formatter)
+    try:
+        file_handler = SafeRotatingFileHandler(
+            os.path.join(LOG_DIR, log_filename),
+            maxBytes=10 * 1024 * 1024,  # 10MB
+            backupCount=5,
+            encoding='utf-8'
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(detailed_formatter)
+        logger.addHandler(file_handler)
+    except (PermissionError, OSError) as e:
+        # Windows 上日志文件被占用时，使用控制台 handler 继续运行
+        import warnings
+        warnings.warn(f"无法创建日志文件处理器 ({e})，仅使用控制台输出")
 
     # 2. Console handler - concise logs (INFO and above)
     # NOTE: Don't call _ensure_utf8_stdout() here - it calls sys.stdout.reconfigure()
@@ -82,7 +117,6 @@ def setup_logger(name: str = 'mirofish', level: int = logging.DEBUG) -> logging.
     console_handler.setFormatter(simple_formatter)
 
     # Add handlers
-    logger.addHandler(file_handler)
     logger.addHandler(console_handler)
 
     return logger

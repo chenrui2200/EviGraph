@@ -120,6 +120,7 @@
                 <div :style="s.readyTitle">准备处理 {{ files.length }} 份文档</div>
                 <div :style="s.readyDesc">Knowledge EviGraph 将提取实体、关系，并创建一个支持 PDF 位置映射的可搜索知识图谱。</div>
               </div>
+
             </div>
 
             <div :style="s.btnSection">
@@ -136,6 +137,20 @@
                 <span v-else-if="systemStatus !== 'ok'">系统未就绪 (请检查左侧状态)</span>
                 <span v-else>开始构建知识库</span>
                 <span>→</span>
+              </button>
+            </div>
+
+            <div :style="s.consoleSection">
+              <div class="console-header" :style="s.consoleHeader">
+                <span>>_ 03 / 创建AI应用</span>
+              </div>
+
+              <button
+                :style="s.aiAppBtn"
+                @click="goToAiApp"
+              >
+                <span>创建 AI 应用</span>
+                <span>➝</span>
               </button>
             </div>
           </div>
@@ -235,6 +250,7 @@ const s = reactive({
   readyDesc: { fontSize: '0.85rem', color: '#666', lineHeight: '1.5' },
   btnSection: { padding: '0 20px 20px' },
   startEngineBtn: { width: '100%', background: '#000', color: '#fff', border: 'none', padding: '20px', fontFamily: mono, fontWeight: '700', fontSize: '1.1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', letterSpacing: '1px' },
+  aiAppBtn: { width: '100%', background: '#fff', color: '#000', border: '1px solid #000', padding: '16px 20px', fontFamily: mono, fontWeight: '700', fontSize: '0.9rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', letterSpacing: '0.5px', marginTop: '15px' },
 })
 
 const steps = [
@@ -246,6 +262,10 @@ const steps = [
 ]
 
 const router = useRouter()
+
+const goToAiApp = () => {
+  router.push({ name: 'AiQa', params: { id: 'new' } })
+}
 
 const formData = ref({ simulationRequirement: '' })
 const files = ref([])
@@ -308,6 +328,7 @@ const startSimulation = () => {
     router.push({ name: 'ChunkAnalysis', params: { projectId: 'new' } })
   })
 }
+
 </script>
 
 <!-- Styles loaded from Home.css via import -->

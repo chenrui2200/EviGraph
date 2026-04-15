@@ -1481,7 +1481,8 @@ topic：{topic}
         project_id: Optional[str] = None,
         md_content: Optional[str] = None,
         chunks_data: Optional[List[Dict]] = None,
-        pdf_path: Optional[str] = None
+        pdf_path: Optional[str] = None,
+        chapter_patterns: Optional[List[str]] = None
     ) -> HierarchicalChunkResult:
         """
         主入口：基于 chunks.json 的智能分块
@@ -1500,6 +1501,7 @@ topic：{topic}
             md_content: MinerU 解析的 Markdown 内容（可选，用于兼容）
             chunks_data: chunks.json 数据（核心数据源）
             pdf_path: PDF 文件路径（可选）
+            chapter_patterns: 章节匹配模式列表 (['x', 'x.x', 'x.x.x'])，满足任一模式的 title 都作为一级章节
 
         Returns:
             HierarchicalChunkResult: 包含所有层级分块的结果
@@ -1537,7 +1539,7 @@ topic：{topic}
         source_info = {"source": chunks_data[0].get('source', '') if chunks_data else ''}
 
         # 直接从 chunks_data 构建章节和条款
-        sections_data, clauses_data, chapter_plan = self._build_sections_and_clauses_from_chunks(chunks_data)
+        sections_data, clauses_data, chapter_plan = self._build_sections_and_clauses_from_chunks(chunks_data, chapter_patterns=chapter_patterns)
         chapter_count = len(sections_data)
 
         self.logger.info(f"[LLM分块] ✅ 章节构建完成: {chapter_count} 章节, {len(clauses_data)} 条款")
@@ -1915,102 +1917,75 @@ topic：{topic}
 
     def _build_sections_and_clauses_from_chunks(
         self,
-        chunks_data: List[Dict]
+        chunks_data: List[Dict],
+        chapter_patterns: Optional[List[str]] = None
     ) -> tuple:
         """
-        直接从 chunks.json 构建章节和条款结构。
+        直接从 chunks.json 构建两级章节和条款结构。
 
-        逻辑：
-        1. type=="title" 的 chunk 作为章节标题
-        2. 相邻 title chunk 之间的内容属于前一个章节
-        3. type=="text" 且以 X.Y.Z 格式开头的作为条款
-        4. 小章节信号（如 1.0.1）标记为 sub_chapter
+        逻辑（基于用户选择的 chapter_patterns 多选模式）：
+        - 满足任一模式的 title 都作为一级章节
+        - x 模式: 匹配 "^\\d+\\s+(.+)" 如 "3 术语"
+        - x.x 模式: 匹配 "^\\d+\\.\\d+\\s+(.+)" 如 "3.1 电气..."
+        - x.x.x 模式: 匹配 "^\\d+\\.\\d+\\.\\d+\\s+(.+)" 如 "3.1.1 导体..."
+        - 所有条款（不满足章节模式）都挂在前面的一级章节下作为二级
 
         Args:
             chunks_data: chunks.json 数据列表
+            chapter_patterns: 章节匹配模式列表，默认 ['x.x']
 
         Returns:
             (sections, clauses, chapter_plan)
-            - sections: SectionSegment 列表
-            - clauses: ClauseSegment 列表（含 parent_chapter 关联）
+            - sections: SectionSegment 列表（一级章节）
+            - clauses: ClauseSegment 列表（含 parent_chapter 关联，作为二级）
             - chapter_plan: ChapterPlan 列表（用于检查点）
         """
         import re
+
+        if chapter_patterns is None:
+            chapter_patterns = ['x.x']
 
         sections = []
         clauses = []
         chapter_plan = []
 
-        # 用于匹配大章节标题（如 "2 术语"）
-        CHAPTER_PATTERN = re.compile(r'^(\d+(?:\.\d+)?)\s+(.+)')
-
-        # 用于匹配附录标题（如 "附录A"、"附录 A"、"附录A 系数k值"）
-        APPENDIX_PATTERN = re.compile(r'^附录[A-Z](?:\s+(.+))?$')
-
         # 编码修复：尝试将乱码内容转换为正确的中文
         def _fix_encoding(content: str) -> str:
-            """
-            修复 MinerU 解析产生的编码问题。
-            MinerU 返回的 GBK 编码内容被当作 UTF-8 写入文件，导致中文显示为乱码。
-            此函数尝试用 GBK 重新解码 UTF-8 字节来修复。
-            """
             if not content or not isinstance(content, str):
                 return content
             try:
-                # 将 content 编码为 UTF-8 字节，再用 GBK 解码
                 fixed = content.encode('utf-8').decode('gbk')
                 return fixed
             except (UnicodeDecodeError, UnicodeEncodeError):
                 return content
 
-        # 用于匹配条款编号（如 "2.1"、"3.5.2"、"1.0.1"）
+        # 根据 chapter_patterns 生成一级章节匹配正则列表
+        chapter_patterns_config = {
+            'x': re.compile(r'^(\d+)\s+(.+)'),
+            'x.x': re.compile(r'^(\d+\.\d+)\s+(.+)'),
+            'x.x.x': re.compile(r'^(\d+\.\d+\.\d+)\s+(.+)'),
+        }
+
+        # 构建一级章节匹配正则列表
+        chapter_regex_list = []
+        for p in chapter_patterns:
+            if p in chapter_patterns_config:
+                chapter_regex_list.append(chapter_patterns_config[p])
+        if not chapter_regex_list:
+            chapter_regex_list = [chapter_patterns_config['x.x']]
+
+        # 条款匹配正则：匹配任意 X.Y 或 X.Y.Z 格式的条款编号
         CLAUSE_PATTERN = re.compile(r'^(\d+\.\d+(?:\.\d+)?)\s*(.*)')
 
-        # 用于匹配附录条款编号（如 "A.0.7"、"B.1.3"）
+        # 用于匹配附录标题（如 "附录A"）
+        APPENDIX_PATTERN = re.compile(r'^附录[A-Z](?:\s+(.+))?$')
+        # 用于匹配附录条款（如 "A.0.7"）
         APPENDIX_CLAUSE_PATTERN = re.compile(r'^([A-Z]\.\d+(?:\.\d+)?)\s*(.*)')
 
-        # 用于匹配子章节信号（如 "3.1"、"3.1.1"）- 只要有 . 就是子章节
-        SUB_CHAPTER_PATTERN = re.compile(r'^\d+\.\d+')
-
-        current_chapter = None
+        current_chapter = None  # 当前锚点章节
         current_chapter_idx = -1
-
-        # =====================================================================
-        # Fallback：当没有任何 title 块时，创建虚拟章节让所有条款都能挂上来
-        # =====================================================================
-        # 后续遍历中如果识别到真实章节会替换这个虚拟章节
-        virtual_chapter_created = False
-
-        # =====================================================================
-        # Fallback：预先创建虚拟章节，确保即使没有 title 块条款也能挂上来
-        # =====================================================================
-        # 从 source_info 获取文件名作为标题
-        source_name = source_info.get('source', '') if 'source_info' in dir() else ''
-        if not source_name:
-            source_name = chunks_data[0].get('source', '') if chunks_data else ''
-        virtual_title = source_name or '文档内容'
-        virtual_chapter_num = 1.0
-
-        current_chapter = {
-            'chapter_number': virtual_chapter_num,
-            'title': virtual_title,
-            'page_idx': 0,
-            'start_idx': 0,
-            'end_idx': len(chunks_data) - 1,
-            'level': 1,
-            'sub_chapters': []
-        }
-        sections.append(current_chapter)
-        chapter_plan.append(ChapterPlan(
-            chapter_number=virtual_chapter_num,
-            title=virtual_title,
-            start_position=0,
-            end_position=len(chunks_data),
-            status=ChapterStatus.PENDING,
-            chapter_type='normative'
-        ))
-        virtual_chapter_created = True
-        self.logger.info(f"[章节构建] ⏺ [预创建虚拟章节] {virtual_chapter_num}. {virtual_title}")
+        anchor_found = False  # 是否找到过锚点
+        pending_content_clauses = []  # 锚点找到前积累的内容块，等待归类
 
         for i, chunk in enumerate(chunks_data):
             # 兼容多种 chunk 格式
@@ -2040,12 +2015,17 @@ topic：{topic}
                 continue
 
             # 判断是否为章节标题
-            # 策略：type=='title' 且符合章节编号格式（如 "3 电气和导体的选择"）
-            if chunk_type == 'title' and CHAPTER_PATTERN.match(content):
-                m = CHAPTER_PATTERN.match(content)
-                chapter_num_str = m.group(1)
-                title = m.group(2).strip()
-                self.logger.info(f"[章节构建] ✅ 识别到一级标题: page={page_idx}, idx={i}, chapter={chapter_num_str}, title={title!r}")
+            # 策略：type=='title' 且符合任一章节编号格式
+            chapter_m = None
+            if chunk_type == 'title':
+                for regex in chapter_regex_list:
+                    if regex.match(content):
+                        chapter_m = regex.match(content)
+                        break
+            if chapter_m:
+                chapter_num_str = chapter_m.group(1)
+                title = chapter_m.group(2).strip()
+                self.logger.info(f"[章节构建] ✅ 识别到锚点标题: page={page_idx}, idx={i}, chapter={chapter_num_str}, title={title!r}, patterns={chapter_patterns}")
 
                 # 转换章节编号
                 parts = chapter_num_str.split('.')
@@ -2054,56 +2034,43 @@ topic：{topic}
                 else:
                     chapter_num = float(chapter_num_str)
 
-                # 检查是否是小章节信号（如 1.0.1）作为条款而非章节
-                if SUB_CHAPTER_PATTERN.match(chapter_num_str):
-                    # 这是一个小章节信号，实际上应该是条款
-                    # 不创建新章节，保留 current_chapter
-                    pass
-                else:
-                    # 创建新章节，清除虚拟章节标记和之前积累的 clauses
-                    virtual_chapter_created = False
-                    clauses.clear()  # 清除虚拟章节下积累的 clauses
-                    sections.clear()  # 清除虚拟章节
-                    chapter_plan.clear()  # 清除虚拟章节 plan
-                    current_chapter_idx += 1
-                    current_chapter = {
-                        'chapter_number': chapter_num,
-                        'title': title,
-                        'page_idx': page_idx,
-                        'start_idx': i,
-                        'end_idx': i,
-                        'level': 1 if len(parts) == 1 else 2,
-                        'sub_chapters': []
-                    }
-                    sections.append(current_chapter)
-                    chapter_plan.append(ChapterPlan(
-                        chapter_number=chapter_num,
-                        title=title,
-                        start_position=i,
-                        end_position=len(chunks_data),
-                        status=ChapterStatus.PENDING,
-                        chapter_type='normative'
-                    ))
+                # 创建新章节（锚点）
+                current_chapter_idx += 1
+                current_chapter = {
+                    'chapter_number': chapter_num,
+                    'title': title,
+                    'page_idx': page_idx,
+                    'start_idx': i,
+                    'end_idx': i,
+                    'level': 1,
+                    'sub_chapters': []
+                }
+                sections.append(current_chapter)
+                chapter_plan.append(ChapterPlan(
+                    chapter_number=chapter_num,
+                    title=title,
+                    start_position=i,
+                    end_position=len(chunks_data),
+                    status=ChapterStatus.PENDING,
+                    chapter_type='normative'
+                ))
 
-                    self.logger.info(f"[章节构建] {chapter_num}. {title} (page={page_idx})")
-                continue
+                self.logger.info(f"[章节构建] {chapter_num}. {title} (page={page_idx})")
+                anchor_found = True  # 标记已找到锚点
+                continue  # 锚点 title 不作为 clause，只作为章节节点
 
-            # 判断是否为附录标题（如 "附录A"、"附录A 系数k值"）
+            # 判断是否为附录标题（如 "附录A"）
             if chunk_type == 'title' and APPENDIX_PATTERN.match(content):
                 m = APPENDIX_PATTERN.match(content)
-                # m.group(0) = "附录A" 或 "附录A 系数k值"，索引 2 即字母 "A"
                 appendix_letter = m.group(0)[2]
-                # m.group(1) = "系数k值"（可选部分，无则标题同字母）
                 title = m.group(1).strip() if m.group(1) else appendix_letter
                 self.logger.info(f"[章节构建] ✅ 识别到附录标题: page={page_idx}, idx={i}, appendix={appendix_letter}, title={title!r}")
 
-                # 创建附录章节（使用字母编号，chapter_number 存储为负数或特殊值以区分）
-                # 使用 100 + ord(letter) - ord('A') 作为章节编号，附录A=165, 附录B=166...
                 chapter_num = 200 + ord(appendix_letter) - ord('A')
                 current_chapter_idx += 1
                 current_chapter = {
                     'chapter_number': chapter_num,
-                    'chapter_letter': appendix_letter,  # 保存原始字母
+                    'chapter_letter': appendix_letter,
                     'title': f"附录{appendix_letter}" + (f" {title}" if title else ""),
                     'page_idx': page_idx,
                     'start_idx': i,
@@ -2123,103 +2090,15 @@ topic：{topic}
                 ))
 
                 self.logger.info(f"[章节构建] 附录 {appendix_letter}: {title} (page={page_idx})")
+                anchor_found = True  # 标记已找到锚点
                 continue
 
-            # 如果 type=='title' 但不符合编号格式（如 "前 言"、"目 录"），跳过
-            # 不影响 current_chapter，条款仍归属到前一个有效章节
-            elif chunk_type == 'title' and not CHAPTER_PATTERN.match(content):
+            # 如果 type=='title' 但不符合任一编号格式（如 "前 言"、"目 录"），跳过
+            if chunk_type == 'title' and chapter_m is None:
                 self.logger.info(f"[章节构建] ⏭️ type=title 但无章节编号，跳过: page={page_idx}, idx={i}, content={content[:50]!r}")
-            elif chunk_type == 'title':
-                # X.0.Y 格式的术语标题（如 "2.0.1 预期接触电压"），应作为条款处理
-                term_title_m = re.match(r'^(\d+\.\d+\.\d+)\s+(.+)', content)
-                if term_title_m and current_chapter is not None:
-                    clause_id = term_title_m.group(1)
-                    clause_title = term_title_m.group(2).strip()[:80]
-                    parts = clause_id.split('.')
-                    is_sub_chapter = len(parts) == 3 and parts[2] == '0'
-                    # 收集术语定义：检查下一个 chunk 是否为同页 text（定义内容）
-                    term_definition = content
-                    next_chunk = chunks_data[i + 1] if i + 1 < len(chunks_data) else None
-                    if (next_chunk and next_chunk.get('page_idx') == page_idx
-                            and next_chunk.get('type') == 'text'):
-                        term_definition = content + '\n' + (next_chunk.get('content') or '').strip()
-                    clause = ClauseSegment(
-                        clause_id=clause_id,
-                        clause_title=clause_title,
-                        content=term_definition,
-                        paragraphs=[],
-                        requirement_type=RequirementType.RECOMMENDED,
-                        applicable_systems=[],
-                        cross_refs=[],
-                        source=source,
-                        page=page_idx,
-                        triplets=[],
-                        clause_items=[],
-                        is_term_definition=True,
-                        terms=[{"term_name": clause_title, "definition": term_definition.split('\n', 1)[-1].strip()}],
-                        formula_content=None,
-                        semantics_enriched=False,
-                        parent_chapter=current_chapter['chapter_number'],
-                        referenced_clauses=[],
-                        referenced_standards=[],
-                        metadata={
-                            "chunk_type": chunk_type,
-                            "chunk_id": chunk_id,
-                            "parent_chapter": current_chapter['chapter_number'],
-                            "parent_chapter_title": current_chapter['title'],
-                            "page_idx": page_idx,
-                            "bbox_viewport": bbox_viewport,
-                            "is_sub_chapter": is_sub_chapter,
-                            "entities": []
-                        }
-                    )
-                    clauses.append(clause)
-                    if is_sub_chapter:
-                        current_chapter['sub_chapters'].append(clause_id)
-                    self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx}) [术语条款]")
-                    current_chapter['end_idx'] = i
-                else:
-                    self.logger.debug(f"[章节构建] 跳过无编号标题: {content[:30]}")
                 continue
 
-            # 如果没有当前章节，检查 text 块是否本身是章节标题（MinerU 将章节标题也识别为 text）
-            # 条件：匹配 CLAUSE_PATTERN 且只有 1-2 段（如 "5.12.5标题" 是章节；"5.12.5.1标题" 是条款）
-            if current_chapter is None and chunk_type == 'text':
-                clause_m = CLAUSE_PATTERN.match(content)
-                if clause_m:
-                    chapter_num_str = clause_m.group(1)
-                    parts = chapter_num_str.split('.')
-                    # 只有 1-2 段的是章节（如 5.12 或 5.12.5），3段及以上是条款（如 5.12.5.1）
-                    if len(parts) <= 2:
-                        title = clause_m.group(2).strip()
-                        chapter_num = float(chapter_num_str)
-                        virtual_chapter_created = False  # 清除虚拟章节标记
-                        clauses.clear()  # 清除虚拟章节下积累的 clauses
-                        sections.clear()  # 清除虚拟章节
-                        chapter_plan.clear()  # 清除虚拟章节 plan
-                        current_chapter_idx += 1
-                        current_chapter = {
-                            'chapter_number': chapter_num,
-                            'title': title,
-                            'page_idx': page_idx,
-                            'start_idx': i,
-                            'end_idx': i,
-                            'level': 1 if len(parts) == 1 else 2,
-                            'sub_chapters': []
-                        }
-                        sections.append(current_chapter)
-                        chapter_plan.append(ChapterPlan(
-                            chapter_number=chapter_num,
-                            title=title,
-                            start_position=i,
-                            end_position=len(chunks_data),
-                            status=ChapterStatus.PENDING,
-                            chapter_type='normative'
-                        ))
-                        self.logger.info(f"[章节构建] ✅ [text→章节] {chapter_num}. {title} (page={page_idx})")
-                        # 不 continue，继续走下面的条款处理逻辑
-
-            # 如果有当前章节，处理条款
+            # 如果有当前章节（锚点），处理条款；否则积累到待归类列表
             if current_chapter is not None:
                 # 更新章节的结束位置
                 current_chapter['end_idx'] = i
@@ -2236,7 +2115,6 @@ topic：{topic}
                     # 判断条款层级（附录条款不算 sub_chapter）
                     parts = clause_id.split('.')
                     is_appendix_clause = clause_id[0].isalpha()
-                    is_sub_chapter = not is_appendix_clause and len(parts) == 3 and parts[2] == '0'
 
                     # 判断 requirement_type（基于关键词）
                     req_type = RequirementType.RECOMMENDED
@@ -2273,17 +2151,132 @@ topic：{topic}
                             "parent_chapter_title": current_chapter['title'],
                             "page_idx": page_idx,
                             "bbox_viewport": bbox_viewport,
-                            "is_sub_chapter": is_sub_chapter,
+                            "is_sub_chapter": False,
                             "entities": []
                         }
                     )
                     clauses.append(clause)
-
-                    if is_sub_chapter:
-                        current_chapter['sub_chapters'].append(clause_id)
+                    current_chapter['sub_chapters'].append(clause_id)
 
                     clause_type = "附录条款" if is_appendix_clause else "条款"
-                    self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx}) [{clause_type}]")
+                    self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx}) [{clause_type}] [挂载到 {current_chapter['chapter_number']}]")
+                else:
+                    # 非条款内容块（如解释性文字、表格描述等），也挂到当前锚点下
+                    # 生成伪 clause_id：使用锚点编号 + "_content_" + 序号
+                    if chunk_type in ('text', 'table', 'image', 'formula'):
+                        content_clause_id = f"{current_chapter['chapter_number']}_content_{i}"
+                        clause = ClauseSegment(
+                            clause_id=content_clause_id,
+                            clause_title=f"内容块 ({chunk_type})",
+                            content=content[:200] if content else '',
+                            paragraphs=[],
+                            requirement_type=RequirementType.RECOMMENDED,
+                            applicable_systems=[],
+                            cross_refs=[],
+                            source=source,
+                            page=page_idx,
+                            triplets=[],
+                            clause_items=[],
+                            is_term_definition=False,
+                            terms=[],
+                            formula_content=None,
+                            semantics_enriched=False,
+                            parent_chapter=current_chapter['chapter_number'],
+                            referenced_clauses=[],
+                            referenced_standards=[],
+                            metadata={
+                                "chunk_type": chunk_type,
+                                "chunk_id": chunk_id,
+                                "parent_chapter": current_chapter['chapter_number'],
+                                "parent_chapter_title": current_chapter['title'],
+                                "page_idx": page_idx,
+                                "bbox_viewport": bbox_viewport,
+                                "is_sub_chapter": False,
+                                "entities": [],
+                                "is_content_block": True
+                            }
+                        )
+                        clauses.append(clause)
+                        current_chapter['sub_chapters'].append(content_clause_id)
+                        self.logger.debug(f"[条款构建]   {content_clause_id} [{chunk_type}] [内容块挂载到 {current_chapter['chapter_number']}]")
+            else:
+                # 没有找到锚点前的内容块，积累起来等待归类
+                if chunk_type in ('text', 'table', 'image', 'formula'):
+                    pending_content_clauses.append({
+                        'chunk': chunk,
+                        'i': i,
+                        'content': content,
+                        'chunk_type': chunk_type,
+                        'chunk_id': chunk_id,
+                        'page_idx': page_idx,
+                        'bbox_viewport': bbox_viewport,
+                        'source': source
+                    })
+
+        # =====================================================================
+        # 如果一个锚点都没找到，创建虚拟章节作为兜底
+        # =====================================================================
+        if not anchor_found and pending_content_clauses:
+            source_name = chunks_data[0].get('source', '') if chunks_data else ''
+            virtual_title = source_name or '文档内容'
+            virtual_chapter_num = 1.0
+
+            current_chapter = {
+                'chapter_number': virtual_chapter_num,
+                'title': virtual_title,
+                'page_idx': 0,
+                'start_idx': 0,
+                'end_idx': len(chunks_data) - 1,
+                'level': 1,
+                'sub_chapters': []
+            }
+            sections.append(current_chapter)
+            chapter_plan.append(ChapterPlan(
+                chapter_number=virtual_chapter_num,
+                title=virtual_title,
+                start_position=0,
+                end_position=len(chunks_data),
+                status=ChapterStatus.PENDING,
+                chapter_type='normative'
+            ))
+            self.logger.info(f"[章节构建] ⏺ [无锚点，创建虚拟章节] {virtual_chapter_num}. {virtual_title}")
+
+            # 将所有积累的内容块挂到虚拟章节下
+            for item in pending_content_clauses:
+                content_clause_id = f"{virtual_chapter_num}_content_{item['i']}"
+                clause = ClauseSegment(
+                    clause_id=content_clause_id,
+                    clause_title=f"内容块 ({item['chunk_type']})",
+                    content=item['content'][:200] if item['content'] else '',
+                    paragraphs=[],
+                    requirement_type=RequirementType.RECOMMENDED,
+                    applicable_systems=[],
+                    cross_refs=[],
+                    source=item['source'],
+                    page=item['page_idx'],
+                    triplets=[],
+                    clause_items=[],
+                    is_term_definition=False,
+                    terms=[],
+                    formula_content=None,
+                    semantics_enriched=False,
+                    parent_chapter=virtual_chapter_num,
+                    referenced_clauses=[],
+                    referenced_standards=[],
+                    metadata={
+                        "chunk_type": item['chunk_type'],
+                        "chunk_id": item['chunk_id'],
+                        "parent_chapter": virtual_chapter_num,
+                        "parent_chapter_title": virtual_title,
+                        "page_idx": item['page_idx'],
+                        "bbox_viewport": item['bbox_viewport'],
+                        "is_sub_chapter": False,
+                        "entities": [],
+                        "is_content_block": True
+                    }
+                )
+                clauses.append(clause)
+                current_chapter['sub_chapters'].append(content_clause_id)
 
         # 更新 chapter_plan 的 end_position
         for plan in chapter_plan:

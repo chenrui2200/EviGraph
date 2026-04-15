@@ -101,14 +101,6 @@
             进入命中测试面板 🔍
           </button>
 
-          <button
-            v-if="currentPhase >= 1"
-            class="action-btn"
-            style="background: #fff; border: 1px solid #000; color: #000;"
-            @click="router.push({ name: 'AiQa', params: { id: projectData.project_id } })"
-          >
-            直接创建 AI 应用 ➝
-          </button>
         </div>
       </div>
     </div>
