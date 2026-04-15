@@ -2363,14 +2363,8 @@ class Neo4jStorage(GraphStorage):
                 if chunk_type == "clause":
                     clause_id = metadata.get("clause_id", "")
                     if clause_id:
-                        # 如果 metadata 已包含 topic（来自 intelligent_chunks），跳过 LLM 语义解析
-                        # Topic/Entity 节点将由 add_topic_and_entity_nodes 统一创建
-                        # 原来的逻辑是检查 has_topic && has_entities，但 entities 可能为空（某些 clause 没有提取到实体）
-                        # 而 Topic/Entity 关系统一由 add_topic_and_entity_nodes 处理，不需要三元组逻辑
-                        has_topic = bool(metadata.get("topic"))
-                        if not has_topic:
-                            # 只创建 Clause 节点本身，Entity 由 add_topic_and_entity_nodes 统一创建
-                            self._create_clause_entity_only(tx, graph_id, episode_id, clause_id, content, embedding, metadata)
+                        # 创建 Clause 节点，同时 inline 创建 Topic/Entity（Topic/Entity 创建已合并到 _create_clause_entity_only）
+                        self._create_clause_entity_only(tx, graph_id, episode_id, clause_id, content, embedding, metadata)
                 elif chunk_type == "section":
                     title = metadata.get("title", content[:50])
                     self._create_section_entity(tx, graph_id, episode_id, title, metadata, embedding)
@@ -2752,7 +2746,123 @@ class Neo4jStorage(GraphStorage):
                 self._create_defines_relation(tx, term_entity_uuid, entity_uuid)
             return
 
-        logger.info(f"[hierarchical] Clause node created (no triplet parsing): {clause_id}")
+        # ========== Topic 和 Entity 创建（inline，不再拆分到 add_topic_and_entity_nodes） ==========
+        topic_text = metadata.get('topic', '')
+        terms = metadata.get('terms', [])
+        clause_entities = metadata.get('entities', [])
+
+        if topic_text:
+            # 创建 Topic 节点
+            topic_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{clause_id_normalized}:topic".encode()).hexdigest()))
+            tx.run(
+                """
+                MERGE (t:Topic {uuid: $uuid})
+                ON CREATE SET
+                    t.graph_id = $gid,
+                    t.topic = $topic,
+                    t.clause_id = $clause_id,
+                    t.created_at = $created_at,
+                    t.name = $topic
+                ON MATCH SET
+                    t.topic = $topic,
+                    t.clause_id = $clause_id,
+                    t.name = $topic
+                """,
+                uuid=topic_uuid,
+                gid=graph_id,
+                topic=topic_text,
+                clause_id=clause_id_normalized,
+                created_at=now
+            )
+            logger.info(f"[hierarchical] Topic created: clause={clause_id} topic={topic_text[:30]}")
+
+            # 创建 HAS_TOPIC 关系
+            tx.run(
+                """
+                MATCH (e:Clause {clause_id: $clause_id}), (t:Topic {uuid: $topic_uuid})
+                MERGE (e)-[r:HAS_TOPIC]->(t)
+                SET r.graph_id = $gid, r.created_at = datetime()
+                """,
+                clause_id=clause_id_normalized,
+                topic_uuid=topic_uuid,
+                gid=graph_id
+            )
+
+            # 创建 terms 的 Entity:Term 节点和 MENTIONS 关系
+            if isinstance(terms, list):
+                for term_item in terms:
+                    term_name = term_item if isinstance(term_item, str) else term_item.get('term_name', '')
+                    term_def = term_item.get('definition', '') if isinstance(term_item, dict) else ''
+                    if not term_name:
+                        continue
+                    term_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{term_name}:term".encode()).hexdigest()))
+                    tx.run(
+                        """
+                        MERGE (e:Entity:Term {uuid: $uuid})
+                        ON CREATE SET
+                            e.graph_id = $gid,
+                            e.name = $name,
+                            e.definition = $definition,
+                            e.entity_label = 'Term',
+                            e.created_at = $created_at
+                        ON MATCH SET
+                            e.name = $name,
+                            e.definition = COALESCE($definition, e.definition)
+                        """,
+                        uuid=term_uuid,
+                        gid=graph_id,
+                        name=term_name,
+                        definition=term_def,
+                        created_at=now
+                    )
+                    tx.run(
+                        """
+                        MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity:Term {uuid: $entity_uuid})
+                        MERGE (t)-[r:MENTIONS]->(e)
+                        SET r.graph_id = $gid, r.created_at = datetime()
+                        """,
+                        topic_uuid=topic_uuid,
+                        entity_uuid=term_uuid,
+                        gid=graph_id
+                    )
+                    logger.info(f"[hierarchical] Entity:Term: {term_name} <- Topic({topic_text[:20]}) MENTIONS")
+
+            # 创建 entities 的 Entity 节点和 MENTIONS 关系
+            if isinstance(clause_entities, list):
+                for ent in clause_entities:
+                    entity_name = ent if isinstance(ent, str) else ent.get('key', ent.get('name', ''))
+                    if not entity_name:
+                        continue
+                    entity_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{entity_name}:entity".encode()).hexdigest()))
+                    tx.run(
+                        """
+                        MERGE (e:Entity {uuid: $uuid})
+                        ON CREATE SET
+                            e.graph_id = $gid,
+                            e.name = $name,
+                            e.entity_label = 'Entity',
+                            e.created_at = $created_at
+                        ON MATCH SET
+                            e.name = $name
+                        """,
+                        uuid=entity_uuid,
+                        gid=graph_id,
+                        name=entity_name,
+                        created_at=now
+                    )
+                    tx.run(
+                        """
+                        MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity {uuid: $entity_uuid})
+                        MERGE (t)-[r:MENTIONS]->(e)
+                        SET r.graph_id = $gid, r.created_at = datetime()
+                        """,
+                        topic_uuid=topic_uuid,
+                        entity_uuid=entity_uuid,
+                        gid=graph_id
+                    )
+                    logger.info(f"[hierarchical] Entity: {entity_name} <- Topic({topic_text[:20]}) MENTIONS")
+
+        logger.info(f"[hierarchical] Clause node created: {clause_id}")
 
     def _create_entity_for_clause(self, tx, graph_id: str, episode_id: str,
                                   clause_id: str, content: str,

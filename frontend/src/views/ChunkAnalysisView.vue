@@ -266,7 +266,7 @@
               </div>
               <span class="inline-progress-text">{{ progressPercent }}%</span>
             </div>
-            <button class="re-analyse-btn" @click="handleResetChunking" :disabled="starting">
+            <button class="re-analyse-btn" @click="handleResetChunking">
               <span v-if="!starting">🔄 重新分析</span>
               <span v-else class="spinner-sm"></span>
             </button>
@@ -314,153 +314,179 @@
               </div>
 
               <div class="clause-list" v-show="expandedChapters[chapter.chapter.chapter_number]">
-                <div v-for="clause in chapter.clauses" :key="clause.clause_id"
-                     class="clause-item"
-                     :class="{ 'clause-active': highlightedClauseId === clause.clause_id }"
-                     @click="handleClauseClick(clause)">
-                  <div class="clause-row">
-                    <span class="clause-id">{{ clause.clause_id }}</span>
-                    <span class="clause-title">{{ clause.clause_title || clause.content?.substring(0, 40) + '...' }}</span>
-                  </div>
-
-                  <!-- 条文详情 -->
-                  <div class="clause-detail" v-if="expandedClauseId === clause.clause_id">
-                    <!-- PDF 位置信息（支持多 bbox） -->
-                    <div class="entity-row" v-if="clause.bboxs?.length || clause.page || clause.pdf_location?.page">
-                      <span class="entity-label" style="color:#6b7280">📍 位置</span>
-                      <template v-if="clause.bboxs?.length">
-                        <span v-for="(item, idx) in clause.bboxs" :key="idx" class="entity-tag" style="background:#f3f4f6;color:#374151;border-color:#d1d5db">
-                          P{{ item[0] }}: [
-                          {{ item.slice(1,3).join(',') }},
-                          {{ item.slice(3).join(',') }}
-                          ]
-                        </span>
-                      </template>
-                      <template v-else>
-                        <span class="entity-tag" style="background:#f3f4f6;color:#374151;border-color:#d1d5db">
-                          第 {{ clause.pdf_location?.page ?? clause.page }} 页
-                        </span>
-                        <span v-if="clause.pdf_location?.bbox || clause.bbox" class="entity-tag" style="background:#f3f4f6;color:#374151;border-color:#d1d5db;font-family:monospace;font-size:10px">
-                          bbox: [
-                          {{ (clause.pdf_location?.bbox ?? clause.bbox)?.slice(0,2).join(', ') }} ,
-                          {{ (clause.pdf_location?.bbox ?? clause.bbox)?.slice(2).join(', ') }}
-                          ]
-                        </span>
-                      </template>
+                <template v-for="clause in chapter.clauses" :key="clause.clause_id">
+                  <!-- 两级锚点：只渲染没有 parent_container_id 的顶级条款 -->
+                  <div v-if="!clause.parent_container_id"
+                       class="clause-item"
+                       :class="{ 'clause-active': highlightedClauseId === clause.clause_id, 'clause-container': clause.is_clause_container }">
+                    <div class="clause-row" @click="handleClauseClick(clause)">
+                      <span class="clause-id" :class="{ 'container-id': clause.is_clause_container }">{{ clause.clause_id }}</span>
+                      <span class="clause-title">{{ clause.clause_title || clause.content?.substring(0, 40) + '...' }}</span>
+                      <span v-if="clause.is_clause_container" class="container-badge">容器</span>
                     </div>
 
-                    <!-- Term -->
-                    <div class="entity-row" v-if="clause.terms?.length || editingClauseId === clause.clause_id">
-                      <span class="entity-label term-label">🔵 Term</span>
-                      <div class="entity-tags">
-                        <template v-for="(t, i) in (editingClauseId === clause.clause_id ? editingTerms : clause.terms)" :key="i">
-                          <span v-if="typeof t === 'string'" class="entity-tag term-tag">{{ t }}</span>
-                          <span v-else class="term-item" @click.stop="toggleTermDef(t.term_name)">
-                            <span class="entity-tag term-tag" :class="{ active: expandedTermDefs.has(t.term_name) }">
-                              {{ t.term_name }}
-                            </span>
-                            <span v-if="t.definition" class="term-def-arrow">{{ expandedTermDefs.has(t.term_name) ? '▲' : '▼' }}</span>
-                            <div v-if="expandedTermDefs.has(t.term_name) && t.definition" class="term-definition">
-                              <span class="def-connector">(解释)</span>
-                              {{ t.definition }}
-                            </div>
+                    <!-- 条文详情 -->
+                    <div class="clause-detail" v-if="expandedClauseId === clause.clause_id">
+                      <!-- PDF 位置信息（支持多 bbox） -->
+                      <div class="entity-row" v-if="clause.bboxs?.length || clause.page || clause.pdf_location?.page">
+                        <span class="entity-label" style="color:#6b7280">📍 位置</span>
+                        <template v-if="clause.bboxs?.length">
+                          <span v-for="(item, idx) in clause.bboxs" :key="idx" class="entity-tag" style="background:#f3f4f6;color:#374151;border-color:#d1d5db">
+                            P{{ item[0] }}: [
+                            {{ item.slice(1,3).join(',') }},
+                            {{ item.slice(3).join(',') }}
+                            ]
+                          </span>
+                        </template>
+                        <template v-else>
+                          <span class="entity-tag" style="background:#f3f4f6;color:#374151;border-color:#d1d5db">
+                            第 {{ clause.pdf_location?.page ?? clause.page }} 页
+                          </span>
+                          <span v-if="clause.pdf_location?.bbox || clause.bbox" class="entity-tag" style="background:#f3f4f6;color:#374151;border-color:#d1d5db;font-family:monospace;font-size:10px">
+                            bbox: [
+                            {{ (clause.pdf_location?.bbox ?? clause.bbox)?.slice(0,2).join(', ') }} ,
+                            {{ (clause.pdf_location?.bbox ?? clause.bbox)?.slice(2).join(', ') }}
+                            ]
                           </span>
                         </template>
                       </div>
-                      <button class="edit-btn" @click.stop="startEditEntity(clause, 'terms')">
-                        {{ editingClauseId === clause.clause_id ? '取消' : '编辑' }}
-                      </button>
-                    </div>
-                    <div v-if="editingClauseId === clause.clause_id && editingField === 'terms'" class="entity-editor">
-                      <input v-model="editingValue" class="entity-input"
-                             placeholder="输入Term，多个用逗号分隔" @keyup.enter="saveEntity(clause.clause_id, 'terms')"/>
-                      <button class="save-btn" @click="saveEntity(clause.clause_id, 'terms')">保存</button>
+
+                      <!-- Term -->
+                      <div class="entity-row" v-if="clause.terms?.length || editingClauseId === clause.clause_id">
+                        <span class="entity-label term-label">🔵 Term</span>
+                        <div class="entity-tags">
+                          <template v-for="(t, i) in (editingClauseId === clause.clause_id ? editingTerms : clause.terms)" :key="i">
+                            <span v-if="typeof t === 'string'" class="entity-tag term-tag">{{ t }}</span>
+                            <span v-else class="term-item" @click.stop="toggleTermDef(t.term_name)">
+                              <span class="entity-tag term-tag" :class="{ active: expandedTermDefs.has(t.term_name) }">
+                                {{ t.term_name }}
+                              </span>
+                              <span v-if="t.definition" class="term-def-arrow">{{ expandedTermDefs.has(t.term_name) ? '▲' : '▼' }}</span>
+                              <div v-if="expandedTermDefs.has(t.term_name) && t.definition" class="term-definition">
+                                <span class="def-connector">(解释)</span>
+                                {{ t.definition }}
+                              </div>
+                            </span>
+                          </template>
+                        </div>
+                        <button class="edit-btn" @click.stop="startEditEntity(clause, 'terms')">
+                          {{ editingClauseId === clause.clause_id ? '取消' : '编辑' }}
+                        </button>
+                      </div>
+                      <div v-if="editingClauseId === clause.clause_id && editingField === 'terms'" class="entity-editor">
+                        <input v-model="editingValue" class="entity-input"
+                               placeholder="输入Term，多个用逗号分隔" @keyup.enter="saveEntity(clause.clause_id, 'terms')"/>
+                        <button class="save-btn" @click="saveEntity(clause.clause_id, 'terms')">保存</button>
+                      </div>
+
+                      <!-- Condition -->
+                      <div class="entity-row" v-if="clause.conditions?.length || editingClauseId === clause.clause_id">
+                        <span class="entity-label cond-label">🟡 Cond</span>
+                        <div class="entity-tags">
+                          <span v-for="(c, i) in (editingClauseId === clause.clause_id ? editingConditions : clause.conditions)"
+                                :key="i" class="entity-tag cond-tag">{{ c }}</span>
+                        </div>
+                        <button class="edit-btn" @click.stop="startEditEntity(clause, 'conditions')">
+                          {{ editingClauseId === clause.clause_id ? '取消' : '编辑' }}
+                        </button>
+                      </div>
+                      <div v-if="editingClauseId === clause.clause_id && editingField === 'conditions'" class="entity-editor">
+                        <input v-model="editingValue" class="entity-input"
+                               placeholder="输入条件，多个用逗号分隔" @keyup.enter="saveEntity(clause.clause_id, 'conditions')"/>
+                        <button class="save-btn" @click="saveEntity(clause.clause_id, 'conditions')">保存</button>
+                      </div>
+
+                      <!-- Action -->
+                      <div class="entity-row" v-if="clause.actions?.length || editingClauseId === clause.clause_id">
+                        <span class="entity-label action-label">🔷 Act</span>
+                        <div class="entity-tags">
+                          <span v-for="(a, i) in (editingClauseId === clause.clause_id ? editingActions : clause.actions)"
+                                :key="i" class="entity-tag action-tag">{{ a }}</span>
+                        </div>
+                        <button class="edit-btn" @click.stop="startEditEntity(clause, 'actions')">
+                          {{ editingClauseId === clause.clause_id ? '取消' : '编辑' }}
+                        </button>
+                      </div>
+                      <div v-if="editingClauseId === clause.clause_id && editingField === 'actions'" class="entity-editor">
+                        <input v-model="editingValue" class="entity-input"
+                               placeholder="输入动作，多个用逗号分隔" @keyup.enter="saveEntity(clause.clause_id, 'actions')"/>
+                        <button class="save-btn" @click="saveEntity(clause.clause_id, 'actions')">保存</button>
+                      </div>
+
+                      <!-- Component -->
+                      <div class="entity-row" v-if="clause.components?.length">
+                        <span class="entity-label comp-label">🟣 Comp</span>
+                        <div class="entity-tags">
+                          <span v-for="(c, i) in clause.components" :key="i" class="entity-tag comp-tag">{{ c }}</span>
+                        </div>
+                      </div>
+
+                      <!-- 语义三元组 -->
+                      <div class="triplets-section" v-if="clause.triplets?.length">
+                        <div class="triplet-label">📌 语义三元组</div>
+                        <div v-for="(triplet, ti) in clause.triplets" :key="ti" class="triplet-row">
+                          <span class="triplet-comp">{{ triplet.component || '—' }}</span>
+                          <span class="triplet-arrow">—{{ triplet.requirement?.[0]?.toUpperCase() || 'M' }}→</span>
+                          <span class="triplet-obj">{{ triplet.obj || '—' }}</span>
+                          <span v-if="triplet.condition" class="triplet-cond">@ {{ triplet.condition }}</span>
+                        </div>
+                      </div>
+
+                      <!-- 知识实体 -->
+                      <div class="clause-entities-section" v-if="clause.topic || (clause.entities?.length || clause.related_elements?.length)">
+                        <div v-if="clause.topic" class="clause-topic-row">
+                          <span class="topic-label">📝 摘要</span>
+                          <span class="topic-content">{{ clause.topic }}</span>
+                        </div>
+                        <div v-if="clause.entities?.length" class="entity-section-label">📎 知识实体</div>
+                        <div class="entity-item-row" v-for="(elem, ei) in clause.entities" :key="'entity-' + ei">
+                          <template v-if="typeof elem === 'string'">
+                            <span class="entity-type-tag">noun</span>
+                            <span class="entity-key">{{ elem }}</span>
+                          </template>
+                          <template v-else>
+                            <span class="entity-type-tag">{{ elem.element_type || 'noun_entity' }}</span>
+                            <span class="entity-key">{{ elem.key }}</span>
+                            <span v-if="elem.value" class="entity-value">= {{ elem.value }}</span>
+                            <span v-if="elem.unit" class="entity-unit">{{ elem.unit }}</span>
+                          </template>
+                        </div>
+                      </div>
                     </div>
 
-                    <!-- Condition -->
-                    <div class="entity-row" v-if="clause.conditions?.length || editingClauseId === clause.clause_id">
-                      <span class="entity-label cond-label">🟡 Cond</span>
-                      <div class="entity-tags">
-                        <span v-for="(c, i) in (editingClauseId === clause.clause_id ? editingConditions : clause.conditions)"
-                              :key="i" class="entity-tag cond-tag">{{ c }}</span>
-                      </div>
-                      <button class="edit-btn" @click.stop="startEditEntity(clause, 'conditions')">
-                        {{ editingClauseId === clause.clause_id ? '取消' : '编辑' }}
-                      </button>
-                    </div>
-                    <div v-if="editingClauseId === clause.clause_id && editingField === 'conditions'" class="entity-editor">
-                      <input v-model="editingValue" class="entity-input"
-                             placeholder="输入条件，多个用逗号分隔" @keyup.enter="saveEntity(clause.clause_id, 'conditions')"/>
-                      <button class="save-btn" @click="saveEntity(clause.clause_id, 'conditions')">保存</button>
-                    </div>
-
-                    <!-- Action -->
-                    <div class="entity-row" v-if="clause.actions?.length || editingClauseId === clause.clause_id">
-                      <span class="entity-label action-label">🔷 Act</span>
-                      <div class="entity-tags">
-                        <span v-for="(a, i) in (editingClauseId === clause.clause_id ? editingActions : clause.actions)"
-                              :key="i" class="entity-tag action-tag">{{ a }}</span>
-                      </div>
-                      <button class="edit-btn" @click.stop="startEditEntity(clause, 'actions')">
-                        {{ editingClauseId === clause.clause_id ? '取消' : '编辑' }}
-                      </button>
-                    </div>
-                    <div v-if="editingClauseId === clause.clause_id && editingField === 'actions'" class="entity-editor">
-                      <input v-model="editingValue" class="entity-input"
-                             placeholder="输入动作，多个用逗号分隔" @keyup.enter="saveEntity(clause.clause_id, 'actions')"/>
-                      <button class="save-btn" @click="saveEntity(clause.clause_id, 'actions')">保存</button>
-                    </div>
-
-                    <!-- Component -->
-                    <div class="entity-row" v-if="clause.components?.length">
-                      <span class="entity-label comp-label">🟣 Comp</span>
-                      <div class="entity-tags">
-                        <span v-for="(c, i) in clause.components" :key="i" class="entity-tag comp-tag">{{ c }}</span>
-                      </div>
-                    </div>
-
-                    <!-- 语义三元组（triplets 字段当前为空，此区块不渲染） -->
-                    <div class="triplets-section" v-if="clause.triplets?.length">
-                      <div class="triplet-label">📌 语义三元组</div>
-                      <div v-for="(triplet, ti) in clause.triplets" :key="ti" class="triplet-row">
-                        <span class="triplet-comp">{{ triplet.component || '—' }}</span>
-                        <span class="triplet-arrow">—{{ triplet.requirement?.[0]?.toUpperCase() || 'M' }}→</span>
-                        <span class="triplet-obj">{{ triplet.obj || '—' }}</span>
-                        <span v-if="triplet.condition" class="triplet-cond">@ {{ triplet.condition }}</span>
-                      </div>
-                    </div>
-
-                    <!-- 知识实体 -->
-                    <div class="clause-entities-section" v-if="clause.topic || (clause.entities?.length || clause.related_elements?.length)">
-                      <!-- 条款摘要 -->
-                      <div v-if="clause.topic" class="clause-topic-row">
-                        <span class="topic-label">📝 摘要</span>
-                        <span class="topic-content">{{ clause.topic }}</span>
-                      </div>
-                      <!-- LLM 提取的知识实体（来自 clause.entities） -->
-                      <div v-if="clause.entities?.length" class="entity-section-label">📎 知识实体</div>
-                      <div class="entity-item-row" v-for="(elem, ei) in clause.entities" :key="'entity-' + ei">
-                        <template v-if="typeof elem === 'string'">
-                          <span class="entity-type-tag">noun</span>
-                          <span class="entity-key">{{ elem }}</span>
-                        </template>
-                        <template v-else>
-                          <span class="entity-type-tag">{{ elem.element_type || 'noun_entity' }}</span>
-                          <span class="entity-key">{{ elem.key }}</span>
-                          <span v-if="elem.value" class="entity-value">= {{ elem.value }}</span>
-                          <span v-if="elem.unit" class="entity-unit">{{ elem.unit }}</span>
-                        </template>
+                    <!-- 子条款（挂载到容器下） -->
+                    <div v-if="clause.is_clause_container && clause.child_clauses?.length" class="child-clauses">
+                      <div v-for="childId in clause.child_clauses" :key="childId"
+                           class="clause-item clause-child"
+                           :class="{ 'clause-active': highlightedClauseId === childId }">
+                        <div class="clause-row" @click.stop="handleClauseClick(getClauseById(chapter, childId))">
+                          <span class="clause-id child-id">{{ getClauseById(chapter, childId)?.clause_id }}</span>
+                          <span class="clause-title">{{ getClauseById(chapter, childId)?.clause_title || getClauseById(chapter, childId)?.content?.substring(0, 40) + '...' }}</span>
+                        </div>
+                        <!-- 子条款详情（简化版） -->
+                        <div class="clause-detail child-detail" v-if="expandedClauseId === childId">
+                          <div class="entity-row" v-if="getClauseById(chapter, childId)?.page">
+                            <span class="entity-label" style="color:#6b7280">📍 位置</span>
+                            <span class="entity-tag" style="background:#f3f4f6;color:#374151;border-color:#d1d5db">
+                              第 {{ getClauseById(chapter, childId)?.page }} 页
+                            </span>
+                          </div>
+                          <div v-if="getClauseById(chapter, childId)?.entities?.length" class="entity-section-label">📎 知识实体</div>
+                          <div class="entity-item-row" v-for="(elem, ei) in getClauseById(chapter, childId)?.entities" :key="'child-entity-' + ei">
+                            <span class="entity-type-tag">{{ elem.element_type || 'noun' }}</span>
+                            <span class="entity-key">{{ typeof elem === 'string' ? elem : elem.key }}</span>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
+                </template>
               </div>
             </div>
           </div>
         </div>
-        </div>
-
       </div>
+    </div>
     </main>
 
     <!-- 解析方法选择模态窗口 -->
@@ -498,35 +524,73 @@
 
     <!-- 章节匹配模式选择弹窗 -->
     <div v-if="showChapterPatternModal" class="modal-overlay" @click.self="showChapterPatternModal = false">
-      <div class="modal-card">
+      <div class="modal-card" style="min-width: 480px;">
         <div class="modal-header">
-          <h3>选择章节匹配模式</h3>
+          <h3>重新分析 - 章节模式选择</h3>
           <button class="modal-close" @click="showChapterPatternModal = false">×</button>
         </div>
         <div class="modal-body">
-          <p class="modal-desc">重新分析将清除已有数据。请选择作为一级章节的匹配方式（可多选），满足任一条件的都作为父节点：</p>
-          <div class="method-options">
-            <label class="method-option" :class="{ active: selectedChapterPatterns.includes('x') }">
-              <input type="checkbox" :checked="selectedChapterPatterns.includes('x')" @change="togglePattern('x')" />
-              <div class="method-content">
-                <span class="method-name">一级模式 (x)</span>
-                <span class="method-desc">如 "3"、"4"，匹配纯数字章节编号</span>
-              </div>
-            </label>
-            <label class="method-option" :class="{ active: selectedChapterPatterns.includes('x.x') }">
-              <input type="checkbox" :checked="selectedChapterPatterns.includes('x.x')" @change="togglePattern('x.x')" />
-              <div class="method-content">
-                <span class="method-name">二级模式 (x.x)</span>
-                <span class="method-desc">如 "3.1"、"3.2"，匹配两位数字章节编号</span>
-              </div>
-            </label>
-            <label class="method-option" :class="{ active: selectedChapterPatterns.includes('x.x.x') }">
-              <input type="checkbox" :checked="selectedChapterPatterns.includes('x.x.x')" @change="togglePattern('x.x.x')" />
-              <div class="method-content">
-                <span class="method-name">三级模式 (x.x.x)</span>
-                <span class="method-desc">如 "3.1.1"、"3.1.2"，匹配三位数字章节编号</span>
-              </div>
-            </label>
+          <p class="modal-desc">重新分析将清除已有数据。请选择章节锚点和最小条款容器锚点：</p>
+
+          <div class="pattern-section">
+            <div class="pattern-section-title">章节锚点（一级父节点）：</div>
+            <div class="pattern-options">
+              <label class="pattern-option" :class="{ active: chapterAnchor === 'x' }">
+                <input type="radio" v-model="chapterAnchor" value="x" />
+                <div class="pattern-content">
+                  <span class="pattern-name">一级模式 (x)</span>
+                  <span class="pattern-desc">如 "2 术语"</span>
+                </div>
+              </label>
+              <label class="pattern-option" :class="{ active: chapterAnchor === 'x.x' }">
+                <input type="radio" v-model="chapterAnchor" value="x.x" />
+                <div class="pattern-content">
+                  <span class="pattern-name">二级模式 (x.x)</span>
+                  <span class="pattern-desc">如 "2.1 配电"</span>
+                </div>
+              </label>
+              <label class="pattern-option" :class="{ active: chapterAnchor === 'x.x.x' }">
+                <input type="radio" v-model="chapterAnchor" value="x.x.x" />
+                <div class="pattern-content">
+                  <span class="pattern-name">三级模式 (x.x.x)</span>
+                  <span class="pattern-desc">如 "2.1.1 导体"</span>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class="pattern-section">
+            <div class="pattern-section-title">最小条款容器锚点（二级）：</div>
+            <div class="pattern-options">
+              <label class="pattern-option" :class="{ active: clauseContainer === 'x.x', disabled: chapterAnchor === 'x' }">
+                <input type="radio" v-model="clauseContainer" value="x.x" :disabled="chapterAnchor === 'x'" />
+                <div class="pattern-content">
+                  <span class="pattern-name">一级模式 (x.x)</span>
+                  <span class="pattern-desc">如 "2.0.1"</span>
+                </div>
+              </label>
+              <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x' }">
+                <input type="radio" v-model="clauseContainer" value="x.x.x" />
+                <div class="pattern-content">
+                  <span class="pattern-name">二级模式 (x.x.x)</span>
+                  <span class="pattern-desc">如 "2.0.1"</span>
+                </div>
+              </label>
+              <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x.x' }">
+                <input type="radio" v-model="clauseContainer" value="x.x.x.x" />
+                <div class="pattern-content">
+                  <span class="pattern-name">三级模式 (x.x.x.x)</span>
+                  <span class="pattern-desc">如 "2.0.1.1"</span>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class="pattern-hint">
+            <div>说明：</div>
+            <div>· 章节锚点作为章节树的父节点（一级）</div>
+            <div>· 最小条款容器锚点在两个章节锚点之间作为二级容器</div>
+            <div>· 二级容器下的条款合并后挂在一级节点下</div>
           </div>
         </div>
         <div class="modal-footer">
@@ -557,11 +621,11 @@
         <h3>智能分块标注分析</h3>
         <p>项目 <strong>{{ projectName }}</strong> 已上传完成，开始执行 LLM 智能分块与知识实体标注。</p>
         <div class="start-actions">
-          <button class="start-btn" @click="handleStartChunking" :disabled="starting">
-            <span v-if="!starting">🚀 开始智能分析</span>
+          <button class="start-btn" @click="handleStartChunking" :disabled="starting || analysisStatus === 'graph_chunking'">
+            <span v-if="!(starting || analysisStatus === 'graph_chunking')">🚀 开始智能分析</span>
             <span v-else class="spinner-sm"></span>
           </button>
-          <button class="reset-btn" @click="handleResetChunking" :disabled="starting">
+          <button class="reset-btn" @click="handleResetChunking" :disabled="starting || (analysisStatus === 'graph_chunking' && progressPercent < 100)">
             <span v-if="!starting">重置并重新分析</span>
             <span v-else class="spinner-sm"></span>
           </button>
@@ -644,7 +708,8 @@ const selectedParseMethod = ref('ocr')
 
 // 章节匹配模式选择弹窗
 const showChapterPatternModal = ref(false)
-const selectedChapterPatterns = ref(['x.x'])  // 多选模式
+const chapterAnchor = ref('x.x')  // 章节锚点（一级父节点）
+const clauseContainer = ref('x.x.x')  // 最小条款容器锚点（二级）
 
 // 实体编辑
 const editingClauseId = ref(null)
@@ -763,7 +828,7 @@ watch(() => props.projectId, async (newId) => {
 })
 
 onUnmounted(() => {
-  if (pollInterval) clearInterval(pollInterval)
+  if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
   if (taskSource) taskSource.close()
 })
 
@@ -856,9 +921,11 @@ async function loadExistingProject() {
     if (res.data.status === 'graph_chunked' || res.data.status === 'graph_completed') {
       tasks.push(loadAnalysis())
     } else if (res.data.status === 'graph_chunking') {
+      // 注意：graph_chunking 状态时 project.graph_build_task_id 指向的是图谱构建任务，
+      // 不是智能分块任务。ChunkAnalysisView 不应连接图谱构建的 SSE。
+      // 如果需要恢复分析，用户应主动点击"重新分析"触发新的智能分块任务。
       tasks.push(loadAnalysis())
-      startTaskSSE()
-      startProgressPolling()
+      // 不调用 startTaskSEE()/startProgressPolling()，避免接入 graph_build_task_id 的日志流
     } else if (res.data.status === 'ontology_generation' || res.data.status === 'ontology_generated' || res.data.status === 'created') {
       // ontology_generation 状态下 MinerU 正在解析，需要建立 SSE 接收日志
       if (res.data.ontology_task_id) {
@@ -1092,37 +1159,26 @@ async function doReAnnotate(parseMethod) {
   }
 }
 
-function togglePattern(pattern) {
-  const idx = selectedChapterPatterns.value.indexOf(pattern)
-  if (idx >= 0) {
-    selectedChapterPatterns.value.splice(idx, 1)
-  } else {
-    selectedChapterPatterns.value.push(pattern)
-  }
-}
-
 async function handleResetChunking() {
   if (starting.value) return
   // 弹出章节匹配模式选择框
-  selectedChapterPatterns.value = ['x.x']  // 默认值
+  chapterAnchor.value = 'x.x'  // 默认值
+  clauseContainer.value = 'x.x.x'  // 默认值
   showChapterPatternModal.value = true
 }
 
 async function confirmChapterPattern() {
-  if (selectedChapterPatterns.value.length === 0) {
-    alert('请至少选择一种匹配模式')
-    return
-  }
   showChapterPatternModal.value = false
   starting.value = true
   hasAutoExpanded.value = false
-  realtimeLogs.value.push(`🔄 重置并重新分析 (模式: ${selectedChapterPatterns.value.join(', ')})...`)
+  realtimeLogs.value.push(`🔄 重置并重新分析 (章节锚点: ${chapterAnchor.value}, 条款容器: ${clauseContainer.value})...`)
 
   try {
     const res = await startChunking({
       project_id: currentProjectId.value,
       reset: true,
-      chapter_patterns: selectedChapterPatterns.value
+      chapter_anchor: chapterAnchor.value,
+      clause_container: clauseContainer.value
     })
     if (res.success) {
       taskId.value = res.data.task_id
@@ -1185,6 +1241,19 @@ function startTaskSSE() {
         if (payload.status === 'completed' || payload.status === 'failed') {
           taskSource.close()
           taskSource = null
+          // 清理轮询（防止轮询和 SSE 双重触发状态更新）
+          if (pollInterval) {
+            clearInterval(pollInterval)
+            pollInterval = null
+          }
+          if (payload.status === 'completed') {
+            analysisStatus.value = 'graph_chunked'
+            realtimeLogs.value.push('✅ 分析完成！')
+            await loadAnalysis()
+          } else {
+            analysisStatus.value = 'failed'
+            realtimeLogs.value.push(`❌ 分析失败: ${payload.error || '未知错误'}`)
+          }
           // re-annotate 任务完成时刷新 MinerU 结果
           if (waitingForReAnnotate.value) {
             waitingForReAnnotate.value = false
@@ -1278,12 +1347,12 @@ function startProgressPolling() {
           }
           if (task.status === 'completed') {
             analysisStatus.value = 'graph_chunked'
-            clearInterval(pollInterval)
+            if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
             realtimeLogs.value.push('✅ 分析完成！')
             await loadAnalysis()
           } else if (task.status === 'failed') {
             analysisStatus.value = 'failed'
-            clearInterval(pollInterval)
+            if (pollInterval) { clearInterval(pollInterval); pollInterval = null }
             realtimeLogs.value.push(`❌ 分析失败: ${task.error}`)
           }
         }
@@ -1387,6 +1456,11 @@ function toggleAllChapters() {
     expandedChapters.value = all
   }
   allExpanded.value = !allExpanded.value
+}
+
+function getClauseById(chapter, clauseId) {
+  if (!chapter.clauses) return null
+  return chapter.clauses.find(c => c.clause_id === clauseId)
 }
 
 async function handleClauseClick(clause) {
@@ -1891,6 +1965,20 @@ header.ca-header {
 .clause-title { font-size: 12px; color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 
 .clause-detail { margin: 4px 0 6px; padding: 6px 0; border-top: 1px solid #f0f0f0; }
+
+/* 条款容器样式 */
+.clause-container { border-left-color: #9333ea; }
+.clause-container:hover { background: #faf5ff; }
+.container-id { color: #9333ea !important; font-weight: 600; }
+.container-badge { font-size: 10px; padding: 1px 5px; background: #9333ea; color: #fff; border-radius: 8px; margin-left: auto; }
+
+/* 子条款（容器下的条款） */
+.child-clauses { margin-left: 16px; border-left: 2px dashed #e5e7eb; padding-left: 8px; }
+.clause-child { padding-left: 16px !important; }
+.clause-child:hover { background: #f9fafb; }
+.child-id { color: #6b7280 !important; }
+.child-detail { margin-left: 16px; border-left: 2px solid #e5e7eb; padding-left: 8px; }
+
 .entity-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; min-height: 22px; }
 .entity-label { font-size: 11px; font-weight: 600; min-width: 48px; }
 .term-label { color: #16a34a; }
@@ -2035,4 +2123,23 @@ header.ca-header {
 .modal-btn.cancel:hover { background: #f0f0f0; }
 .modal-btn.confirm { background: #667eea; border: none; color: white; }
 .modal-btn.confirm:hover { background: #5a67e8; }
+.pattern-section { margin-bottom: 20px; }
+.pattern-section-title { font-size: 13px; font-weight: 600; color: #1a1a2e; margin-bottom: 10px; }
+.pattern-options { display: flex; flex-direction: column; gap: 8px; }
+.pattern-option {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  border: 2px solid #e5e7eb; border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.pattern-option:hover { border-color: #667eea; background: #f9fafb; }
+.pattern-option.active { border-color: #667eea; background: #eef2ff; }
+.pattern-option.disabled { opacity: 0.5; cursor: not-allowed; }
+.pattern-option.disabled:hover { border-color: #e5e7eb; background: transparent; }
+.pattern-option input[type="radio"] { display: none; }
+.pattern-content { display: flex; flex-direction: column; gap: 2px; }
+.pattern-name { font-size: 13px; font-weight: 600; color: #1a1a2e; }
+.pattern-desc { font-size: 11px; color: #6b7280; }
+.pattern-hint { margin-top: 16px; padding: 12px; background: #f9fafb; border-radius: 8px; font-size: 12px; color: #6b7280; line-height: 1.6; }
 </style>

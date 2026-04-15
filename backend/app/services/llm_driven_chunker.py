@@ -18,7 +18,10 @@ SOTA 知识图谱构建模式：
 - 附录（A/B/...）章节识别支持
 """
 
+import hashlib
+import json
 import logging
+import os
 import random
 import re
 import time
@@ -610,6 +613,74 @@ topic：{topic}
 请输出 JSON格式：{{"terms": [{{"term_name": "...", "abbreviation": "...", "definition": "..."}}]}}"""
 
     # ============================================================
+    # 合并提取 Prompt（单阶段替代原来的 Topic + Entities + Terms 三阶段）
+    # ============================================================
+    UNIFIED_SYSTEM_PROMPT = """你是一个工程规范文档的智能分析专家。
+
+你的任务是从单条条文中同时提取以下三类信息：
+1. topic（主题摘要）
+2. entities（知识实体）
+3. terms（术语定义）
+
+## 输出格式要求
+请严格输出 JSON 格式，不要包含任何 markdown 代码块标记：
+{{"topic": "主题摘要（不超过30字）", "entities": ["实体1", "实体2"], "terms": [{{"term_name": "术语名称", "abbreviation": "缩写（可选）", "definition": "定义原文"}}]}}
+
+## 各字段要求
+- topic：简短说明条文介绍什么方面的知识，不超过30字
+- entities：只提取技术相关的实体名词（设备、系统、材料、参数、场所等），数量严格控制在 {min_cnt}-{max_cnt} 个，必须与 topic 高度相关
+- terms：只提取条文中明确给出定义的术语，每条条文最多 1-3 个；没有则不返回
+
+如果没有术语定义，terms 为空列表 []；如果没有实体，entities 为空列表 []。"""
+
+    UNIFIED_USER_PROMPT = """请分析以下工程规范条文：
+
+条文内容：{clause_text}
+
+要求：
+1. 生成 topic
+2. 提取 {min_cnt}-{max_cnt} 个与 topic 高度相关的知识实体
+3. 提取条文中明确给出定义的术语（最多 1-3 个）
+
+请严格输出 JSON："""
+
+    # ============================================================
+    # 批量提取 Prompt
+    # ============================================================
+    BATCH_SYSTEM_PROMPT = """你是一个工程规范文档的智能分析专家。
+你的任务是从多条条文中同时提取以下三类信息，对每一条条文逐一分析：
+1. topic（主题摘要）
+2. entities（知识实体）
+3. terms（术语定义）
+
+## 输出格式要求
+请严格输出 JSON 格式，不要包含任何 markdown 代码块标记：
+{{"results": [
+  {{"clause_id": "条文编号1", "topic": "主题摘要（不超过30字）", "entities": ["实体1", "实体2"], "terms": [{{"term_name": "术语名称", "abbreviation": "缩写（可选）", "definition": "定义原文"}}]}},
+  {{"clause_id": "条文编号2", "topic": "主题摘要（不超过30字）", "entities": ["实体1", "实体2"], "terms": []}}
+]}}
+
+## 各字段要求
+- topic：简短说明条文介绍什么方面的知识，不超过30字
+- entities：只提取技术相关的实体名词（设备、系统、材料、参数、场所等），数量严格控制在 {min_cnt}-{max_cnt} 个，必须与 topic 高度相关
+- terms：只提取条文中明确给出定义的术语，每条条文最多 1-3 个；没有则不返回
+- 必须保证 results 数组中的 clause_id 与输入完全一致，顺序可以不同，但不能遗漏任何一条
+
+如果没有术语定义，terms 为空列表 []；如果没有实体，entities 为空列表 []。"""
+
+    BATCH_USER_PROMPT = """请分析以下 {batch_size} 条工程规范条文：
+
+{clauses_text}
+
+要求：
+1. 对每一条条文生成 topic
+2. 每条条文提取 {min_cnt}-{max_cnt} 个与 topic 高度相关的知识实体
+3. 提取条文中明确给出定义的术语（每条条文最多 1-3 个）
+4. 必须按 clause_id 逐一输出，不能遗漏
+
+请严格输出 JSON："""
+
+    # ============================================================
     # 知识实体数量启发式配置
     # ============================================================
     # 条款数量 → 目标实体数量映射
@@ -776,7 +847,8 @@ topic：{topic}
     def __init__(
         self,
         llm_client: Optional[LLMClient] = None,
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable] = None,
+        stop_event=None
     ):
         """
         初始化 LLM 驱动的分块器
@@ -784,9 +856,11 @@ topic：{topic}
         Args:
             llm_client: LLM 客户端，默认创建新实例
             progress_callback: 进度回调函数，格式: callback(progress, message)
+            stop_event: threading.Event，用于外部请求取消任务
         """
         self.llm_client = llm_client
         self.progress_callback = progress_callback
+        self.stop_event = stop_event
         self.logger = logging.getLogger('mirofish.llm_chunker')
 
     @property
@@ -1409,15 +1483,56 @@ topic：{topic}
         raise LLMChunkerError(f"LLM 调用失败，重试 {self.MAX_RETRIES} 次后仍失败: {last_error}")
 
     # =========================================================================
+    # Clause LLM 结果缓存
+    # =========================================================================
+    def _get_clause_cache_path(self, project_id: str) -> str:
+        return os.path.join(ProjectManager._get_project_dir(project_id), 'clause_llm_cache.json')
+
+    def _load_clause_cache(self, project_id: Optional[str]) -> Dict[str, Dict]:
+        if not project_id:
+            return {}
+        path = self._get_clause_cache_path(project_id)
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _save_clause_cache(self, project_id: Optional[str], cache: Dict[str, Dict]) -> None:
+        if not project_id:
+            return
+        path = self._get_clause_cache_path(project_id)
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.logger.warning(f"保存 clause 缓存失败: {e}")
+
+    def _flush_clause_cache(self, project_id: Optional[str], cache: Dict[str, Dict]) -> None:
+        """将内存中的缓存写入磁盘（批量操作，只写一次）"""
+        if cache:
+            self._save_clause_cache(project_id, cache)
+
+    @staticmethod
+    def _get_clause_content_hash(content: str) -> str:
+        return hashlib.md5(content.encode('utf-8')).hexdigest()
+
+    # =========================================================================
     # 并行处理工具（用于章节内 clause 并行 LLM 调用）
     # =========================================================================
 
     def _process_single_clause(
         self,
         clause,
-        entity_count_range: tuple = (5, 15)
+        entity_count_range: tuple = (5, 15),
+        project_id: Optional[str] = None
     ) -> None:
-        """处理单个 clause 的 topic + entities + terms 提取（三阶段 LLM）"""
+        """处理单个 clause 的 topic + entities + terms 提取（单阶段 LLM）"""
+        if self.stop_event and self.stop_event.is_set():
+            return
+
         if not clause.content:
             clause.metadata['topic'] = ""
             clause.metadata['entities'] = []
@@ -1425,30 +1540,210 @@ topic：{topic}
             clause.metadata['semantics_enriched'] = True
             return
 
-        # 阶段 A: 提取 topic
-        topic = self._extract_topic_from_text(clause.content)
+        # 检查缓存
+        cache = self._load_clause_cache(project_id) if project_id else {}
+        content_hash = self._get_clause_content_hash(clause.content)
+        cached = cache.get(content_hash)
+        if cached:
+            clause.metadata['topic'] = cached.get('topic', '')
+            clause.metadata['entities'] = cached.get('entities', [])
+            clause.metadata['terms'] = cached.get('terms', [])
+            clause.metadata['semantics_enriched'] = True
+            self.logger.info(f"[LLM 单阶段缓存命中] clause_id={clause.clause_id}, topic={clause.metadata['topic'][:20] if clause.metadata['topic'] else '(无)'}")
+            self._push_clause_progress_log(clause)
+            return
+
+        min_cnt, max_cnt = entity_count_range
+        topic = ""
+        entities: List[str] = []
+        terms: List[Dict] = []
+
+        try:
+            self.logger.info(f"[LLM 单阶段提取] 开始, clause_id={clause.clause_id}, len={len(clause.content)}")
+            user_prompt = self.UNIFIED_USER_PROMPT.format(
+                clause_text=clause.content[:2000],
+                min_cnt=min_cnt,
+                max_cnt=max_cnt
+            )
+            response = self._call_llm_with_retry(
+                messages=[
+                    {"role": "system", "content": self.UNIFIED_SYSTEM_PROMPT.format(min_cnt=min_cnt, max_cnt=max_cnt)},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3
+            )
+
+            if isinstance(response, dict):
+                topic = (response.get("topic") or "").strip()
+                entities = [e for e in (response.get("entities") or []) if isinstance(e, str)]
+                terms = [t for t in (response.get("terms") or []) if isinstance(t, dict)]
+            elif isinstance(response, list) and response:
+                # 异常返回：尝试把 list 当 entities
+                self.logger.warning(f"[LLM 单阶段提取] 响应为 list，降级为 entities")
+                entities = [e for e in response if isinstance(e, str)]
+            else:
+                self.logger.warning(f"[LLM 单阶段提取] 响应类型异常: {type(response)}")
+        except Exception as e:
+            self.logger.warning(f"[LLM 单阶段提取] 失败: {e}")
+
         clause.metadata['topic'] = topic
-
-        # 阶段 B: 提取 entities
-        entities = self._extract_entities_by_topic(clause.content, topic, entity_count_range)
         clause.metadata['entities'] = entities
-
-        # 阶段 C: 提取 terms（术语定义）
-        terms = self._extract_terms_from_text(clause.content)
         clause.metadata['terms'] = terms
-
         clause.metadata['semantics_enriched'] = True
 
+        # 写入缓存
+        if project_id:
+            cache[content_hash] = {"topic": topic, "entities": entities, "terms": terms}
+            self._save_clause_cache(project_id, cache)
+
+        self.logger.info(f"[LLM 单阶段提取] 完成, clause_id={clause.clause_id}, topic={topic[:20] if topic else '(无)'}, entities={len(entities)}, terms={len(terms)}")
+
         # 通过进度回调推送详细日志到前端
-        if self.progress_callback and entities:
+        self._push_clause_progress_log(clause)
+
+    def _push_clause_progress_log(self, clause: ClauseSegment) -> None:
+        """推送单条 clause 的提取结果日志到前端（通过 progress_callback）"""
+        if not self.progress_callback:
+            # 回调未设置时，记录到标准日志作为兜底
+            self.logger.debug(f"[Clause Log] clause_id={clause.clause_id}, progress_callback=None，跳过SSE推送")
+            return
+        entities = clause.metadata.get('entities', [])
+        topic = clause.metadata.get('topic', '')
+        terms = clause.metadata.get('terms', [])
+        term_info = f" | 术语: {', '.join([t.get('term_name', '') for t in (terms or [])[:2]])}" if terms else ""
+        if entities:
+            log_msg = f"📝 {clause.clause_id}: {topic[:20] if topic else '(无)'} | 实体: {', '.join(entities[:10])}{'...' if len(entities) > 10 else ''}{term_info}"
+        else:
+            # entities 为空时也推送一条日志，避免完全静默
+            log_msg = f"📝 {clause.clause_id}: {topic[:20] if topic else '(无)'} | 实体: (无){term_info}"
+        try:
+            self.progress_callback(-1, log_msg)
+        except Exception as e:
+            self.logger.warning(f"进度回调推送失败: {e}")
+
+    def _process_clause_batch(
+        self,
+        clauses: List[ClauseSegment],
+        entity_count_range: tuple,
+        project_id: Optional[str] = None,
+        cache: Optional[Dict[str, Dict]] = None
+    ) -> None:
+        """批量处理 clause 的 topic + entities + terms 提取（使用传入的进程内缓存）"""
+        if not clauses:
+            return
+
+        # 使用传入的内存缓存（避免每批次文件 I/O）
+        cache = cache if cache is not None else {}
+        min_cnt, max_cnt = entity_count_range
+
+        # 1. 先处理缓存命中
+        clauses_to_llm = []
+        for clause in clauses:
+            if self.stop_event and self.stop_event.is_set():
+                return
+            if not clause.content:
+                clause.metadata['topic'] = ""
+                clause.metadata['entities'] = []
+                clause.metadata['terms'] = []
+                clause.metadata['semantics_enriched'] = True
+                continue
+            content_hash = self._get_clause_content_hash(clause.content)
+            cached = cache.get(content_hash)
+            if cached:
+                clause.metadata['topic'] = cached.get('topic', '')
+                clause.metadata['entities'] = cached.get('entities', [])
+                clause.metadata['terms'] = cached.get('terms', [])
+                clause.metadata['semantics_enriched'] = True
+                self.logger.info(f"[LLM Batch 缓存命中] clause_id={clause.clause_id}, topic={clause.metadata['topic'][:20] if clause.metadata['topic'] else '(无)'}")
+                self._push_clause_progress_log(clause)
+            else:
+                clauses_to_llm.append(clause)
+
+        if not clauses_to_llm:
+            return
+
+        # 2. 对未命中的 clauses 批量调用 LLM
+        clauses_text = ""
+        for idx, clause in enumerate(clauses_to_llm, 1):
+            clauses_text += f"--- 条文 {idx} ---\nclause_id: {clause.clause_id}\n内容: {clause.content[:2000]}\n\n"
+
+        user_prompt = self.BATCH_USER_PROMPT.format(
+            batch_size=len(clauses_to_llm),
+            clauses_text=clauses_text.strip(),
+            min_cnt=min_cnt,
+            max_cnt=max_cnt
+        )
+
+        processed_ids = set()
+
+        # 立即推送批次开始日志，让前端立即看到进度
+        if self.progress_callback:
             try:
-                term_info = f" | 术语: {', '.join([t['term_name'] for t in terms[:2]])}" if terms else ""
-                self.progress_callback(
-                    -1,  # 不更新进度百分比
-                    f"📝 {clause.clause_id}: {topic[:20] if topic else '(无)'} | 实体: {', '.join(entities[:10])}{'...' if len(entities) > 10 else ''}{term_info}"
-                )
+                self.progress_callback(-1, f"🔄 开始处理 {len(clauses_to_llm)} 个条款...")
             except Exception:
-                pass  # 忽略回调错误
+                pass
+
+        try:
+            self.logger.info(f"[LLM Batch 提取] 开始, batch_size={len(clauses_to_llm)}, total_chars={sum(len(c.content) for c in clauses_to_llm)}")
+            response = self._call_llm_with_retry(
+                messages=[
+                    {"role": "system", "content": self.BATCH_SYSTEM_PROMPT.format(min_cnt=min_cnt, max_cnt=max_cnt)},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=4096 * 4
+            )
+
+            if isinstance(response, dict) and "results" in response:
+                results = response.get("results", [])
+                if not isinstance(results, list):
+                    results = [results] if results else []
+
+                for item in results:
+                    if not isinstance(item, dict):
+                        continue
+                    clause_id = item.get("clause_id", "")
+                    matched_clause = None
+                    for c in clauses_to_llm:
+                        if c.clause_id == clause_id:
+                            matched_clause = c
+                            break
+                    if matched_clause:
+                        topic = (item.get("topic") or "").strip()
+                        entities = [e for e in (item.get("entities") or []) if isinstance(e, str)]
+                        terms = [t for t in (item.get("terms") or []) if isinstance(t, dict)]
+                        matched_clause.metadata['topic'] = topic
+                        matched_clause.metadata['entities'] = entities
+                        matched_clause.metadata['terms'] = terms
+                        matched_clause.metadata['semantics_enriched'] = True
+                        processed_ids.add(clause_id)
+
+                        content_hash = self._get_clause_content_hash(matched_clause.content)
+                        cache[content_hash] = {"topic": topic, "entities": entities, "terms": terms}
+
+                        self.logger.info(f"[LLM Batch 提取] 完成, clause_id={clause_id}, topic={topic[:20] if topic else '(无)'}, entities={len(entities)}, terms={len(terms)}")
+                        self._push_clause_progress_log(matched_clause)
+            else:
+                self.logger.warning(f"[LLM Batch 提取] 响应格式异常，降级为单条处理: {type(response)}")
+        except Exception as e:
+            self.logger.warning(f"[LLM Batch 提取] 失败，降级为单条处理: {e}")
+            if self.progress_callback:
+                try:
+                    self.progress_callback(-1, f"⚠️ 批次LLM异常 ({e})，降级为逐条处理...")
+                except Exception:
+                    pass
+
+        # 3. fallback 到单条处理（推送一条日志）
+        if processed_ids:
+            try:
+                self.progress_callback(-1, f"✅ 批次完成: {len(processed_ids)} 个条款已处理")
+            except Exception:
+                pass
+
+        unprocessed = [c for c in clauses_to_llm if c.clause_id not in processed_ids]
+        if unprocessed:
+            for clause in unprocessed:
+                self._process_single_clause(clause, entity_count_range, project_id=project_id)
 
     # =========================================================================
     # JSONL 增量写入工具
@@ -1482,7 +1777,8 @@ topic：{topic}
         md_content: Optional[str] = None,
         chunks_data: Optional[List[Dict]] = None,
         pdf_path: Optional[str] = None,
-        chapter_patterns: Optional[List[str]] = None
+        chapter_anchor: str = 'x.x',
+        clause_container: str = 'x.x.x'
     ) -> HierarchicalChunkResult:
         """
         主入口：基于 chunks.json 的智能分块
@@ -1501,7 +1797,8 @@ topic：{topic}
             md_content: MinerU 解析的 Markdown 内容（可选，用于兼容）
             chunks_data: chunks.json 数据（核心数据源）
             pdf_path: PDF 文件路径（可选）
-            chapter_patterns: 章节匹配模式列表 (['x', 'x.x', 'x.x.x'])，满足任一模式的 title 都作为一级章节
+            chapter_anchor: 章节锚点模式（如 'x.x'），用于匹配一级章节标题
+            clause_container: 最小条款容器锚点模式（如 'x.x.x'），用于匹配二级条款容器
 
         Returns:
             HierarchicalChunkResult: 包含所有层级分块的结果
@@ -1539,10 +1836,15 @@ topic：{topic}
         source_info = {"source": chunks_data[0].get('source', '') if chunks_data else ''}
 
         # 直接从 chunks_data 构建章节和条款
-        sections_data, clauses_data, chapter_plan = self._build_sections_and_clauses_from_chunks(chunks_data, chapter_patterns=chapter_patterns)
+        sections_data, clauses_data, chapter_plan = self._build_sections_and_clauses_from_chunks(chunks_data, chapter_anchor=chapter_anchor, clause_container=clause_container)
         chapter_count = len(sections_data)
 
         self.logger.info(f"[LLM分块] ✅ 章节构建完成: {chapter_count} 章节, {len(clauses_data)} 条款")
+        if chapter_count == 0:
+            # 调试：打印前 3 条 chunks_data 的结构
+            sample = chunks_data[:3] if chunks_data else []
+            for idx, chunk in enumerate(sample):
+                self.logger.warning(f"[LLM分块] chunks_data[{idx}]: type={chunk.get('type')!r}, content={str(chunk.get('content', ''))[:80]!r}")
 
         # =====================================================================
         # Step 1: 初始化/恢复检查点
@@ -1577,19 +1879,55 @@ topic：{topic}
         chapter_results = []  # [(section, chapter_clauses), ...]
 
         # =====================================================================
-        # Step 2: 逐章 LLM 提取实体
+        # Step 2: 逐章 LLM 提取实体（章节串行 + 章节内 batch 并行 + 内容缓存）
         # =====================================================================
         self.logger.info(f"[LLM分块] Step 2/4: 逐章 LLM 提取实体（共 {chapter_count} 章）")
+
+        if chapter_count == 0:
+            self.logger.error(f"[LLM分块] 警告：未识别到任何章节！chunks_data 条数={len(chunks_data) if chunks_data else 0}")
+            self._report_progress(0.0, f"⚠️ 未识别到任何章节，请检查 chunks 数据")
+            return result
 
         # 初始化 JSONL 文件（每轮任务从头写）
         if project_id:
             self._init_jsonl_file(project_id)
 
-        # 线程池：用于章节内 clause 并行 LLM 调用
-        # max_workers 控制最大并发 LLM 请求数，避免压垮 LLM 服务
-        max_workers = min(8, len(sections_data))
+        # Batch 分组策略：每章节内最多 5 个 clause 一批；超长 clause (>1500 字) 单独成批
+        def _make_batches(clauses: List[ClauseSegment], batch_size: int = 5) -> List[List[ClauseSegment]]:
+            batches = []
+            current_batch = []
+            current_len = 0
+            for c in clauses:
+                c_len = len(c.content) if c.content else 0
+                if c_len > 1500:
+                    if current_batch:
+                        batches.append(current_batch)
+                        current_batch = []
+                        current_len = 0
+                    batches.append([c])
+                else:
+                    if len(current_batch) >= batch_size or (current_len + c_len > 8000):
+                        batches.append(current_batch)
+                        current_batch = [c]
+                        current_len = c_len
+                    else:
+                        current_batch.append(c)
+                        current_len += c_len
+            if current_batch:
+                batches.append(current_batch)
+            return batches
+
+        para_start = time.time()
+
+        # P1优化：进程内缓存（只读写一次，替代每批次文件I/O）
+        project_cache = self._load_clause_cache(project_id) if project_id else {}
 
         for i, section_data in enumerate(sections_data):
+            # 检查是否收到停止信号
+            if self.stop_event and self.stop_event.is_set():
+                self.logger.warning(f"[LLM分块] 收到停止信号，提前退出章节处理 (章节 {i+1}/{chapter_count})")
+                break
+
             chapter_num = section_data['chapter_number']
             chapter_title = section_data['title']
 
@@ -1601,7 +1939,6 @@ topic：{topic}
                     title=chapter_title,
                     content=""
                 )
-                # 从 checkpoint.completed_clauses 恢复该章节的 clauses（作为 dict）
                 skipped_clauses = [
                     c for c in (checkpoint.completed_clauses if checkpoint else [])
                     if c.get('parent_chapter') == chapter_num
@@ -1618,7 +1955,6 @@ topic：{topic}
             if project_id:
                 self._save_checkpoint(project_id, current_checkpoint)
 
-            # 计算进度
             chapter_progress_base = 0.1 + (i / chapter_count) * 0.65
 
             self.logger.info(f"[LLM分块] ▶ 处理章节 {chapter_num}/{chapter_count}: {chapter_title}")
@@ -1644,15 +1980,20 @@ topic：{topic}
             entity_count_range = self.calc_target_entity_count(chapter_clause_count)
             self.logger.info(f"[LLM分块] 章节 {chapter_num} 条款数={chapter_clause_count}, 目标实体数量={entity_count_range[0]}-{entity_count_range[1]}")
 
-            # 并行执行：章节内所有 clause 的 LLM 调用同时进行
-            para_start = time.time()
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 将本章 clauses 拆分为 batch
+            batches = _make_batches(chapter_clauses)
+            self.logger.info(f"[LLM分块] 章节 {chapter_num} 拆分为 {len(batches)} 个 batch")
+
+            # 章节内 batch 并行执行（线程池大小 = min(8, batch数)）
+            # 关键：max_workers 保持合理（<=8），避免打爆 LLM 服务
+            chapter_max_workers = min(8, len(batches)) if batches else 1
+            with ThreadPoolExecutor(max_workers=chapter_max_workers) as executor:
                 futures = {
-                    executor.submit(self._process_single_clause, clause, entity_count_range): clause
-                    for clause in chapter_clauses
+                    executor.submit(self._process_clause_batch, batch, entity_count_range, project_id, project_cache): batch
+                    for batch in batches
                 }
                 for future in as_completed(futures):
-                    # 等待所有 clause 完成（结果在 clause.metadata 中直接修改）
+                    # 等待所有 batch 完成（结果在 clause.metadata 中直接修改）
                     pass
 
             # JSONL 增量写入：每 clause 处理完立即落盘
@@ -1682,6 +2023,11 @@ topic：{topic}
                 content=chapter_text[:500] if chapter_text else ""
             )
 
+            # 将本章 clause 添加到 checkpoint.completed_clauses（必须在保存前）
+            if current_checkpoint is not None:
+                for clause in chapter_clauses:
+                    current_checkpoint.completed_clauses.append(self._clause_to_dict(clause))
+
             # 更新检查点
             current_checkpoint.current_chapter_index = i
             if i < len(current_checkpoint.chapter_plan):
@@ -1708,6 +2054,10 @@ topic：{topic}
 
             chapter_results.append((section, list(chapter_clauses)))
             all_clauses.extend(chapter_clauses)
+
+        # P1优化：缓存只在所有章节处理完毕后一次性写入磁盘
+        if project_cache:
+            self._flush_clause_cache(project_id, project_cache)
 
         # =====================================================================
         # Step 3: 保存结果（JSONL 已增量写入，sections + edges 最后写入）
@@ -1918,61 +2268,53 @@ topic：{topic}
     def _build_sections_and_clauses_from_chunks(
         self,
         chunks_data: List[Dict],
-        chapter_patterns: Optional[List[str]] = None
+        chapter_anchor: str = 'x.x',
+        clause_container: str = 'x.x.x'
     ) -> tuple:
         """
         直接从 chunks.json 构建两级章节和条款结构。
 
-        逻辑（基于用户选择的 chapter_patterns 多选模式）：
-        - 满足任一模式的 title 都作为一级章节
-        - x 模式: 匹配 "^\\d+\\s+(.+)" 如 "3 术语"
-        - x.x 模式: 匹配 "^\\d+\\.\\d+\\s+(.+)" 如 "3.1 电气..."
-        - x.x.x 模式: 匹配 "^\\d+\\.\\d+\\.\\d+\\s+(.+)" 如 "3.1.1 导体..."
-        - 所有条款（不满足章节模式）都挂在前面的一级章节下作为二级
+        两级锚点逻辑：
+        1. chapter_anchor (如 'x.x'): 匹配 type='title' 作为一级章节锚点
+        2. clause_container (如 'x.x.x'): 在两个一级锚点之间，匹配 type='title' 作为二级条款容器
+        3. clause_container 下的条款（如 x.x.x.x）作为三级内容，挂到二级容器下
+        4. 如果没有找到任何一级锚点，创建虚拟章节兜底
 
         Args:
             chunks_data: chunks.json 数据列表
-            chapter_patterns: 章节匹配模式列表，默认 ['x.x']
+            chapter_anchor: 章节锚点模式 (x/x.x/x.x.x)，用于匹配一级章节标题
+            clause_container: 最小条款容器锚点模式 (x.x/x.x.x/x.x.x.x)，用于匹配二级条款容器
 
         Returns:
             (sections, clauses, chapter_plan)
-            - sections: SectionSegment 列表（一级章节）
-            - clauses: ClauseSegment 列表（含 parent_chapter 关联，作为二级）
+            - sections: 一级章节列表
+            - clauses: 条款列表（含 parent_chapter 关联）
             - chapter_plan: ChapterPlan 列表（用于检查点）
         """
         import re
-
-        if chapter_patterns is None:
-            chapter_patterns = ['x.x']
 
         sections = []
         clauses = []
         chapter_plan = []
 
-        # 编码修复：尝试将乱码内容转换为正确的中文
-        def _fix_encoding(content: str) -> str:
-            if not content or not isinstance(content, str):
-                return content
-            try:
-                fixed = content.encode('utf-8').decode('gbk')
-                return fixed
-            except (UnicodeDecodeError, UnicodeEncodeError):
-                return content
-
-        # 根据 chapter_patterns 生成一级章节匹配正则列表
-        chapter_patterns_config = {
+        # 章节锚点匹配正则
+        anchor_patterns_config = {
             'x': re.compile(r'^(\d+)\s+(.+)'),
             'x.x': re.compile(r'^(\d+\.\d+)\s+(.+)'),
             'x.x.x': re.compile(r'^(\d+\.\d+\.\d+)\s+(.+)'),
         }
 
-        # 构建一级章节匹配正则列表
-        chapter_regex_list = []
-        for p in chapter_patterns:
-            if p in chapter_patterns_config:
-                chapter_regex_list.append(chapter_patterns_config[p])
-        if not chapter_regex_list:
-            chapter_regex_list = [chapter_patterns_config['x.x']]
+        # 条款容器锚点匹配正则（支持 x.x, x.x.x, x.x.x.x）
+        container_patterns_config = {
+            'x.x': re.compile(r'^(\d+\.\d+)\s+(.+)'),
+            'x.x.x': re.compile(r'^(\d+\.\d+\.\d+)\s+(.+)'),
+            'x.x.x.x': re.compile(r'^(\d+\.\d+\.\d+\.\d+)\s+(.+)'),
+        }
+
+        # 获取章节锚点正则
+        chapter_anchor_regex = anchor_patterns_config.get(chapter_anchor, anchor_patterns_config['x.x'])
+        # 获取条款容器正则
+        clause_container_regex = container_patterns_config.get(clause_container, container_patterns_config['x.x.x'])
 
         # 条款匹配正则：匹配任意 X.Y 或 X.Y.Z 格式的条款编号
         CLAUSE_PATTERN = re.compile(r'^(\d+\.\d+(?:\.\d+)?)\s*(.*)')
@@ -1983,9 +2325,9 @@ topic：{topic}
         APPENDIX_CLAUSE_PATTERN = re.compile(r'^([A-Z]\.\d+(?:\.\d+)?)\s*(.*)')
 
         current_chapter = None  # 当前锚点章节
+        current_container = None  # 当前条款容器（二级）
         current_chapter_idx = -1
         anchor_found = False  # 是否找到过锚点
-        pending_content_clauses = []  # 锚点找到前积累的内容块，等待归类
 
         for i, chunk in enumerate(chunks_data):
             # 兼容多种 chunk 格式
@@ -1995,9 +2337,6 @@ topic：{topic}
             metadata = chunk.get('metadata', {})
             chunk_type = chunk.get('type') or metadata.get('type', '')
             content = chunk.get('content') or chunk.get('text') or metadata.get('content', '')
-
-            # 修复编码问题：GBK 编码内容被当作 UTF-8 写入
-            content = _fix_encoding(content)
 
             # 调试日志：打印前 5 条 chunk 的 type 和 content
             if i < 5:
@@ -2014,25 +2353,27 @@ topic：{topic}
             if not content:
                 continue
 
-            # 判断是否为章节标题
-            # 策略：type=='title' 且符合任一章节编号格式
+            # =============================================================
+            # 两级锚点匹配逻辑
+            # 1. 先判断是否为一级章节锚点 (chapter_anchor)
+            # 2. 在一级锚点范围内，判断是否为二级条款容器锚点 (clause_container)
+            # 3. 其他内容挂到当前容器或章节下
+            # =============================================================
+
+            # 判断是否为一级章节锚点 (type='title' 且匹配 chapter_anchor 模式)
             chapter_m = None
             if chunk_type == 'title':
-                for regex in chapter_regex_list:
-                    if regex.match(content):
-                        chapter_m = regex.match(content)
-                        break
+                match = chapter_anchor_regex.match(content)
+                if match:
+                    chapter_m = match
+
             if chapter_m:
                 chapter_num_str = chapter_m.group(1)
                 title = chapter_m.group(2).strip()
-                self.logger.info(f"[章节构建] ✅ 识别到锚点标题: page={page_idx}, idx={i}, chapter={chapter_num_str}, title={title!r}, patterns={chapter_patterns}")
+                self.logger.info(f"[章节构建] ✅ 一级章节锚点: page={page_idx}, idx={i}, chapter={chapter_num_str}, title={title!r}")
 
-                # 转换章节编号
-                parts = chapter_num_str.split('.')
-                if len(parts) == 1:
-                    chapter_num = int(parts[0])
-                else:
-                    chapter_num = float(chapter_num_str)
+                # 章节编号保留原始字符串（支持 2, 2.0.1 等多级格式）
+                chapter_num = chapter_num_str
 
                 # 创建新章节（锚点）
                 current_chapter_idx += 1
@@ -2055,6 +2396,9 @@ topic：{topic}
                     chapter_type='normative'
                 ))
 
+                # 重置二级容器
+                current_container = None
+
                 self.logger.info(f"[章节构建] {chapter_num}. {title} (page={page_idx})")
                 anchor_found = True  # 标记已找到锚点
                 continue  # 锚点 title 不作为 clause，只作为章节节点
@@ -2066,7 +2410,7 @@ topic：{topic}
                 title = m.group(1).strip() if m.group(1) else appendix_letter
                 self.logger.info(f"[章节构建] ✅ 识别到附录标题: page={page_idx}, idx={i}, appendix={appendix_letter}, title={title!r}")
 
-                chapter_num = 200 + ord(appendix_letter) - ord('A')
+                chapter_num = f"附录{appendix_letter}"
                 current_chapter_idx += 1
                 current_chapter = {
                     'chapter_number': chapter_num,
@@ -2089,19 +2433,87 @@ topic：{topic}
                     chapter_type='appendix'
                 ))
 
+                # 重置二级容器
+                current_container = None
+
                 self.logger.info(f"[章节构建] 附录 {appendix_letter}: {title} (page={page_idx})")
                 anchor_found = True  # 标记已找到锚点
                 continue
 
-            # 如果 type=='title' 但不符合任一编号格式（如 "前 言"、"目 录"），跳过
-            if chunk_type == 'title' and chapter_m is None:
+            # 如果 type=='title' 但不符合章节编号格式（如 "前 言"、"目 录"），且尚未进入任何章节，跳过
+            if chunk_type == 'title' and chapter_m is None and current_chapter is None:
                 self.logger.info(f"[章节构建] ⏭️ type=title 但无章节编号，跳过: page={page_idx}, idx={i}, content={content[:50]!r}")
                 continue
 
-            # 如果有当前章节（锚点），处理条款；否则积累到待归类列表
+            # 如果有当前章节（锚点），处理条款容器和条款
             if current_chapter is not None:
                 # 更新章节的结束位置
                 current_chapter['end_idx'] = i
+
+                # 判断是否为二级条款容器锚点 (type='title' 且匹配 clause_container 模式)
+                container_m = None
+                if chunk_type == 'title':
+                    container_m = clause_container_regex.match(content)
+
+                if container_m:
+                    container_num_str = container_m.group(1)
+                    container_title = container_m.group(2).strip()
+                    self.logger.info(f"[章节构建] ✅ 二级条款容器: page={page_idx}, idx={i}, container={container_num_str}, title={container_title!r}")
+
+                    # 创建条款容器作为特殊 clause
+                    container_clause_id = container_num_str
+                    container_num = container_num_str
+
+                    req_type = RequirementType.RECOMMENDED
+                    if any(kw in content for kw in ['应', '必须', '严禁', '不得', '应不', '不应', '不宜']):
+                        req_type = RequirementType.MANDATORY
+                    elif any(kw in content for kw in ['宜', '可', '建议', '推荐']):
+                        req_type = RequirementType.RECOMMENDED
+                    elif any(kw in content for kw in ['禁止', '不应', '不得']):
+                        req_type = RequirementType.PROHIBITED
+
+                    container_clause = ClauseSegment(
+                        clause_id=container_clause_id,
+                        clause_title=container_title,
+                        content=content,
+                        paragraphs=[],
+                        requirement_type=req_type,
+                        applicable_systems=[],
+                        cross_refs=[],
+                        source=source,
+                        page=page_idx,
+                        triplets=[],
+                        clause_items=[],
+                        is_term_definition=False,
+                        terms=[],
+                        formula_content=None,
+                        semantics_enriched=False,
+                        parent_chapter=current_chapter['chapter_number'],
+                        referenced_clauses=[],
+                        referenced_standards=[],
+                        metadata={
+                            "chunk_type": chunk_type,
+                            "chunk_id": chunk_id,
+                            "parent_chapter": current_chapter['chapter_number'],
+                            "parent_chapter_title": current_chapter['title'],
+                            "container_clause_id": container_clause_id,
+                            "container_clause_title": container_title,
+                            "page_idx": page_idx,
+                            "bbox_viewport": bbox_viewport,
+                            "is_clause_container": True,
+                            "is_sub_chapter": True,
+                            "entities": []
+                        }
+                    )
+                    clauses.append(container_clause)
+                    current_container = {
+                        'clause_id': container_clause_id,
+                        'clause': container_clause
+                    }
+                    current_chapter['sub_chapters'].append(container_clause_id)
+
+                    self.logger.info(f"[条款构建]   {container_clause_id} {container_title[:30]}... [条款容器挂载到 {current_chapter['chapter_number']}]")
+                    continue
 
                 # 检查是否为条款（先检查普通条款，再检查附录条款）
                 clause_match = CLAUSE_PATTERN.match(content)
@@ -2125,6 +2537,10 @@ topic：{topic}
                     elif any(kw in content for kw in ['禁止', '不应', '不得']):
                         req_type = RequirementType.PROHIBITED
 
+                    # 确定 parent_chapter 和 parent_container
+                    parent_ch = current_chapter['chapter_number']
+                    parent_container_id = current_container['clause_id'] if current_container else None
+
                     clause = ClauseSegment(
                         clause_id=clause_id,
                         clause_title=clause_title,
@@ -2141,85 +2557,44 @@ topic：{topic}
                         terms=[],
                         formula_content=None,
                         semantics_enriched=False,
-                        parent_chapter=current_chapter['chapter_number'],
+                        parent_chapter=parent_ch,
                         referenced_clauses=[],
                         referenced_standards=[],
                         metadata={
                             "chunk_type": chunk_type,
                             "chunk_id": chunk_id,
-                            "parent_chapter": current_chapter['chapter_number'],
+                            "parent_chapter": parent_ch,
                             "parent_chapter_title": current_chapter['title'],
+                            "parent_container_id": parent_container_id,
+                            "parent_container_title": current_container['clause'].clause_title if current_container else '',
                             "page_idx": page_idx,
                             "bbox_viewport": bbox_viewport,
-                            "is_sub_chapter": False,
+                            "is_sub_chapter": current_container is not None,
                             "entities": []
                         }
                     )
                     clauses.append(clause)
+                    if current_container:
+                        current_container['clause'].metadata.setdefault('child_clauses', []).append(clause_id)
                     current_chapter['sub_chapters'].append(clause_id)
 
                     clause_type = "附录条款" if is_appendix_clause else "条款"
-                    self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx}) [{clause_type}] [挂载到 {current_chapter['chapter_number']}]")
+                    container_info = f" [容器: {parent_container_id}]" if parent_container_id else ""
+                    self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx}) [{clause_type}] [挂载到 {parent_ch}{container_info}]")
                 else:
-                    # 非条款内容块（如解释性文字、表格描述等），也挂到当前锚点下
-                    # 生成伪 clause_id：使用锚点编号 + "_content_" + 序号
-                    if chunk_type in ('text', 'table', 'image', 'formula'):
-                        content_clause_id = f"{current_chapter['chapter_number']}_content_{i}"
-                        clause = ClauseSegment(
-                            clause_id=content_clause_id,
-                            clause_title=f"内容块 ({chunk_type})",
-                            content=content[:200] if content else '',
-                            paragraphs=[],
-                            requirement_type=RequirementType.RECOMMENDED,
-                            applicable_systems=[],
-                            cross_refs=[],
-                            source=source,
-                            page=page_idx,
-                            triplets=[],
-                            clause_items=[],
-                            is_term_definition=False,
-                            terms=[],
-                            formula_content=None,
-                            semantics_enriched=False,
-                            parent_chapter=current_chapter['chapter_number'],
-                            referenced_clauses=[],
-                            referenced_standards=[],
-                            metadata={
-                                "chunk_type": chunk_type,
-                                "chunk_id": chunk_id,
-                                "parent_chapter": current_chapter['chapter_number'],
-                                "parent_chapter_title": current_chapter['title'],
-                                "page_idx": page_idx,
-                                "bbox_viewport": bbox_viewport,
-                                "is_sub_chapter": False,
-                                "entities": [],
-                                "is_content_block": True
-                            }
-                        )
-                        clauses.append(clause)
-                        current_chapter['sub_chapters'].append(content_clause_id)
-                        self.logger.debug(f"[条款构建]   {content_clause_id} [{chunk_type}] [内容块挂载到 {current_chapter['chapter_number']}]")
+                    # 非条款内容块（如解释性文字、表格描述等）不再生成独立伪 clause
+                    self.logger.debug(f"[条款构建]   跳过非条款内容块: idx={i}, type={chunk_type}")
             else:
-                # 没有找到锚点前的内容块，积累起来等待归类
-                if chunk_type in ('text', 'table', 'image', 'formula'):
-                    pending_content_clauses.append({
-                        'chunk': chunk,
-                        'i': i,
-                        'content': content,
-                        'chunk_type': chunk_type,
-                        'chunk_id': chunk_id,
-                        'page_idx': page_idx,
-                        'bbox_viewport': bbox_viewport,
-                        'source': source
-                    })
+                # 没有找到锚点前的内容块直接跳过
+                pass
 
         # =====================================================================
         # 如果一个锚点都没找到，创建虚拟章节作为兜底
         # =====================================================================
-        if not anchor_found and pending_content_clauses:
+        if not anchor_found:
             source_name = chunks_data[0].get('source', '') if chunks_data else ''
             virtual_title = source_name or '文档内容'
-            virtual_chapter_num = 1.0
+            virtual_chapter_num = "1"
 
             current_chapter = {
                 'chapter_number': virtual_chapter_num,
@@ -2241,42 +2616,7 @@ topic：{topic}
             ))
             self.logger.info(f"[章节构建] ⏺ [无锚点，创建虚拟章节] {virtual_chapter_num}. {virtual_title}")
 
-            # 将所有积累的内容块挂到虚拟章节下
-            for item in pending_content_clauses:
-                content_clause_id = f"{virtual_chapter_num}_content_{item['i']}"
-                clause = ClauseSegment(
-                    clause_id=content_clause_id,
-                    clause_title=f"内容块 ({item['chunk_type']})",
-                    content=item['content'][:200] if item['content'] else '',
-                    paragraphs=[],
-                    requirement_type=RequirementType.RECOMMENDED,
-                    applicable_systems=[],
-                    cross_refs=[],
-                    source=item['source'],
-                    page=item['page_idx'],
-                    triplets=[],
-                    clause_items=[],
-                    is_term_definition=False,
-                    terms=[],
-                    formula_content=None,
-                    semantics_enriched=False,
-                    parent_chapter=virtual_chapter_num,
-                    referenced_clauses=[],
-                    referenced_standards=[],
-                    metadata={
-                        "chunk_type": item['chunk_type'],
-                        "chunk_id": item['chunk_id'],
-                        "parent_chapter": virtual_chapter_num,
-                        "parent_chapter_title": virtual_title,
-                        "page_idx": item['page_idx'],
-                        "bbox_viewport": item['bbox_viewport'],
-                        "is_sub_chapter": False,
-                        "entities": [],
-                        "is_content_block": True
-                    }
-                )
-                clauses.append(clause)
-                current_chapter['sub_chapters'].append(content_clause_id)
+            # 虚拟章节下不再生成内容块伪 clause
 
         # 更新 chapter_plan 的 end_position
         for plan in chapter_plan:
@@ -2406,6 +2746,20 @@ topic：{topic}
                         if txt and len(txt) > len(clause.content):
                             clause.content = txt
                             self.logger.debug(f"[条款合并] clause_id={cid}: 单 chunk，content 已更新为原始文本 (len={len(txt)})")
+
+        # =====================================================================
+        # 去重：按 chapter_number 保留最后一个（过滤目录页与正文重复的标题）
+        # =====================================================================
+        if len(sections) > 1:
+            seen_chapters: Dict[str, int] = {}
+            for idx, sec in enumerate(sections):
+                seen_chapters[sec['chapter_number']] = idx
+
+            if len(seen_chapters) < len(sections):
+                self.logger.info(f"[章节构建] 发现重复章节锚点: 原始 {len(sections)} 个，去重后 {len(seen_chapters)} 个")
+                keep_indices = set(seen_chapters.values())
+                sections = [s for i, s in enumerate(sections) if i in keep_indices]
+                chapter_plan = [p for i, p in enumerate(chapter_plan) if i in keep_indices]
 
         self.logger.info(f"[章节构建] 完成: {len(sections)} 章节, {len(clauses)} 条款，bboxs 聚合完成")
         return sections, clauses, chapter_plan

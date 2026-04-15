@@ -400,42 +400,7 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                         progress_callback=add_progress_callback
                     )
 
-                # 创建 Topic + Entity 节点及关系（Clause --HAS_TOPIC--> Topic, Topic --MENTIONS--> Entity）
-                build_logger.info(f"[{task_id}] === Topic/Entity 创建检查 ===")
-                build_logger.info(f"[{task_id}] intelligent_chunks_data: {bool(intelligent_chunks_data)}")
-                if intelligent_chunks_data:
-                    clauses_list = intelligent_chunks_data.get('clauses', [])
-                    build_logger.info(f"[{task_id}] clauses 数量: {len(clauses_list)}")
-                    if clauses_list:
-                        sample = clauses_list[0]
-                        build_logger.info(f"[{task_id}] 第一条 clause: id={sample.get('clause_id')} topic={str(sample.get('topic',''))[:30]} entities={sample.get('entities',[])}")
-                        topics_with_content = [c for c in clauses_list if c.get('topic')]
-                        build_logger.info(f"[{task_id}] 有 topic 的 clauses 数: {len(topics_with_content)}")
-                else:
-                    build_logger.error(f"[{task_id}] intelligent_chunks_data 为空，跳过 Topic/Entity 创建！")
-
-                if intelligent_chunks_data:
-                    try:
-                        task_manager.update_task(
-                            task_id,
-                            message="Creating Topic and Entity nodes...",
-                            progress=88
-                        )
-                        clauses_for_topic = intelligent_chunks_data.get('clauses', [])
-                        build_logger.info(f"[{task_id}] 调用 add_topic_and_entity_nodes: clauses={len(clauses_for_topic)}")
-                        topic_result = storage.add_topic_and_entity_nodes(
-                            graph_id,
-                            clauses_for_topic,
-                            intelligent_chunks_data.get('elements', [])
-                        )
-                        build_logger.info(f"[{task_id}] Topic/Entity 结果: {topic_result}")
-                        task_manager.update_task(
-                            task_id,
-                            message=f"Created {topic_result.get('clauses', 0)} Clauses, {topic_result.get('topics', 0)} Topics, {topic_result.get('entities', 0)} Entities",
-                            progress=89
-                        )
-                    except Exception as topic_err:
-                        build_logger.warning(f"[{task_id}] Failed to create Topic/Entity nodes: {topic_err}")
+                # Topic/Entity 节点已在 clause 写入时 inline 创建（_create_clause_entity_only 中），无需单独处理
 
                 # Update status to embedding generation
                 project.status = ProjectStatus.GRAPH_EMBEDDING
@@ -1972,12 +1937,8 @@ def _build_sections_from_chunks(chunks: list) -> list:
             m = re.match(r'^(\d+(?:\.\d+)?)\s+(.+)', content)
             if m:
                 chapter_num_str = m.group(1)
-                # 转换为浮点数确定章节层级
-                parts = chapter_num_str.split('.')
-                if len(parts) == 1:
-                    chapter_num = int(parts[0])
-                else:
-                    chapter_num = float(chapter_num_str)
+                # 保留原始字符串作为章节编号
+                chapter_num = chapter_num_str
 
                 if chapter_num not in seen_numbers:
                     sections.append({

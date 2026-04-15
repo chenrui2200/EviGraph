@@ -77,15 +77,15 @@
       </div>
 
       <!-- Step 02: Knowledge Recall Hit Test -->
-      <div class="step-card" :class="{ 'active': currentPhase === 1, 'completed': currentPhase >= 1 }">
+      <div class="step-card" :class="{ 'active': currentPhase === 1 && !buildProgress, 'completed': currentPhase >= 1 && !buildProgress }">
         <div class="card-header">
           <div class="step-info">
             <span class="step-num">02</span>
             <span class="step-title">知识召回命中测试 (Hit Test)</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase >= 1" class="badge accent">就绪</span>
-            <span v-else class="badge pending">等待中</span>
+            <span v-if="currentPhase >= 1 && !buildProgress" class="badge accent">就绪</span>
+            <span v-else class="badge empty"></span>
           </div>
         </div>
 
@@ -94,7 +94,7 @@
           <p class="description">图谱构建已完成。建议通过视觉化的命中测试验证知识库的召回能力和关联结构。</p>
 
           <button
-            v-if="currentPhase >= 1"
+            v-if="currentPhase >= 1 && !buildProgress"
             class="action-btn hit-test-btn"
             @click="router.push({ name: 'HitTest', params: { projectId: projectData.project_id } })"
           >
@@ -269,6 +269,7 @@ watch(() => props.systemLogs.length, () => {
 .badge.processing { background: #FF5722; color: #FFF; }
 .badge.accent { background: #FF5722; color: #FFF; }
 .badge.pending { background: #F5F5F5; color: #999; }
+.badge.empty { background: transparent; color: transparent; padding: 0; min-width: 0; }
 
 .status-with-action {
   display: flex;

@@ -18,6 +18,24 @@ from ..models.task import TaskManager, TaskStatus
 
 logger = get_logger('mirofish.api')
 
+# 全局：跟踪每个项目的分块线程（防止重复启动）
+_chunk_threads: Dict[str, Dict] = {}
+
+
+def _stop_chunk_thread(project_id: str):
+    """停止指定项目的旧分块线程"""
+    info = _chunk_threads.pop(project_id, None)
+    if info:
+        stop_event = info.get('stop_event')
+        thread = info.get('thread')
+        if stop_event:
+            stop_event.set()
+        if thread and thread.is_alive():
+            logger.info(f"[{project_id}] 等待旧分块线程退出（最多3秒）...")
+            thread.join(timeout=3.0)
+            if thread.is_alive():
+                logger.warning(f"[{project_id}] 旧分块线程未能在3秒内退出")
+
 
 # ============== Intelligent Chunking ==============
 
@@ -42,7 +60,8 @@ def intelligent_chunk():
         data = request.get_json() or {}
         project_id = data.get('project_id')
         reset = data.get('reset', False)
-        chapter_patterns = data.get('chapter_patterns', ['x.x'])  # 默认 x.x 模式
+        chapter_anchor = data.get('chapter_anchor', 'x.x')  # 章节锚点（一级父节点）
+        clause_container = data.get('clause_container', 'x.x.x')  # 最小条款容器锚点（二级）
 
         if not project_id:
             return jsonify({"success": False, "error": "请提供 project_id"}), 400
@@ -79,6 +98,9 @@ def intelligent_chunk():
         existing_task_id = project.graph_build_task_id
 
         if reset:
+            # 1. 先停止旧线程（防止重复跑）
+            _stop_chunk_thread(project_id)
+
             for path_attr in ('_get_intelligent_chunks_path', '_get_intelligent_chunks_jsonl_path', '_get_intelligent_chunks_tree_path'):
                 path = getattr(ProjectManager, path_attr)(project_id)
                 if os.path.exists(path):
@@ -117,6 +139,9 @@ def intelligent_chunk():
             task = task_manager.get_task(task_id)
             if task and task.status == TaskStatus.PROCESSING:
                 logger.info(f"[{project_id}] 恢复已有任务: {task_id}")
+            else:
+                # reset 时旧任务可能已被删除，需要创建新任务
+                task_id = task_manager.create_task(task_type="llm_semantic_analysis", metadata={"project_id": project_id})
         else:
             task_id = task_manager.create_task(task_type="llm_semantic_analysis", metadata={"project_id": project_id})
 
@@ -150,10 +175,28 @@ def intelligent_chunk():
                 checkpoint = ProjectManager.get_chunk_checkpoint_v2(project_id)
                 pdf_path = _resolve_pdf_path(project_id, '')
 
+                # 防御性检查：chunks_data 不能为空
+                if not chunks_data:
+                    chunker_logger.error(f"[{task_id}] chunks_data 为空，无法进行智能分块")
+                    task_mgr.update_task(task_id, status=TaskStatus.FAILED, message="chunks_data 为空，请确保 MinerU 解析已完成", error="chunks_data is empty")
+                    return
+
+                chunker_logger.info(f"[{task_id}] chunks_data 条数: {len(chunks_data)}, checkpoint: {checkpoint is not None}")
                 task_mgr.update_task(task_id, status=TaskStatus.PROCESSING, progress=0, message="🚀 开始 LLM 语义分块...")
 
-                chunker = LLMDrivenChunker(progress_callback=progress_callback)
-                result = chunker.chunk(text_chunks, progress_callback, checkpoint=checkpoint, project_id=project_id, md_content=md_content, chunks_data=chunks_data, pdf_path=pdf_path, chapter_patterns=chapter_patterns)
+                chunker = LLMDrivenChunker(progress_callback=progress_callback, stop_event=stop_event)
+                result = chunker.chunk(text_chunks, progress_callback, checkpoint=checkpoint, project_id=project_id, md_content=md_content, chunks_data=chunks_data, pdf_path=pdf_path, chapter_anchor=chapter_anchor, clause_container=clause_container)
+
+                # 防御性检查：result 不为空
+                if not result:
+                    chunker_logger.error(f"[{task_id}] chunker.chunk() 返回空结果")
+                    task_mgr.update_task(task_id, status=TaskStatus.FAILED, message="分块引擎返回空结果", error="result is None or empty")
+                    return
+
+                # 如果任务被取消，不保存不完整结果
+                if stop_event.is_set():
+                    task_mgr.update_task(task_id, status=TaskStatus.FAILED, message="任务已取消（用户重新启动分析）")
+                    return
 
                 chunks_result = None
                 save_success = False
@@ -204,8 +247,12 @@ def intelligent_chunk():
             except Exception as e:
                 chunker_logger.error(f"[{task_id}] 分块异常: {e}\n{traceback.format_exc()}")
                 task_mgr.update_task(task_id, status=TaskStatus.FAILED, message=f"分块异常: {e}", error=str(e))
+            finally:
+                _chunk_threads.pop(project_id, None)
 
+        stop_event = threading.Event()
         thread = threading.Thread(target=chunking_task, daemon=True)
+        _chunk_threads[project_id] = {'thread': thread, 'stop_event': stop_event}
         thread.start()
 
         return jsonify({
@@ -234,13 +281,90 @@ def get_chunk_progress(project_id: str):
             return jsonify({"success": False, "error": f"项目不存在: {project_id}"}), 404
 
         progress = ProjectManager.get_chapter_progress(project_id)
-        if not progress:
-            old_checkpoint = ProjectManager.get_chunk_checkpoint(project_id)
-            if old_checkpoint:
-                return jsonify({"success": True, "data": {"legacy_checkpoint": True, "message": "使用旧版检查点格式", "checkpoint_data": old_checkpoint}})
-            return jsonify({"success": False, "error": "尚未开始分块处理或无检查点数据"}), 404
+        if progress:
+            return jsonify({"success": True, "data": progress})
 
-        return jsonify({"success": True, "data": progress})
+        # 无增强版检查点，尝试旧版检查点
+        old_checkpoint = ProjectManager.get_chunk_checkpoint(project_id)
+        if old_checkpoint:
+            return jsonify({"success": True, "data": {"legacy_checkpoint": True, "message": "使用旧版检查点格式", "checkpoint_data": old_checkpoint}})
+
+        # 无检查点：查询智能分块任务状态（使用 graph_build_task_id）
+        task_mgr = TaskManager()
+        task_id = getattr(project, 'graph_build_task_id', None)
+        if task_id:
+            task = task_mgr.get_task(task_id)
+            if task:
+                if task.status == TaskStatus.COMPLETED:
+                    return jsonify({
+                        "success": True,
+                        "data": {
+                            "total_chapters": 0,
+                            "completed_chapters": 0,
+                            "processing_chapters": 0,
+                            "failed_chapters": 0,
+                            "pending_chapters": 0,
+                            "total_clauses": 0,
+                            "completed_clauses_count": 0,
+                            "progress_ratio": 1.0,
+                            "current_chapter_index": -1,
+                            "current_chapter": None,
+                            "chapter_plan": [],
+                            "completed_elements_count": 0,
+                            "task_status": "completed",
+                            "message": task.message or "任务已完成（检查点已清理）"
+                        }
+                    })
+                elif task.status == TaskStatus.PROCESSING:
+                    return jsonify({
+                        "success": True,
+                        "data": {
+                            "total_chapters": 0,
+                            "completed_chapters": 0,
+                            "processing_chapters": 0,
+                            "failed_chapters": 0,
+                            "pending_chapters": 0,
+                            "total_clauses": 0,
+                            "completed_clauses_count": 0,
+                            "progress_ratio": task.progress / 100.0 if task.progress else 0,
+                            "current_chapter_index": -1,
+                            "current_chapter": None,
+                            "chapter_plan": [],
+                            "completed_elements_count": 0,
+                            "task_status": "processing",
+                            "message": task.message or "任务处理中，检查点尚未创建"
+                        }
+                    })
+                elif task.status == TaskStatus.FAILED:
+                    return jsonify({
+                        "success": True,
+                        "data": {
+                            "progress_ratio": 0,
+                            "task_status": "failed",
+                            "message": task.message or task.error or "任务执行失败"
+                        }
+                    })
+
+        # 没有任何任务和检查点：返回未开始（200，方便前端统一处理）
+        return jsonify({
+            "success": True,
+            "data": {
+                "total_chapters": 0,
+                "completed_chapters": 0,
+                "processing_chapters": 0,
+                "failed_chapters": 0,
+                "pending_chapters": 0,
+                "total_clauses": 0,
+                "completed_clauses_count": 0,
+                "progress_ratio": 0,
+                "current_chapter_index": -1,
+                "current_chapter": None,
+                "chapter_plan": [],
+                "completed_elements_count": 0,
+                "task_status": "idle",
+                "message": "尚未开始分块处理"
+            }
+        })
     except Exception as e:
         logger.error(f"获取章节进度失败: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -315,9 +439,17 @@ def get_chunk_analysis(project_id: str):
 
     def _chapter_sort_key(item):
         key = item[0]
-        if str(key).isdigit():
-            return (0, int(key))
-        return (1, str(key))
+        key_str = str(key)
+        # 附录格式：附录A, 附录B
+        if key_str.startswith('附录'):
+            letter = key_str[2] if len(key_str) > 2 else ''
+            return (2, ord(letter) if letter else 0)
+        # 数字格式：支持 2, 2.0.1, 3.1 等多级编号
+        try:
+            parts = key_str.split('.')
+            return (0, *[int(p) for p in parts])
+        except ValueError:
+            return (1, key_str)
     sorted_chapters = sorted(chapter_tree.items(), key=_chapter_sort_key)
 
     total_terms = sum(len(c.get('terms', [])) for c in clauses)
@@ -344,6 +476,11 @@ def get_chunk_analysis(project_id: str):
             "requirement_type": clause.get('requirement_type', 'recommended'),
             "parent_chapter": clause.get('parent_chapter'),
             "parent_chapter_title": _get_chapter_title(chapter_tree, clause.get('parent_chapter')),
+            # 两级锚点新增字段
+            "parent_container_id": clause.get('metadata', {}).get('parent_container_id'),
+            "parent_container_title": clause.get('metadata', {}).get('parent_container_title', ''),
+            "is_clause_container": clause.get('metadata', {}).get('is_clause_container', False),
+            "child_clauses": clause.get('metadata', {}).get('child_clauses', []),
             # 以下字段当前未被 LLM 提取，预留接口
             "conditions": clause.get('conditions', []),
             "actions": clause.get('actions', []),
@@ -444,13 +581,13 @@ def update_clause_entity(project_id: str):
 
 # ============== Helper Functions ==============
 
-def _get_element_parent_chapter(element: Dict) -> Optional[int]:
+def _get_element_parent_chapter(element: Dict) -> Optional[str]:
     """从要素metadata中获取所属章节号"""
     metadata = element.get('metadata', {})
     return metadata.get('parent_chapter') or element.get('parent_chapter')
 
 
-def _get_chapter_title(chapter_tree: Dict, chapter_num: Optional[int]) -> str:
+def _get_chapter_title(chapter_tree: Dict, chapter_num: Optional[str]) -> str:
     """获取章节标题"""
     if chapter_num and chapter_num in chapter_tree:
         return chapter_tree[chapter_num].get('title', '')

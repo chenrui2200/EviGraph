@@ -176,8 +176,8 @@ class SectionSegment(HierarchicalChunk):
 
     用于宏观主题检索和知识图谱导航节点
     """
-    chapter_number: Optional[int] = None
-    section_number: Optional[int] = None
+    chapter_number: Optional[str] = None
+    section_number: Optional[str] = None
     title: str = ""
     children: List[str] = field(default_factory=list)  # 子章节/条文ID
 
@@ -239,7 +239,7 @@ class ClauseSegment(HierarchicalChunk):
     semantics_enriched: bool = False
 
     # 层级关联
-    parent_chapter: Optional[int] = None  # 所属章节编号
+    parent_chapter: Optional[str] = None  # 所属章节编号
 
     # 条款引用（新增）
     referenced_clauses: List[ReferencedClause] = field(default_factory=list)  # 引用的其他条款
@@ -503,7 +503,7 @@ class HierarchicalChunkResult:
     # 层级关联查询方法 (SOTA 图谱构建支持)
     # ========================================================================
 
-    def get_clauses_in_chapter(self, chapter_number: int) -> List[ClauseSegment]:
+    def get_clauses_in_chapter(self, chapter_number: str) -> List[ClauseSegment]:
         """获取指定章节中的所有条文"""
         return [
             c for c in self.clauses
@@ -517,7 +517,7 @@ class HierarchicalChunkResult:
             if e.metadata.get("source_clause_id") == clause_id
         ]
 
-    def get_elements_in_chapter(self, chapter_number: int) -> List[ElementSegment]:
+    def get_elements_in_chapter(self, chapter_number: str) -> List[ElementSegment]:
         """获取指定章节中的所有要素"""
         return [
             e for e in self.elements
@@ -531,7 +531,7 @@ class HierarchicalChunkResult:
             None
         )
 
-    def get_section_by_number(self, chapter_number: int) -> Optional[SectionSegment]:
+    def get_section_by_number(self, chapter_number: str) -> Optional[SectionSegment]:
         """根据章节号获取章节"""
         return next(
             (s for s in self.sections if s.chapter_number == chapter_number),

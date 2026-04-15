@@ -39,7 +39,7 @@ class ChapterStatus(str, Enum):
 @dataclass
 class ChapterPlan:
     """章节计划 - 定义每个章节的位置边界和处理状态"""
-    chapter_number: int
+    chapter_number: str
     title: str
     start_position: int
     end_position: int
