@@ -1670,6 +1670,7 @@ Your response:"""
         query: str,
         limit: int = 10,
         root_types: List[str] = None,
+        similarity_threshold: float = 0,
     ) -> ObjectFirstSearchResult:
         """
         批量路径检索：一次请求同时搜索多种根节点类型（Entity/Term）。
@@ -1690,7 +1691,10 @@ Your response:"""
         if not valid_types:
             valid_types = ["Entity"]
 
-        logger.info(f"Batch search: graph_id={graph_id}, query={query[:50]}..., types={valid_types}")
+        logger.info(f"Batch search: graph_id={graph_id}, query={query[:50]}..., types={valid_types}, similarity_threshold={similarity_threshold}")
+
+        # 将前端 50-100 阈值转为后端 0-1 的 min_score，提前过滤低分根节点
+        min_score = similarity_threshold / 100.0 if similarity_threshold > 0 else None
 
         try:
             # Step 0: 预计算 embedding，供所有 root_type 搜索共享，避免重复 HTTP 请求
@@ -1703,12 +1707,12 @@ Your response:"""
                 if root_type == "Term":
                     nodes = self.storage.search_term_nodes(
                         graph_id=graph_id, query=query, limit=limit,
-                        query_vector=query_vector,
+                        query_vector=query_vector, min_score=min_score,
                     )
                 else:
                     nodes = self.storage.search_object_nodes(
                         graph_id=graph_id, query=query, limit=limit,
-                        query_vector=query_vector,
+                        query_vector=query_vector, min_score=min_score,
                     )
                 for n in nodes:
                     n["_root_type"] = root_type

@@ -319,7 +319,6 @@ const startPollingTask = (taskId, type = 'build') => {
     taskSource.close()
   }
 
-  console.log(`📡 Starting SSE listener (GraphBuild) for task: ${taskId}`)
   const url = getTaskEventsURL(taskId)
   taskSource = new EventSource(url)
 
@@ -329,7 +328,6 @@ const startPollingTask = (taskId, type = 'build') => {
 
       if (msgType === 'init') {
         const task = data
-        console.log(`✅ SSE initialized (GraphBuild)`)
 
         if (task.message) {
           addLog(task.message)

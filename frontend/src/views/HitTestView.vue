@@ -3,7 +3,7 @@
     <!-- Header -->
     <header class="view-header">
       <div class="header-left">
-        <button class="back-btn" @click="router.back()">←</button>
+        <button class="back-btn" @click="router.push('/')">←</button>
         <h2 class="view-title">知识召回命中测试 (Hit Test)</h2>
       </div>
       <div class="header-right">
@@ -1065,7 +1065,6 @@ const renderPdfPage = async (pdfSource, pageNum) => {
     canvas.width = viewport.width
 
     await page.render({ canvasContext: context, viewport }).promise
-    console.log(`Rendered page ${pageNum}`)
   } catch (err) {
     console.error('PDF render error:', err)
   } finally {

@@ -76,6 +76,7 @@ def search_entity_topic_clause():
     limit = int(data.get('limit', 10))
     root_type = data.get('root_type', 'Entity')
     root_types = data.get('root_types')  # 新参数: ['Entity', 'Term']
+    similarity_threshold = float(data.get('similarity_threshold', 0))  # 前端阈值 50-100
 
     if not graph_id:
         return jsonify({"success": False, "error": "graph_id is required"}), 400
@@ -98,6 +99,7 @@ def search_entity_topic_clause():
             query=query,
             limit=limit,
             root_types=types_to_search,
+            similarity_threshold=similarity_threshold,
         )
         result_dict = result.to_dict() if hasattr(result, 'to_dict') else result
         logger.info(f"[DEBUG] search_entity_topic_clause result: rows={len(result_dict.get('rows', []))}, data={json.dumps(result_dict, ensure_ascii=False)[:500]}")

@@ -979,8 +979,6 @@ const fetchGraphData = async () => {
         const newNodeCount = newData.node_count || newData.nodes?.length || 0
         const oldNodeCount = graphData.value?.node_count || graphData.value?.nodes?.length || 0
 
-        console.log('Fetching graph data, nodes:', newNodeCount, 'edges:', newData.edge_count || newData.edges?.length || 0)
-
         // Update and re-render when data changes
         if (newNodeCount !== oldNodeCount || !graphData.value) {
           graphData.value = newData
@@ -990,7 +988,6 @@ const fetchGraphData = async () => {
       }
     }
   } catch (err) {
-    console.log('Graph data fetch:', err.message || 'not ready')
   }
 }
 
@@ -1000,7 +997,6 @@ const startPollingTask = (taskId, type = 'build') => {
     taskSource.close()
   }
 
-  console.log(`📡 Starting SSE listener for ${type} task: ${taskId}`)
   const url = getTaskEventsURL(taskId)
   taskSource = new EventSource(url)
 
@@ -1011,7 +1007,6 @@ const startPollingTask = (taskId, type = 'build') => {
       // Handle initial state
       if (msgType === 'init') {
         const task = data
-        console.log(`✅ SSE initialized for ${type} task`)
 
         // Initial logs
         if (task.logs && task.logs.length > 0) {
@@ -1048,7 +1043,6 @@ const startPollingTask = (taskId, type = 'build') => {
 
         // Close connection on finish
         if (payload.status === 'completed' || payload.status === 'failed') {
-          console.log(`🏁 SSE task finished: ${payload.status}`)
           handleTaskFinished(payload, type)
           stopPolling()
         }
@@ -1104,8 +1098,6 @@ const updateTaskUI = (taskData, type) => {
 // Handle task finished transition
 const handleTaskFinished = async (taskData, type) => {
   if (taskData.status === 'completed' || taskData.status === 'graph_completed') {
-    console.log(`✅ ${type} task transition triggered`)
-
     if (type === 'ontology') {
       ontologyProgress.value = null
       setTimeout(async () => {
@@ -1168,13 +1160,11 @@ const loadGraph = async (graphId) => {
 // Render graph (D3.js)
 const renderGraph = () => {
   if (!graphSvg.value || !graphData.value) {
-    console.log('Cannot render: svg or data missing')
     return
   }
 
   const container = graphContainer.value
   if (!container) {
-    console.log('Cannot render: container missing')
     return
   }
 
@@ -1184,12 +1174,9 @@ const renderGraph = () => {
   const height = (rect.height || 600) - 60
 
   if (width <= 0 || height <= 0) {
-    console.log('Cannot render: invalid dimensions', width, height)
     return
   }
 
-  console.log('Rendering graph:', width, 'x', height)
-  
   const svg = select(graphSvg.value)
     .attr('width', width)
     .attr('height', height)
@@ -1202,7 +1189,6 @@ const renderGraph = () => {
   const edgesData = graphData.value.edges || []
 
   if (nodesData.length === 0) {
-    console.log('No nodes to render')
     // Show empty state
     svg.append('text')
       .attr('x', width / 2)
@@ -1241,8 +1227,6 @@ const renderGraph = () => {
         target_name: nodeMap[e.target_node_uuid]?.name || 'Unknown'
       }
     }))
-
-  console.log('Nodes:', nodes.length, 'Edges:', edges.length)
 
   // Color mapping
   const types = [...new Set(nodes.map(n => n.type))]

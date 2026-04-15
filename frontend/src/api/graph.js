@@ -17,7 +17,6 @@ export function getHealth() {
  * @returns {Promise}
  */
 export function generateOntology(formData) {
-  console.log('[API] generateOntology called, URL:', '/api/graph/ontology/generate')
   return requestWithRetry(() =>
     service({
       url: '/api/graph/ontology/generate',
