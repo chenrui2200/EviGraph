@@ -8,6 +8,10 @@
  */
 import { searchEntityTopicClause } from '../api/graph'
 
+// 简单缓存：相同查询 30 秒内直接返回，减少重复请求
+const _cache = new Map()
+const CACHE_TTL = 30000
+
 /**
  * 执行 2 跳路径检索（单次 API 调用）
  *
@@ -27,6 +31,12 @@ export async function hitTestSearch({
   rootTypes = ['Entity', 'Term'],
 }) {
   const graphIds = Array.isArray(graphId) ? graphId : [graphId]
+
+  const cacheKey = `${graphIds.join(',')}|${query}|${limit}|${similarityThreshold}|${rootTypes.join(',')}`
+  const cached = _cache.get(cacheKey)
+  if (cached && Date.now() - cached.ts < CACHE_TTL) {
+    return { rows: cached.rows, durationMs: 0 }
+  }
 
   const startTime = Date.now()
   const allRows = []
@@ -60,6 +70,7 @@ export async function hitTestSearch({
     }
   }
 
+  _cache.set(cacheKey, { rows: allRows, ts: Date.now() })
   return {
     rows: allRows,
     durationMs: Date.now() - startTime,

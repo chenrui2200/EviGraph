@@ -898,7 +898,17 @@ const loadFullGraph = async () => {
   }
 }
 
-const handleSearch = async () => {
+function debounce(fn, delay) {
+  let timer = null
+  return function (...args) {
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => {
+      fn.apply(this, args)
+    }, delay)
+  }
+}
+
+const handleSearch = debounce(async () => {
   if (!searchQuery.value.trim() || !graphId.value) return
   searching.value = true
   try {
@@ -918,7 +928,7 @@ const handleSearch = async () => {
   } finally {
     searching.value = false
   }
-}
+}, 300)
 
 const resetFilter = () => {
   results.value = { facts: [], nodes: [], edges: [] }

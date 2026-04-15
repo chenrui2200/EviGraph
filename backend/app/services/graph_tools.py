@@ -1693,6 +1693,9 @@ Your response:"""
         logger.info(f"Batch search: graph_id={graph_id}, query={query[:50]}..., types={valid_types}")
 
         try:
+            # Step 0: 预计算 embedding，供所有 root_type 搜索共享，避免重复 HTTP 请求
+            query_vector = self.storage._search.embedding.embed(query)
+
             # Step 1: 搜索根节点
             all_root_nodes: List[Dict[str, Any]] = []
             # 并行搜索所有根节点类型
@@ -1700,10 +1703,12 @@ Your response:"""
                 if root_type == "Term":
                     nodes = self.storage.search_term_nodes(
                         graph_id=graph_id, query=query, limit=limit,
+                        query_vector=query_vector,
                     )
                 else:
                     nodes = self.storage.search_object_nodes(
                         graph_id=graph_id, query=query, limit=limit,
+                        query_vector=query_vector,
                     )
                 for n in nodes:
                     n["_root_type"] = root_type
@@ -1997,10 +2002,6 @@ Your response:"""
             if clause_uuids_list:
                 clause_nodes_map = self.storage.get_nodes_batch(clause_uuids_list)
                 clause_pdf_info = self._batch_get_node_pdf_info(clause_uuids_list)
-                # 日志：Clause 节点的 summary 长度，确认内容是否为空
-                for cuid, cdata in clause_nodes_map.items():
-                    summary_len = len(cdata.get("summary", "") or "")
-                    logger.info(f"[Clause] uuid={cuid[:8]}, name={cdata.get('name')}, summary_len={summary_len}, labels={cdata.get('labels')}")
 
             # Step 5: 构建 ObjectFirstRow
             rows = []

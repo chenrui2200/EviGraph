@@ -431,6 +431,7 @@ class SearchService:
         query: str,
         limit: int = 10,
         min_score: float = None,
+        query_vector: List[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search Entity nodes specifically using hybrid scoring.
@@ -440,18 +441,19 @@ class SearchService:
         """
         _index_status.check_indexes(session)
 
-        query_vector = self.embedding.embed(query)
+        if query_vector is None:
+            query_vector = self.embedding.embed(query)
 
         vector_results = []
         if _index_status.entity_embedding:
             vector_results = self._run_object_node_vector_search(
-                session, graph_id, query_vector, limit * 2, min_score
+                session, graph_id, query_vector, limit + 5, min_score
             )
         else:
             logger.debug("Skipping Object node vector search (index not available)")
 
         keyword_results = self._run_object_node_keyword_search(
-            session, graph_id, query, limit * 2, min_score
+            session, graph_id, query, limit + 5, min_score
         )
 
         merged = self._merge_results(
@@ -557,6 +559,7 @@ class SearchService:
         query: str,
         limit: int = 10,
         min_score: float = None,
+        query_vector: List[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search Term nodes specifically using hybrid scoring (vector + keyword).
@@ -566,18 +569,19 @@ class SearchService:
         """
         _index_status.check_indexes(session)
 
-        query_vector = self.embedding.embed(query)
+        if query_vector is None:
+            query_vector = self.embedding.embed(query)
 
         vector_results = []
         if _index_status.entity_embedding:
             vector_results = self._run_term_node_vector_search(
-                session, graph_id, query_vector, limit * 2, min_score
+                session, graph_id, query_vector, limit + 5, min_score
             )
         else:
             logger.debug("Skipping Term node vector search (index not available)")
 
         keyword_results = self._run_term_node_keyword_search(
-            session, graph_id, query, limit * 2, min_score
+            session, graph_id, query, limit + 5, min_score
         )
 
         merged = self._merge_results(

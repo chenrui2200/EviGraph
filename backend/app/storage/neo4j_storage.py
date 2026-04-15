@@ -1650,6 +1650,7 @@ class Neo4jStorage(GraphStorage):
         query: str,
         limit: int = 10,
         min_score: float = None,
+        query_vector: List[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search Entity nodes specifically using hybrid scoring (vector + BM25).
@@ -1659,7 +1660,7 @@ class Neo4jStorage(GraphStorage):
         """
         with self._driver.session() as session:
             results = self._search.search_object_nodes(
-                session, graph_id, query, limit, min_score
+                session, graph_id, query, limit, min_score, query_vector
             )
             for n in results:
                 for k, v in n.items():
@@ -1673,6 +1674,7 @@ class Neo4jStorage(GraphStorage):
         query: str,
         limit: int = 10,
         min_score: float = None,
+        query_vector: List[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search Term nodes specifically using hybrid scoring (vector + keyword).
@@ -1682,7 +1684,7 @@ class Neo4jStorage(GraphStorage):
         """
         with self._driver.session() as session:
             results = self._search.search_term_nodes(
-                session, graph_id, query, limit, min_score
+                session, graph_id, query, limit, min_score, query_vector
             )
             for n in results:
                 for k, v in n.items():
