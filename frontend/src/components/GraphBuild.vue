@@ -426,7 +426,7 @@ watch(() => props.systemLogs.length, () => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  height: 80px; /* Approx 4 lines visible */
+  height: 400px;
   overflow-y: auto;
   padding-right: 4px;
 }

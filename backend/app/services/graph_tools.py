@@ -1755,7 +1755,7 @@ Your response:"""
                     depth=0,
                 ))
 
-                # 按 topic 分组
+                # 按 topic 分组，收集所有 Topic → Clause 路径
                 topic_groups: Dict[str, Tuple[str, List[str]]] = {}
                 for path in paths:
                     topic_uuid = path.get("topic_uuid")
@@ -1765,16 +1765,20 @@ Your response:"""
                             topic_groups[topic_uuid] = (topic_uuid, [])
                         topic_groups[topic_uuid][1].append(clause_uuid)
 
+                # 遍历路径固定 2 跳：root → Topic → Clause
+                first_topic_added = False
                 for group_key, (topic_uuid, clause_list) in topic_groups.items():
-                    # Topic 节点
-                    traversal_nodes.append(ObjectPathNode(
-                        uuid=topic_uuid, name="Topic", labels=["Topic"], summary="", depth=1,
-                    ))
-                    traversal_edges.append(ObjectPathEdge(
-                        uuid=f"{topic_uuid}-{root_uuid}", name="MENTIONS",
-                        fact="提及实体", source_node_uuid=topic_uuid,
-                        target_node_uuid=root_uuid, depth=0,
-                    ))
+                    # 只在 traversal_nodes 中记录第一个 Topic（路径展示用）
+                    if not first_topic_added:
+                        traversal_nodes.append(ObjectPathNode(
+                            uuid=topic_uuid, name="Topic", labels=["Topic"], summary="", depth=1,
+                        ))
+                        traversal_edges.append(ObjectPathEdge(
+                            uuid=f"{topic_uuid}-{root_uuid}", name="MENTIONS",
+                            fact="提及实体", source_node_uuid=topic_uuid,
+                            target_node_uuid=root_uuid, depth=0,
+                        ))
+                        first_topic_added = True
 
                     for clause_uuid in clause_list:
                         clause_data = clause_nodes_map.get(clause_uuid, {})
@@ -1782,15 +1786,17 @@ Your response:"""
                         clause_labels = clause_data.get("labels", [])
                         clause_summary = clause_data.get("summary", "") or clause_data.get("data", "")
 
-                        traversal_nodes.append(ObjectPathNode(
-                            uuid=clause_uuid, name=clause_name, labels=clause_labels,
-                            summary=clause_summary, depth=2,
-                        ))
-                        traversal_edges.append(ObjectPathEdge(
-                            uuid=f"{clause_uuid}-{topic_uuid}", name="HAS_TOPIC",
-                            fact="条款关联主题", source_node_uuid=clause_uuid,
-                            target_node_uuid=topic_uuid, depth=1,
-                        ))
+                        # 只记录第一个 Clause 到 traversal_nodes（路径展示用）
+                        if len(traversal_nodes) == 2:
+                            traversal_nodes.append(ObjectPathNode(
+                                uuid=clause_uuid, name=clause_name, labels=clause_labels,
+                                summary=clause_summary, depth=2,
+                            ))
+                            traversal_edges.append(ObjectPathEdge(
+                                uuid=f"{clause_uuid}-{topic_uuid}", name="HAS_TOPIC",
+                                fact="条款关联主题", source_node_uuid=clause_uuid,
+                                target_node_uuid=topic_uuid, depth=1,
+                            ))
 
                         # PDF 信息直接从 Clause 节点属性提取（无额外 DB 查询）
                         pdf_info = self._extract_clause_pdf_info(clause_data)

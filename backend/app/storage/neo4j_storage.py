@@ -2863,21 +2863,8 @@ class Neo4jStorage(GraphStorage):
                             section_list=section_list
                         )
 
-                        # Episode -> Section MENTIONS
-                        ep_sec_pairs = [
-                            {"ep_uuid": it["episode_id"],
-                             "sec_name_lower": (it["metadata"].get("title", it["text"][:50]) or "").lower()}
-                            for it in batch_section_items
-                        ]
-                        tx.run(
-                            """
-                            UNWIND $pairs AS p
-                            MATCH (ep {uuid: p.ep_uuid}), (e:Entity:Section {name_lower: p.sec_name_lower})
-                            MERGE (ep)-[r:MENTIONS]->(e)
-                            ON CREATE SET r.graph_id = $gid
-                            """,
-                            pairs=ep_sec_pairs, gid=graph_id
-                        )
+                        # 注：不再创建 Episode->Section MENTIONS 边
+                        # Section 节点仅保留节点属性，通过 Topic 语义层间接关联
 
                     # ===== Phase 4: Element 节点 (element type) =====
                     if batch_element_items:
@@ -2927,22 +2914,8 @@ class Neo4jStorage(GraphStorage):
                             element_list=element_list
                         )
 
-                        # Episode -> Element MENTIONS
-                        ep_el_pairs = [
-                            {"ep_uuid": it["episode_id"],
-                             "el_name_lower": (it["metadata"].get("key", it["text"][:50]) or "").lower(),
-                             "etype": it["metadata"].get("element_type", "Parameter").capitalize()}
-                            for it in batch_element_items
-                        ]
-                        tx.run(
-                            """
-                            UNWIND $pairs AS p
-                            MATCH (ep {uuid: p.ep_uuid}), (e:Entity:`p.etype` {name_lower: p.el_name_lower})
-                            MERGE (ep)-[r:MENTIONS]->(e)
-                            ON CREATE SET r.graph_id = $gid
-                            """,
-                            pairs=ep_el_pairs, gid=graph_id
-                        )
+                        # 注：不再创建 Episode->Element MENTIONS 边
+                        # Element 节点仅保留节点属性，通过 Topic 语义层间接关联
 
                     # ===== Phase 5: Topic + HAS_TOPIC (clause type with topic) =====
                     topic_clause_items = [
