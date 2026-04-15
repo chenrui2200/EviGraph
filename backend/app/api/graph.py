@@ -394,11 +394,13 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
 
                 if 'hierarchical_result' in dir() and hierarchical_result:
                     # 使用多层级分块存储
+                    build_logger.info(f"[{task_id}] 开始写入Neo4j episodes (共 {hierarchical_result.total_chunks} 个)...")
                     episode_uuids = builder.add_hierarchical_chunks(
                         graph_id,
                         hierarchical_result,
                         progress_callback=add_progress_callback
                     )
+                    build_logger.info(f"[{task_id}] ✅ Neo4j episodes写入完成: {len(episode_uuids)} 个")
 
                 # Topic/Entity 节点已在 clause 写入时 inline 创建（_create_clause_entity_only 中），无需单独处理
 
@@ -423,7 +425,15 @@ def _start_build_worker(project_id: str, task_id: str, storage, force: bool = Fa
                     message="Retrieving graph data...",
                     progress=95
                 )
-                graph_data = builder.get_graph_data(graph_id)
+                try:
+                    graph_data = builder.get_graph_data(graph_id)
+                    if graph_data.get("query_error"):
+                        build_logger.warning(f"[{task_id}] ⚠️ get_graph_data返回部分数据: {graph_data.get('query_error')}")
+                    else:
+                        build_logger.info(f"[{task_id}] ✅ get_graph_data成功: nodes={graph_data.get('node_count')}, edges={graph_data.get('edge_count')}")
+                except Exception as gd_err:
+                    build_logger.error(f"[{task_id}] ❌ get_graph_data异常: {gd_err}")
+                    graph_data = {"node_count": 0, "edge_count": 0, "nodes": [], "edges": []}
 
                 # Update project status
                 project.status = ProjectStatus.GRAPH_COMPLETED

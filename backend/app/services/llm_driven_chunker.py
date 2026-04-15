@@ -145,6 +145,8 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
         "source": clause.source or "",
         "page": clause.page,
         "page_idx": clause.metadata.get("page_idx") if clause.metadata else None,
+        # chunk_type 字段用于 batch_add_hierarchical_chunks 过滤 clause 类型
+        "chunk_type": clause.metadata.get("chunk_type", "clause") if clause.metadata else "clause",
         # 所有来源 chunk 的 bbox（按 page 分组，同页合并）
         "bboxs": clause.metadata.get("bboxs", []) if clause.metadata else [],
         # 来源 chunks.json 的 chunk_id（可能有多个，聚合跟踪）
@@ -2335,7 +2337,7 @@ topic：{topic}
             # 2. metadata 嵌套：chunk.get('metadata', {}).get('type')
             # 3. 旧格式 text 字段：chunk.get('text')
             metadata = chunk.get('metadata', {})
-            chunk_type = chunk.get('type') or metadata.get('type', '')
+            chunk_type = chunk.get('type') or metadata.get('type', '') or 'clause'
             content = chunk.get('content') or chunk.get('text') or metadata.get('content', '')
 
             # 调试日志：打印前 5 条 chunk 的 type 和 content

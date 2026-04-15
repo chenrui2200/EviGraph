@@ -283,21 +283,29 @@ const startGraphPolling = () => {
 
 const fetchGraphData = async () => {
   try {
-    // Refresh project info to check for graph_id
+    // Refresh project info to check for graph_id and status
     const projRes = await getProject(currentProjectId.value)
-    if (projRes.success && projRes.data.graph_id) {
-      const gRes = await getGraphData(projRes.data.graph_id)
-      if (gRes.success) {
-        const newNodeCount = gRes.data.node_count || gRes.data.nodes?.length || 0
-        const newEdgeCount = gRes.data.edge_count || gRes.data.edges?.length || 0
-        const oldNodeCount = graphData.value?.node_count || graphData.value?.nodes?.length || 0
-        const oldEdgeCount = graphData.value?.edge_count || graphData.value?.edges?.length || 0
-        // Only log when node/edge count actually changes
-        if (newNodeCount !== oldNodeCount || newEdgeCount !== oldEdgeCount) {
-          graphData.value = gRes.data
-          addLog(`Graph data refreshed. Nodes: ${newNodeCount}, Edges: ${newEdgeCount}`)
-        } else {
-          graphData.value = gRes.data
+    if (projRes.success) {
+      // 当后端状态已是 graph_completed 但前端 phase 尚未升级时，同步状态
+      if (projRes.data.status === 'graph_completed' && currentPhase.value < 2) {
+        currentPhase.value = 2
+        buildProgress.value = null
+        addLog('Project status synced: graph_completed')
+      }
+      if (projRes.data.graph_id) {
+        const gRes = await getGraphData(projRes.data.graph_id)
+        if (gRes.success) {
+          const newNodeCount = gRes.data.node_count || gRes.data.nodes?.length || 0
+          const newEdgeCount = gRes.data.edge_count || gRes.data.edges?.length || 0
+          const oldNodeCount = graphData.value?.node_count || graphData.value?.nodes?.length || 0
+          const oldEdgeCount = graphData.value?.edge_count || graphData.value?.edges?.length || 0
+          // Only log when node/edge count actually changes
+          if (newNodeCount !== oldNodeCount || newEdgeCount !== oldEdgeCount) {
+            graphData.value = gRes.data
+            addLog(`Graph data refreshed. Nodes: ${newNodeCount}, Edges: ${newEdgeCount}`)
+          } else {
+            graphData.value = gRes.data
+          }
         }
       }
     }
@@ -376,6 +384,7 @@ const handleTaskFinished = async (taskData) => {
     addLog('Graph build task completed.')
     stopGraphPolling()
     currentPhase.value = 2
+    buildProgress.value = null
     const projRes = await getProject(currentProjectId.value)
     if (projRes.success && projRes.data.graph_id) {
       projectData.value = projRes.data

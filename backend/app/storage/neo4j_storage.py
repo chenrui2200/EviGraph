@@ -1718,12 +1718,51 @@ class Neo4jStorage(GraphStorage):
 
             return has_topic_count, mentions_count
 
-        with self._driver.session() as session:
-            result = self._call_with_retry(session.execute_read, _read)
-            has_topic_count, mentions_count = self._call_with_retry(session.execute_read, _read_relation_stats)
-            result["has_topic_count"] = has_topic_count
-            result["mentions_count"] = mentions_count
-            return result
+        # 使用独立 session 避免被其他长查询阻塞，并设置 60s 事务超时
+        result = None
+        has_topic_count = 0
+        mentions_count = 0
+        try:
+            with self._driver.session() as session:
+                # 事务超时保护：防止大型查询永久阻塞
+                tx = session.begin_transaction(timeout=60)
+                try:
+                    result = _read(tx)
+                    tx.commit()
+                except Exception:
+                    tx.rollback()
+                    raise
+        except Exception as e:
+            logger.warning(f"[get_graph_data] Query timeout or error, returning partial result: {e}")
+            # 超时/错误时返回空图谱，避免 worker 线程永久卡死
+            return {
+                "graph_id": graph_id,
+                "nodes": [],
+                "edges": [],
+                "node_count": 0,
+                "edge_count": 0,
+                "has_topic_count": 0,
+                "mentions_count": 0,
+                "query_error": str(e)
+            }
+
+        try:
+            with self._driver.session() as session:
+                tx = session.begin_transaction(timeout=30)
+                try:
+                    has_topic_count, mentions_count = _read_relation_stats(tx)
+                    tx.commit()
+                except Exception:
+                    tx.rollback()
+                    raise
+        except Exception as e:
+            logger.warning(f"[get_graph_data] Stats query error: {e}")
+            has_topic_count = 0
+            mentions_count = 0
+
+        result["has_topic_count"] = has_topic_count
+        result["mentions_count"] = mentions_count
+        return result
 
     # ----------------------------------------------------------------
     # Dict conversion helpers
@@ -1762,9 +1801,6 @@ class Neo4jStorage(GraphStorage):
             labels_list = list(labels) if labels else []
             display_labels = labels_list
             display_name = props.get("name", "")
-            # Debug: log Entity nodes with their labels
-            if "Entity" in labels_list and not any(l in labels_list for l in ["Term", "Clause", "Section", "Component", "Action", "Condition", "Parameter", "Formula", "ExternalStandard"]):
-                logger.info(f"[DEBUG] Entity node: uuid={props.get('uuid')}, name={props.get('name')}, labels={display_labels}")
 
         return {
             "uuid": props.get("uuid", ""),
@@ -2193,7 +2229,9 @@ class Neo4jStorage(GraphStorage):
                 if not ref_result:
                     continue
 
-
+                # 解析 metadata_json（存储为 JSON 字符串）
+                metadata_json = ref_result.get("metadata_json")
+                metadata = self._parse_json_safe(metadata_json, {}) if metadata_json else {}
                 cross_refs = metadata.get("cross_refs", [])
                 if isinstance(cross_refs, str):
                     cross_refs = [cross_refs]
@@ -2377,6 +2415,535 @@ class Neo4jStorage(GraphStorage):
 
         logger.info(f"[hierarchical] Created episode {episode_id[:8]} (Level{level}, {chunk_type}) clause_id={metadata.get('clause_id','') or metadata.get('key','')}")
         return episode_id
+
+    def batch_add_hierarchical_chunks(
+        self,
+        graph_id: str,
+        chunks_batch: List[Dict[str, Any]],
+        embeddings_map: Dict[int, List[float]],
+        progress_callback: Optional[Callable] = None,
+    ) -> List[Optional[str]]:
+        """
+        批量插入层级分块（UNWIND 单事务版）
+
+        相较于逐条 add_hierarchical_chunk_with_entities：
+        - 减少 N 次事务开销为 BATCH_SIZE 次
+        - UNWIND 批量创建 Episode/Clause 节点
+        - 同一事务内完成 Episode-Clause-Topic-Term/Entity 全量创建
+
+        Args:
+            graph_id: 图谱ID
+            chunks_batch: chunk 列表，每个包含 text/metadata/chunk_type/level
+            embeddings_map: idx -> embedding 向量（预生成，由调用方并发生成）
+            progress_callback: 进度回调 (processed, total)
+
+        Returns:
+            episode_id 列表（顺序与 chunks_batch 一致，失败返回 None）
+        """
+        BATCH_SIZE = 50  # 每批处理量，控制单次事务参数规模
+        total = len(chunks_batch)
+        episode_ids: List[Optional[str]] = [None] * total
+        now_base = datetime.now(timezone.utc).isoformat()
+
+        def _push_progress(processed: int):
+            if progress_callback and callable(progress_callback):
+                progress_callback(processed, total)
+
+        # 分批处理，避免单次事务参数过大
+        for batch_start in range(0, total, BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE, total)
+            batch_items = []
+            for i in range(batch_start, batch_end):
+                chunk = chunks_batch[i]
+                text = chunk.get("text") or chunk.get("content", "")
+                metadata = chunk.get("metadata", {})
+                chunk_type = chunk.get("chunk_type", "clause")
+                level = chunk.get("level", 2)
+                if not text or not text.strip():
+                    continue
+                # 稳定 UUID
+                clause_id_meta = metadata.get("clause_id", "")
+                if clause_id_meta:
+                    ep_seed = f"{graph_id}:{clause_id_meta}".encode()
+                else:
+                    ep_seed = f"{graph_id}:{text}".encode()
+                episode_id = str(uuid.UUID(hashlib.md5(ep_seed).hexdigest()))
+                clause_uuid_seed = f"{graph_id}:{clause_id_meta}:clause".encode() if clause_id_meta else None
+                clause_uuid = str(uuid.UUID(hashlib.md5(clause_uuid_seed).hexdigest())) if clause_uuid_seed else None
+                batch_items.append({
+                    "idx": i,
+                    "episode_id": episode_id,
+                    "clause_uuid": clause_uuid,
+                    "text": text,
+                    "metadata": metadata,
+                    "chunk_type": chunk_type,
+                    "level": level,
+                    "embedding": embeddings_map.get(i, []),
+                    "now": now_base,
+                })
+                episode_ids[i] = episode_id
+
+            if not batch_items:
+                continue
+
+            batch_clause_items = [it for it in batch_items if it["chunk_type"] == "clause" and it["clause_uuid"]]
+            batch_section_items = [it for it in batch_items if it["chunk_type"] == "section"]
+            batch_element_items = [it for it in batch_items if it["chunk_type"] == "element"]
+
+            with self._driver.session() as session:
+
+                def _batch_write(tx):
+                    # ===== Phase 1: Episode 节点 (section/clause/element 统一) =====
+                    ep_list = []
+                    for it in batch_items:
+                        ep_meta = it["metadata"]
+                        ep_source = ep_meta.get("source", "")
+                        ep_page = ep_meta.get("page", 0)
+                        ep_pdf_bboxes_raw = ep_meta.get("bboxs", [])
+                        if not ep_pdf_bboxes_raw:
+                            single_bbox = ep_meta.get("bbox")
+                            if single_bbox:
+                                if isinstance(single_bbox, list) and len(single_bbox) >= 4:
+                                    ep_pdf_bboxes_raw = [[ep_page or 1] + single_bbox[:4]]
+                                elif isinstance(single_bbox, dict):
+                                    ep_pdf_bboxes_raw = [[ep_page or 1,
+                                                      single_bbox.get('x0', 0), single_bbox.get('y0', 0),
+                                                      single_bbox.get('x1', 0), single_bbox.get('y1', 0)]]
+                        ep_pdf_bboxes = json.dumps(ep_pdf_bboxes_raw, ensure_ascii=False) if ep_pdf_bboxes_raw else "[]"
+                        ep_pdf_page_width = ep_meta.get("page_width")
+                        ep_pdf_page_height = ep_meta.get("page_height")
+                        clause_id_ep = ep_meta.get("clause_id", "")
+                        ep_list.append({
+                            "uuid": it["episode_id"],
+                            "graph_id": graph_id,
+                            "data": it["text"],
+                            "metadata_json": json.dumps(ep_meta, ensure_ascii=False),
+                            "embedding": it["embedding"],
+                            "created_at": it["now"],
+                            "source": ep_source,
+                            "page": ep_page,
+                            "clause_id": clause_id_ep,
+                            "pdf_source": ep_source,
+                            "pdf_page": ep_page,
+                            "pdf_bboxes": ep_pdf_bboxes,
+                            "pdf_page_width": ep_pdf_page_width,
+                            "pdf_page_height": ep_pdf_page_height,
+                        })
+
+                    tx.run(
+                        """
+                        UNWIND $ep_list AS ep
+                        MERGE (e:Episode {uuid: ep.uuid})
+                        ON CREATE SET
+                            e.graph_id = ep.graph_id,
+                            e.data = ep.data,
+                            e.metadata_json = ep.metadata_json,
+                            e.processed = true,
+                            e.embedding = ep.embedding,
+                            e.created_at = ep.created_at,
+                            e.source = ep.source,
+                            e.page = ep.page,
+                            e.clause_id = ep.clause_id,
+                            e.pdf_source = ep.pdf_source,
+                            e.pdf_page = ep.pdf_page,
+                            e.pdf_bboxes = ep.pdf_bboxes,
+                            e.pdf_page_width = ep.pdf_page_width,
+                            e.pdf_page_height = ep.pdf_page_height
+                        ON MATCH SET
+                            e.graph_id = ep.graph_id,
+                            e.data = ep.data,
+                            e.metadata_json = ep.metadata_json,
+                            e.embedding = ep.embedding,
+                            e.source = COALESCE(e.source, ep.source),
+                            e.page = COALESCE(e.page, ep.page),
+                            e.clause_id = ep.clause_id,
+                            e.pdf_source = COALESCE(e.pdf_source, ep.pdf_source),
+                            e.pdf_page = COALESCE(e.pdf_page, ep.pdf_page),
+                            e.pdf_bboxes = COALESCE(e.pdf_bboxes, ep.pdf_bboxes),
+                            e.pdf_page_width = COALESCE(e.pdf_page_width, ep.pdf_page_width),
+                            e.pdf_page_height = COALESCE(e.pdf_page_height, ep.pdf_page_height)
+                        """,
+                        ep_list=ep_list
+                    )
+
+                    # 移除 Episode 标签，统一为 Clause
+                    tx.run("MATCH (e:Episode) WHERE e.graph_id = $gid REMOVE e:Episode SET e:Clause", gid=graph_id)
+
+                    # ===== Phase 2: Clause 节点 (clause type) =====
+                    if batch_clause_items:
+                        clause_list = []
+                        for it in batch_clause_items:
+                            m = it["metadata"]
+                            cid = m.get("clause_id", "").strip()
+                            clause_name = f"条款{cid}"
+                            clause_req = m.get("requirement_type", "recommended").lower()
+                            ep_pdf_bboxes_raw = m.get("bboxs", [])
+                            if not ep_pdf_bboxes_raw:
+                                single_bbox = m.get("bbox")
+                                if single_bbox:
+                                    if isinstance(single_bbox, list) and len(single_bbox) >= 4:
+                                        ep_pdf_bboxes_raw = [[(m.get("page") or 1)] + single_bbox[:4]]
+                                    elif isinstance(single_bbox, dict):
+                                        ep_pdf_bboxes_raw = [[(m.get("page") or 1),
+                                                      single_bbox.get('x0', 0), single_bbox.get('y0', 0),
+                                                      single_bbox.get('x1', 0), single_bbox.get('y1', 0)]]
+                            ep_pdf_bboxes = json.dumps(ep_pdf_bboxes_raw, ensure_ascii=False) if ep_pdf_bboxes_raw else "[]"
+                            clause_list.append({
+                                "uuid": it["clause_uuid"],
+                                "graph_id": graph_id,
+                                "clause_id": cid,
+                                "name": clause_name,
+                                "name_lower": clause_name.lower(),
+                                "summary": it["text"],
+                                "embedding": it["embedding"],
+                                "req_type": clause_req,
+                                "pdf_source": m.get("source"),
+                                "pdf_page": m.get("page"),
+                                "pdf_bboxes": ep_pdf_bboxes,
+                                "pdf_page_width": m.get("page_width"),
+                                "pdf_page_height": m.get("page_height"),
+                            })
+
+                        tx.run(
+                            """
+                            UNWIND $clause_list AS c
+                            MERGE (e:Clause {graph_id: c.graph_id, clause_id: c.clause_id})
+                            ON CREATE SET
+                                e.uuid = c.uuid,
+                                e.name = c.name,
+                                e.name_lower = c.name_lower,
+                                e.summary = c.summary,
+                                e.embedding = c.embedding,
+                                e.requirement_type = c.req_type,
+                                e.pdf_source = c.pdf_source,
+                                e.pdf_page = c.pdf_page,
+                                e.pdf_bboxes = c.pdf_bboxes,
+                                e.pdf_page_width = c.pdf_page_width,
+                                e.pdf_page_height = c.pdf_page_height,
+                                e.created_at = datetime()
+                            ON MATCH SET
+                                e.embedding = c.embedding,
+                                e.summary = COALESCE(e.summary, c.summary),
+                                e.pdf_source = COALESCE(e.pdf_source, c.pdf_source),
+                                e.pdf_page = COALESCE(e.pdf_page, c.pdf_page),
+                                e.pdf_bboxes = COALESCE(e.pdf_bboxes, c.pdf_bboxes),
+                                e.pdf_page_width = COALESCE(e.pdf_page_width, c.pdf_page_width),
+                                e.pdf_page_height = COALESCE(e.pdf_page_height, c.pdf_page_height)
+                            """,
+                            clause_list=clause_list
+                        )
+
+                        # Episode -> Clause MENTIONS
+                        # 注意：Phase 1 已将所有 Episode 标记为 Clause，
+                        # 但 Phase 2 MERGE 匹配到 Phase 1 节点时 UUID 不变（仍为 episode_id）
+                        # 所以 MENTIONS 的 source 和 target 实际上是同一个节点，跳过
+                        ep_clause_pairs = [
+                            {"ep_uuid": it["episode_id"], "clause_uuid": it["episode_id"]}
+                            for it in batch_clause_items
+                            if it["episode_id"] != it["clause_uuid"]
+                        ]
+                        if ep_clause_pairs:
+                            tx.run(
+                                """
+                                UNWIND $pairs AS p
+                                MATCH (ep {uuid: p.ep_uuid}), (c:Clause {uuid: p.clause_uuid})
+                                MERGE (ep)-[r:MENTIONS]->(c)
+                                ON CREATE SET r.graph_id = $gid
+                                """,
+                                pairs=ep_clause_pairs, gid=graph_id
+                            )
+
+                    # ===== Phase 3: Section 节点 (section type) =====
+                    if batch_section_items:
+                        section_list = []
+                        for it in batch_section_items:
+                            m = it["metadata"]
+                            title = m.get("title", it["text"][:50])
+                            chapter_num = m.get("chapter_number")
+                            section_num = m.get("section_number")
+                            summary = f"章节 {chapter_num}.{section_num if section_num else ''} - {title}" if chapter_num else title
+                            sec_uuid = str(uuid.UUID(hashlib.md5(
+                                f"{graph_id}:Section:{title}".encode()).hexdigest()))
+                            section_list.append({
+                                "uuid": sec_uuid,
+                                "graph_id": graph_id,
+                                "name": title,
+                                "name_lower": title.lower(),
+                                "summary": summary,
+                                "embedding": it["embedding"],
+                            })
+
+                        tx.run(
+                            """
+                            UNWIND $section_list AS s
+                            MERGE (e:Entity:Section {graph_id: s.graph_id, name_lower: s.name_lower})
+                            ON CREATE SET
+                                e.uuid = s.uuid,
+                                e.name = s.name,
+                                e.summary = s.summary,
+                                e.embedding = s.embedding,
+                                e.created_at = datetime()
+                            ON MATCH SET
+                                e.embedding = s.embedding,
+                                e.summary = CASE WHEN e.summary = '' OR e.summary IS NULL THEN s.summary ELSE e.summary END
+                            """,
+                            section_list=section_list
+                        )
+
+                        # Episode -> Section MENTIONS
+                        ep_sec_pairs = [
+                            {"ep_uuid": it["episode_id"],
+                             "sec_name_lower": (it["metadata"].get("title", it["text"][:50]) or "").lower()}
+                            for it in batch_section_items
+                        ]
+                        tx.run(
+                            """
+                            UNWIND $pairs AS p
+                            MATCH (ep {uuid: p.ep_uuid}), (e:Entity:Section {name_lower: p.sec_name_lower})
+                            MERGE (ep)-[r:MENTIONS]->(e)
+                            ON CREATE SET r.graph_id = $gid
+                            """,
+                            pairs=ep_sec_pairs, gid=graph_id
+                        )
+
+                    # ===== Phase 4: Element 节点 (element type) =====
+                    if batch_element_items:
+                        element_list = []
+                        for it in batch_element_items:
+                            m = it["metadata"]
+                            etype = m.get("element_type", "parameter").capitalize()
+                            if etype not in ["Formula", "Parameter", "Term"]:
+                                etype = "Parameter"
+                            key = m.get("key", it["text"][:50])
+                            value = m.get("value", "")
+                            unit = m.get("unit", "")
+                            condition = m.get("condition", "")
+                            source_id = m.get("source_id", "")
+                            parts = []
+                            if source_id: parts.append(f"来源: {source_id}")
+                            if value: parts.append(f"值: {value}")
+                            if unit: parts.append(f"单位: {unit}")
+                            if condition: parts.append(f"条件: {condition}")
+                            summary = " | ".join(parts) if parts else f"{etype}类型要素"
+                            ent_uuid = str(uuid.UUID(hashlib.md5(
+                                f"{graph_id}:{etype}:{key}".encode()).hexdigest()))
+                            element_list.append({
+                                "uuid": ent_uuid,
+                                "graph_id": graph_id,
+                                "name": key,
+                                "name_lower": key.lower(),
+                                "summary": summary,
+                                "embedding": it["embedding"],
+                                "etype": etype,
+                            })
+
+                        tx.run(
+                            """
+                            UNWIND $element_list AS el
+                            MERGE (e:Entity:`el.etype` {graph_id: el.graph_id, name_lower: el.name_lower})
+                            ON CREATE SET
+                                e.uuid = el.uuid,
+                                e.name = el.name,
+                                e.summary = el.summary,
+                                e.embedding = el.embedding,
+                                e.created_at = datetime()
+                            ON MATCH SET
+                                e.embedding = el.embedding,
+                                e.summary = CASE WHEN e.summary = '' OR e.summary IS NULL THEN e.summary ELSE e.summary END
+                            """,
+                            element_list=element_list
+                        )
+
+                        # Episode -> Element MENTIONS
+                        ep_el_pairs = [
+                            {"ep_uuid": it["episode_id"],
+                             "el_name_lower": (it["metadata"].get("key", it["text"][:50]) or "").lower(),
+                             "etype": it["metadata"].get("element_type", "Parameter").capitalize()}
+                            for it in batch_element_items
+                        ]
+                        tx.run(
+                            """
+                            UNWIND $pairs AS p
+                            MATCH (ep {uuid: p.ep_uuid}), (e:Entity:`p.etype` {name_lower: p.el_name_lower})
+                            MERGE (ep)-[r:MENTIONS]->(e)
+                            ON CREATE SET r.graph_id = $gid
+                            """,
+                            pairs=ep_el_pairs, gid=graph_id
+                        )
+
+                    # ===== Phase 5: Topic + HAS_TOPIC (clause type with topic) =====
+                    topic_clause_items = [
+                        it for it in batch_clause_items
+                        if it["metadata"].get("topic")
+                    ]
+                    if topic_clause_items:
+                        topic_list = []
+                        for it in topic_clause_items:
+                            cid = it["metadata"].get("clause_id", "").strip()
+                            topic_text = it["metadata"].get("topic", "")
+                            topic_uuid = str(uuid.UUID(hashlib.md5(
+                                f"{graph_id}:{cid}:topic".encode()).hexdigest()))
+                            topic_list.append({
+                                "uuid": topic_uuid,
+                                "clause_uuid": it["clause_uuid"],
+                                "clause_id": cid,
+                                "topic": topic_text,
+                                "graph_id": graph_id,
+                                "created_at": it["now"],
+                            })
+
+                        tx.run(
+                            """
+                            UNWIND $topic_list AS t
+                            MERGE (tp:Topic {uuid: t.uuid})
+                            ON CREATE SET
+                                tp.graph_id = t.graph_id,
+                                tp.topic = t.topic,
+                                tp.clause_id = t.clause_id,
+                                tp.created_at = t.created_at,
+                                tp.name = t.topic
+                            ON MATCH SET
+                                tp.topic = t.topic,
+                                tp.clause_id = t.clause_id,
+                                tp.name = t.topic
+                            """,
+                            topic_list=topic_list
+                        )
+
+                        # Clause -> Topic HAS_TOPIC
+                        # 注意：Clause 节点的 UUID 是 Phase 1 创建的 episode_id，
+                        # Phase 2 MERGE 匹配到已有节点时 ON CREATE SET 不执行，UUID 不变
+                        clause_topic_pairs = [
+                            {"clause_uuid": it["episode_id"],
+                             "topic_uuid": str(uuid.UUID(hashlib.md5(
+                                 f"{graph_id}:{it['metadata'].get('clause_id', '').strip()}:topic".encode()).hexdigest()))}
+                            for it in topic_clause_items
+                        ]
+                        tx.run(
+                            """
+                            UNWIND $pairs AS p
+                            MATCH (c:Clause {uuid: p.clause_uuid}), (tp:Topic {uuid: p.topic_uuid})
+                            MERGE (c)-[r:HAS_TOPIC]->(tp)
+                            SET r.graph_id = $gid, r.created_at = datetime()
+                            """,
+                            pairs=clause_topic_pairs, gid=graph_id
+                        )
+
+                        # ===== Phase 6: Term 节点 + Topic-MENTIONS (unique per graph_id+term_name) =====
+                        all_terms = []
+                        term_topic_map = []  # (term_uuid, topic_uuid) pairs
+                        term_seen = set()
+                        for it in topic_clause_items:
+                            cid = it["metadata"].get("clause_id", "").strip()
+                            topic_uuid = str(uuid.UUID(hashlib.md5(
+                                f"{graph_id}:{cid}:topic".encode()).hexdigest()))
+                            for term_item in it["metadata"].get("terms", []):
+                                t_name = term_item if isinstance(term_item, str) else term_item.get("term_name", "")
+                                if not t_name or t_name in term_seen:
+                                    continue
+                                term_seen.add(t_name)
+                                t_def = term_item.get("definition", "") if isinstance(term_item, dict) else ""
+                                t_uuid = str(uuid.UUID(hashlib.md5(
+                                    f"{graph_id}:{t_name}:term".encode()).hexdigest()))
+                                all_terms.append({
+                                    "uuid": t_uuid,
+                                    "graph_id": graph_id,
+                                    "name": t_name,
+                                    "name_lower": t_name.lower(),
+                                    "definition": t_def,
+                                    "entity_label": "Term",
+                                    "created_at": it["now"],
+                                })
+                                term_topic_map.append({"uuid": t_uuid, "topic_uuid": topic_uuid})
+
+                        if all_terms:
+                            tx.run(
+                                """
+                                UNWIND $terms AS t
+                                MERGE (e:Entity:Term {uuid: t.uuid})
+                                ON CREATE SET
+                                    e.graph_id = t.graph_id,
+                                    e.name = t.name,
+                                    e.definition = t.definition,
+                                    e.entity_label = t.entity_label,
+                                    e.created_at = t.created_at,
+                                    e.name_lower = t.name_lower
+                                ON MATCH SET
+                                    e.name = t.name,
+                                    e.definition = COALESCE(e.definition, t.definition),
+                                    e.name_lower = t.name_lower
+                                """,
+                                terms=all_terms
+                            )
+
+                            tx.run(
+                                """
+                                UNWIND $pairs AS p
+                                MATCH (tp:Topic {uuid: p.topic_uuid}), (e:Entity:Term {uuid: p.uuid})
+                                MERGE (tp)-[r:MENTIONS]->(e)
+                                SET r.graph_id = $gid, r.created_at = datetime()
+                                """,
+                                pairs=term_topic_map, gid=graph_id
+                            )
+
+                        # ===== Phase 7: Entity 节点 + Topic-MENTIONS (unique per graph_id+entity_name) =====
+                        all_entities = []
+                        entity_topic_map = []
+                        ent_seen = set()
+                        for it in topic_clause_items:
+                            cid = it["metadata"].get("clause_id", "").strip()
+                            topic_uuid = str(uuid.UUID(hashlib.md5(
+                                f"{graph_id}:{cid}:topic".encode()).hexdigest()))
+                            for ent_item in it["metadata"].get("entities", []):
+                                e_name = ent_item if isinstance(ent_item, str) else ent_item.get("key", ent_item.get("name", ""))
+                                if not e_name or e_name in ent_seen:
+                                    continue
+                                ent_seen.add(e_name)
+                                e_uuid = str(uuid.UUID(hashlib.md5(
+                                    f"{graph_id}:{e_name}:entity".encode()).hexdigest()))
+                                all_entities.append({
+                                    "uuid": e_uuid,
+                                    "graph_id": graph_id,
+                                    "name": e_name,
+                                    "name_lower": e_name.lower(),
+                                    "created_at": it["now"],
+                                })
+                                entity_topic_map.append({"uuid": e_uuid, "topic_uuid": topic_uuid})
+
+                        if all_entities:
+                            tx.run(
+                                """
+                                UNWIND $entities AS e
+                                MERGE (ent:Entity {uuid: e.uuid})
+                                ON CREATE SET
+                                    ent.graph_id = e.graph_id,
+                                    ent.name = e.name,
+                                    ent.name_lower = e.name_lower,
+                                    ent.created_at = e.created_at,
+                                    ent.entity_label = 'Entity'
+                                ON MATCH SET
+                                    ent.name = e.name,
+                                    ent.name_lower = e.name_lower
+                                """,
+                                entities=all_entities
+                            )
+
+                            tx.run(
+                                """
+                                UNWIND $pairs AS p
+                                MATCH (tp:Topic {uuid: p.topic_uuid}), (ent:Entity {uuid: p.uuid})
+                                MERGE (tp)-[r:MENTIONS]->(ent)
+                                SET r.graph_id = $gid, r.created_at = datetime()
+                                """,
+                                pairs=entity_topic_map, gid=graph_id
+                            )
+
+                self._call_with_retry(session.execute_write, _batch_write)
+
+            _push_progress(batch_end)
+
+        logger.info(f"[batch] Completed: {total} chunks -> episode_ids")
+        return episode_ids
 
     def add_topic_and_entity_nodes(
         self,
@@ -2660,6 +3227,7 @@ class Neo4jStorage(GraphStorage):
 
         # 获取条款级要求类型（fallback）
         clause_requirement = metadata.get('requirement_type', 'recommended').lower()
+        now = datetime.now(timezone.utc).isoformat()
 
         # 提取 PDF 定位信息
         pdf_source = metadata.get('source')

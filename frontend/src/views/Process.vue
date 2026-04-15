@@ -384,7 +384,7 @@
             <div class="phase-detail" v-if="currentPhase >= 2">
               <div class="detail-section">
                 <div class="detail-label">召回测试</div>
-                <div class="hit-test-box">
+                <div class="hit-test-box" :class="{ ready: currentPhase >= 2 }">
                   <div class="search-input-wrapper">
                     <input
                       v-model="hitTestQuery"
@@ -827,13 +827,14 @@ const loadProject = async () => {
       updatePhaseByStatus(response.data.status)
 
       // Automatically start graph building
-      if (response.data.status === 'ontology_generated' && !response.data.graph_id) {
+      if ((response.data.status === 'ontology_generated' || response.data.status === 'graph_chunked') && !response.data.graph_id) {
         await startBuildGraph()
       }
 
       // Continue polling running build tasks (including intermediate states)
       const buildStatuses = ['graph_building', 'graph_chunking', 'graph_embedding', 'graph_indexing']
-      if (buildStatuses.includes(response.data.status) && response.data.graph_build_task_id) {
+      // graph_chunked: chunking completed, build may not have started yet — poll its task_id if exists
+      if ((buildStatuses.includes(response.data.status) || response.data.status === 'graph_chunked') && response.data.graph_build_task_id) {
         currentPhase.value = 1
         startPollingTask(response.data.graph_build_task_id)
         startGraphPolling() // Also ensure graph data is being polled
@@ -861,6 +862,7 @@ const updatePhaseByStatus = (status) => {
       currentPhase.value = 0
       break
     case 'ontology_generated':
+    case 'graph_chunked':  // Chunking done, graph build may be pending
     case 'graph_building':
     case 'graph_chunking':
     case 'graph_embedding':
@@ -962,6 +964,13 @@ const fetchGraphData = async () => {
       const graphId = projectResponse.data.graph_id
       projectData.value = projectResponse.data
 
+      // Handle graph build completed status (via polling fallback)
+      if (projectResponse.data.status === 'graph_completed' && currentPhase.value < 2) {
+        currentPhase.value = 2
+        stopGraphPolling()
+        buildProgress.value = null
+      }
+
       // Fetch graph data
       const graphResponse = await getGraphData(graphId)
 
@@ -1013,6 +1022,12 @@ const startPollingTask = (taskId, type = 'build') => {
         }
 
         updateTaskUI(task, type)
+
+        // If task already completed when SSE connects, trigger finish transition
+        if (task.status === 'completed' || task.status === 'graph_completed') {
+          handleTaskFinished(task, type)
+          stopPolling()
+        }
         return
       }
 
@@ -1045,10 +1060,17 @@ const startPollingTask = (taskId, type = 'build') => {
 
   taskSource.onerror = (err) => {
     console.error('SSE connection error:', err)
-    // Fallback to single status check if SSE fails
+    // Fallback: also update systemLogs from task's historical logs
     getTaskStatus(taskId).then(res => {
       if (res.success) {
         updateTaskUI(res.data, type)
+        // 回填历史日志（避免 SSE 掉线后日志停止更新）
+        if (res.data.logs && res.data.logs.length > 0) {
+          systemLogs.value = res.data.logs.map(l => ({
+            time: l.timestamp,
+            msg: l.message
+          }))
+        }
         if (res.data.status === 'completed' || res.data.status === 'failed') {
           handleTaskFinished(res.data, type)
           stopPolling()
@@ -1081,7 +1103,7 @@ const updateTaskUI = (taskData, type) => {
 
 // Handle task finished transition
 const handleTaskFinished = async (taskData, type) => {
-  if (taskData.status === 'completed') {
+  if (taskData.status === 'completed' || taskData.status === 'graph_completed') {
     console.log(`✅ ${type} task transition triggered`)
 
     if (type === 'ontology') {
@@ -2263,6 +2285,11 @@ onBeforeUnmount(() => {
 .hit-test-box {
   margin-top: 12px;
 }
+.hit-test-box.ready {
+  border: 2px solid #E53935;
+  border-radius: 8px;
+  padding: 12px;
+}
 
 .search-input-wrapper {
   display: flex;
@@ -2546,7 +2573,7 @@ onBeforeUnmount(() => {
   color: #fff;
   padding: 16px 24px;
   font-family: 'JetBrains Mono', monospace;
-  height: 160px;
+  height: 480px;
   display: flex;
   flex-direction: column;
   border-top: 1px solid #333;
@@ -2555,7 +2582,7 @@ onBeforeUnmount(() => {
 }
 
 .system-logs.minimized {
-  transform: translateY(120px);
+  transform: translateY(400px);
 }
 
 .system-logs.minimized:hover {
@@ -2607,7 +2634,7 @@ onBeforeUnmount(() => {
 }
 
 .log-content {
-  flex: 1;
+  height: 400px;
   overflow-y: auto;
   font-size: 0.75rem;
   display: flex;

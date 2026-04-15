@@ -163,9 +163,13 @@ class HierarchicalChunk:
         if self.page:
             episode_metadata["page"] = self.page
 
+        # chunk_type 提升到顶层，供 batch_add_hierarchical_chunks 使用
+        chunk_type = episode_metadata.get("chunk_type", "clause")
+
         return {
             "text": self.content,
-            "metadata": episode_metadata
+            "metadata": episode_metadata,
+            "chunk_type": chunk_type,
         }
 
 

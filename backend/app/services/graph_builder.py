@@ -299,22 +299,61 @@ class GraphBuilderService:
                 log_msg = f"Processed {processed}/{total_chunks} chunks"
                 progress_callback(log_msg, mapped_progress / 100)
 
-        # 批量存储（只存储 Level1/Level2，Level3 elements 由 Topic-Entity 关系处理）
-        for idx, chunk_dict in enumerate(all_chunks):
-            # 跳过 Level3 element（不创建 Episode 节点，由 add_topic_and_entity_nodes 处理 Topic-Entity）
-            if chunk_dict.get('level') == 3:
-                continue
-            try:
-                # 使用add_hierarchical_chunk_with_entities创建Episode和Entity
-                episode_id = self.storage.add_hierarchical_chunk_with_entities(graph_id, chunk_dict)
-                if episode_id:  # Skip empty chunks
-                    episode_ids.append(episode_id)
-            except Exception as e:
-                logger.error(f"[hierarchical] Failed to add chunk: {e}")
+        # 过滤 Level3 element，只保留 Level1/Level2（Level3 由 Topic-Entity 关系处理）
+        work_items = [
+            (idx, chunk_dict) for idx, chunk_dict in enumerate(all_chunks)
+            if chunk_dict.get('metadata', {}).get('level') != 3
+        ]
+        total_work = len(work_items)
+        logger.info(f"[hierarchical] Filtering: {total} total -> {total_work} chunks (excluded level=3)")
 
-            if (idx + 1) % 10 == 0:
-                wrapped_callback(idx + 1, total)
-                logger.info(f"[hierarchical] Progress: {idx + 1}/{total}")
+        # 第一阶段：并发生成所有 embeddings（Embedding 服务无状态，线程安全）
+        logger.info(f"[hierarchical] Phase 1: Pre-generating {total_work} embeddings with max_workers=12")
+        wrapped_callback(0, total_work)
+        embeddings_map: Dict[int, List[float]] = {}
+
+        def gen_embedding(args):
+            idx, chunk_dict = args
+            try:
+                text = chunk_dict.get("text") or chunk_dict.get("content", "")
+                if not text or not text.strip():
+                    return idx, []
+                emb = self.storage._embedding.embed(text)
+                return idx, emb
+            except Exception as e:
+                logger.warning(f"[hierarchical] Embedding failed for idx={idx}: {e}")
+                return idx, []
+
+        with ThreadPoolExecutor(max_workers=12) as emb_executor:
+            emb_futures = {emb_executor.submit(gen_embedding, item): item for item in work_items}
+            for fut in as_completed(emb_futures):
+                idx, emb = fut.result()
+                embeddings_map[idx] = emb
+
+        logger.info(f"[hierarchical] Phase 1 done: {len(embeddings_map)} embeddings generated")
+
+        # 第二阶段：UNWIND 批量写入 Neo4j（单事务，批量节点创建）
+        logger.info(f"[hierarchical] Phase 2: Batch UNWIND writing {total_work} chunks to Neo4j")
+
+        def batch_progress_callback(processed, total_chunks):
+            wrapped_callback(processed, total_chunks)
+            if processed == 1:
+                logger.info(f"[hierarchical] First batch committed: 1 chunk written to Neo4j")
+
+        chunks_to_write = [chunk_dict for _, chunk_dict in work_items]
+        try:
+            episode_ids_from_batch = self.storage.batch_add_hierarchical_chunks(
+                graph_id,
+                chunks_to_write,
+                embeddings_map,
+                progress_callback=batch_progress_callback,
+            )
+            # 按原始顺序组装 episode_ids（batch 返回顺序与 work_items 一致）
+            episode_ids = [eid for eid in episode_ids_from_batch if eid]
+            logger.info(f"[hierarchical] ✅ Neo4j写入成功: {len(episode_ids)}/{total} episodes created")
+        except Exception as e:
+            logger.error(f"[hierarchical] ❌ Neo4j写入失败: {e}")
+            raise
 
         # 构建交叉引用关系
         try:
