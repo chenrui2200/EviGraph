@@ -298,12 +298,20 @@
 
         <!-- Document Viewer Panel (Flex-in) -->
         <div class="doc-viewer-panel" :class="{ 'open': showDocViewer || isSupplementMode, 'supplement-mode': isSupplementMode }">
-          <div class="viewer-header">
-            <template v-if="!isSupplementMode">
-              <span class="viewer-filename">{{ currentDoc.filename }}</span>
-              <button class="close-viewer" @click="showDocViewer = false">✕</button>
-            </template>
-            <template v-else>
+          <template v-if="!isSupplementMode">
+            <PdfViewer
+              v-model="showDocViewer"
+              :filename="currentDoc.filename"
+              :url="currentDoc.url"
+              :page="currentDoc.page"
+              :bbox="currentDoc.bbox"
+              :page-width="currentDoc.pageWidth"
+              :page-height="currentDoc.pageHeight"
+              :pdf-bboxes="currentDoc.pdfBboxes"
+            />
+          </template>
+          <template v-else>
+            <div class="viewer-header">
               <div class="supplement-tools">
                 <span class="tool-title">知识补录模式: 请在下方 PDF 区域圈选缺失内容</span>
                 <div class="tool-actions">
@@ -316,76 +324,52 @@
                   <button class="exit-btn" @click="exitSupplement">取消退出</button>
                 </div>
               </div>
-            </template>
-          </div>
-          <div class="viewer-body" ref="viewerContainer">
-            <div class="pdf-render-wrapper"
-                 @mousedown="handleSelectionStart"
-                 @mousemove="handleSelectionMove"
-                 @mouseup="handleSelectionEnd"
-                 :class="{ 'crosshair-cursor': isSupplementMode }">
-              <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
+            </div>
+            <div class="viewer-body" ref="viewerContainer">
+              <div class="pdf-render-wrapper crosshair-cursor"
+                   @mousedown="handleSelectionStart"
+                   @mousemove="handleSelectionMove"
+                   @mouseup="handleSelectionEnd"
+              >
+                <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
 
-              <!-- Highlight SVG Overlay (Locate mode only) -->
-              <!-- 支持单 bbox 和多页 bbox (pdfBboxes: [[page, x0, y0, x1, y1], ...]) -->
-              <svg v-if="!isSupplementMode && (currentDoc.bbox || currentDoc.pdfBboxes)" class="pdf-highlight-overlay" :viewBox="`0 0 ${currentDoc.pageWidth || 600} ${currentDoc.pageHeight || 800}`">
-                <!-- 单 bbox 渲染 -->
-                <rect v-if="currentDoc.bbox && currentDoc.bbox.length === 4"
-                  :x="currentDoc.bbox[0]"
-                  :y="currentDoc.bbox[1]"
-                  :width="currentDoc.bbox[2] - currentDoc.bbox[0]"
-                  :height="currentDoc.bbox[3] - currentDoc.bbox[1]"
-                  class="highlight-rect"
-                />
-                <!-- 多页 bbox 渲染：当前页对应的高亮框 -->
-                <template v-if="currentDoc.pdfBboxes && Array.isArray(currentDoc.pdfBboxes)">
-                  <rect v-for="(bb, idx) in currentDoc.pdfBboxes.filter(b => b && b.length >= 5 && b[0] === currentDoc.page)"
-                    :key="'multi-bbox-' + idx"
-                    :x="bb[1]"
-                    :y="bb[2]"
-                    :width="bb[3] - bb[1]"
-                    :height="bb[4] - bb[2]"
-                    class="highlight-rect multi-page-highlight"
+                <!-- Active Drawing Rect -->
+                <div v-if="isDraggingSelection" class="drawing-rect" :style="drawingRectStyle"></div>
+
+                <!-- Finished Selection Rects -->
+                <div v-for="(region, ridx) in selectedRegions" :key="ridx"
+                     v-show="region.page === currentDoc.page"
+                     class="saved-rect"
+                     :style="getSavedRectStyle(region)">
+                  <span class="rect-idx">{{ ridx + 1 }}</span>
+                  <button class="remove-rect" @click.stop="removeRegion(ridx)">×</button>
+                </div>
+              </div>
+
+              <!-- Page Navigation for Supplement Mode -->
+              <div class="page-nav-floating">
+                <button @click="changePage(-1)" :disabled="currentDoc.page <= 1">◀</button>
+                <div class="page-jump">
+                  <span>第 </span>
+                  <input
+                    type="number"
+                    v-model.number="jumpPage"
+                    @keyup.enter="handleJumpPage"
+                    @blur="handleJumpPage"
+                    min="1"
+                    :max="totalDocPages"
+                    class="page-input"
                   />
-                </template>
-              </svg>
+                  <span> / {{ totalDocPages }} 页</span>
+                </div>
+                <button @click="changePage(1)" :disabled="currentDoc.page >= totalDocPages">▶</button>
+              </div>
 
-              <!-- Active Drawing Rect -->
-              <div v-if="isDraggingSelection" class="drawing-rect" :style="drawingRectStyle"></div>
-
-              <!-- Finished Selection Rects -->
-              <div v-for="(region, ridx) in selectedRegions" :key="ridx"
-                   v-show="region.page === currentDoc.page"
-                   class="saved-rect"
-                   :style="getSavedRectStyle(region)">
-                <span class="rect-idx">{{ ridx + 1 }}</span>
-                <button class="remove-rect" @click.stop="removeRegion(ridx)">×</button>
+              <div v-if="pdfLoading" class="viewer-loading">
+                <div class="spinner-sm"></div>
               </div>
             </div>
-
-            <!-- Page Navigation for Supplement Mode -->
-            <div v-if="isSupplementMode" class="page-nav-floating">
-              <button @click="changePage(-1)" :disabled="currentDoc.page <= 1">◀</button>
-              <div class="page-jump">
-                <span>第 </span>
-                <input
-                  type="number"
-                  v-model.number="jumpPage"
-                  @keyup.enter="handleJumpPage"
-                  @blur="handleJumpPage"
-                  min="1"
-                  :max="totalDocPages"
-                  class="page-input"
-                />
-                <span> / {{ totalDocPages }} 页</span>
-              </div>
-              <button @click="changePage(1)" :disabled="currentDoc.page >= totalDocPages">▶</button>
-            </div>
-
-            <div v-if="pdfLoading" class="viewer-loading">
-              <div class="spinner-sm"></div>
-            </div>
-          </div>
+          </template>
         </div>
       </div>
     </main>
@@ -396,6 +380,7 @@
 import { ref, onMounted, computed, nextTick, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
+import PdfViewer from '../components/PdfViewer.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { hitTestSearch } from '../composables/useHitTestSearch'
 
@@ -1083,31 +1068,16 @@ const viewDocument = async (fact) => {
   // 支持多页 bbox: [[page, x0, y0, x1, y1], ...]
   const pdfBboxes = fact.pdf_bboxes || null
 
-  try {
-    showDocViewer.value = true
-    isSupplementMode.value = false
-    pdfLoading.value = true
-
-    const apiUrl = `${window.location.origin}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}?t=${Date.now()}`
-    if (!pdfjsLib.value) await initPdfJs()
-
-    currentDoc.value = {
-      filename,
-      page,
-      bbox,
-      url: apiUrl,
-      pageWidth,
-      pageHeight,
-      pdfBboxes
-    }
-
-    nextTick(() => {
-      setTimeout(() => { renderPdfPage(apiUrl, page) }, 500)
-    })
-  } catch (err) {
-    console.error('viewDocument error:', err)
-    alert('无法加载文档')
-    pdfLoading.value = false
+  showDocViewer.value = true
+  isSupplementMode.value = false
+  currentDoc.value = {
+    filename,
+    page,
+    bbox,
+    url: `${window.location.origin}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}?t=${Date.now()}`,
+    pageWidth,
+    pageHeight,
+    pdfBboxes
   }
 }
 
@@ -1690,53 +1660,6 @@ onMounted(async () => {
   box-shadow: 0 5px 15px rgba(0,0,0,0.3);
   background: #fff;
   display: block;
-}
-
-.pdf-highlight-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 2;
-}
-
-.highlight-rect {
-  fill: rgba(255, 165, 0, 0.35);
-  stroke: #ff4500;
-  stroke-width: 1.5px;
-  stroke-dasharray: 2;
-  animation: pulse-highlight 2s infinite;
-}
-
-/* 多页 bbox 高亮样式 */
-.multi-page-highlight {
-  fill: rgba(0, 200, 255, 0.25);
-  stroke: #00aaff;
-  stroke-width: 2px;
-  stroke-dasharray: 4 2;
-  animation: pulse-highlight-multi 2s infinite;
-}
-
-@keyframes pulse-highlight-multi {
-  0% { fill: rgba(0, 200, 255, 0.2); }
-  50% { fill: rgba(0, 200, 255, 0.4); }
-  100% { fill: rgba(0, 200, 255, 0.2); }
-}
-
-@keyframes pulse-highlight {
-  0% { fill: rgba(255, 165, 0, 0.25); }
-  50% { fill: rgba(255, 165, 0, 0.45); }
-  100% { fill: rgba(255, 165, 0, 0.25); }
-}
-
-.close-viewer {
-  background: none;
-  border: none;
-  font-size: 20px;
-  cursor: pointer;
-  color: #999;
 }
 
 .viewer-loading {

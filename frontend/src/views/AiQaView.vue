@@ -342,42 +342,16 @@
       </div> <!-- End Canvas Area -->
 
       <!-- Right Panel: Document Viewer -->
-      <div class="document-viewer" :class="{ 'open': showDocViewer }">
-        <div class="viewer-header">
-          <div class="viewer-title-group">
-            <span class="viewer-icon">📄</span>
-            <span class="viewer-filename">{{ currentDoc.filename }}</span>
-          </div>
-          <button class="viewer-close" @click="showDocViewer = false">✕</button>
-        </div>
-        <div class="viewer-content" ref="viewerContainer">
-          <!-- Replacement: Use Canvas + SVG Overlay instead of iframe for highlighting support -->
-          <div v-if="currentDoc.url" class="pdf-render-container">
-            <div class="pdf-scroll-wrapper">
-              <div class="pdf-page-wrapper">
-                <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
-                <svg v-if="currentDoc.bbox && currentDoc.bbox.length === 4" class="pdf-highlight-overlay" :viewBox="`0 0 ${currentDoc.pageWidth || 600} ${currentDoc.pageHeight || 800}`">
-                  <rect
-                    :x="currentDoc.bbox[0]"
-                    :y="currentDoc.bbox[1]"
-                    :width="currentDoc.bbox[2] - currentDoc.bbox[0]"
-                    :height="currentDoc.bbox[3] - currentDoc.bbox[1]"
-                    class="highlight-rect"
-                  />
-                </svg>
-              </div>
-            </div>
-            <div v-if="pdfLoading" class="pdf-loading-overlay">
-              <div class="spinner-sm"></div>
-              <span>渲染中...</span>
-            </div>
-          </div>
-          <div v-else class="viewer-empty">
-            <span class="empty-icon">📂</span>
-            <p>点击“定位文档”查看源文件</p>
-          </div>
-        </div>
-      </div>
+      <PdfViewer
+        v-model="showDocViewer"
+        class="document-viewer"
+        :filename="currentDoc.filename"
+        :url="currentDoc.url"
+        :page="currentDoc.page"
+        :bbox="currentDoc.bbox"
+        :page-width="currentDoc.pageWidth"
+        :page-height="currentDoc.pageHeight"
+      />
     </div> <!-- End Main Container -->
 
     <!-- Knowledge Base Tools Dialog -->
@@ -570,6 +544,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { getProjectList, updateProject, rerankFacts, llmAnswer } from '../api/graph'
 import { hitTestSearch } from '../composables/useHitTestSearch'
 import { saveApp, getApp, publishApp, executeAppApi } from '../api/ai_app'
+import PdfViewer from '../components/PdfViewer.vue'
 
 const props = defineProps({
   id: String
@@ -742,9 +717,6 @@ const toggleFullResult = () => {
 
 // Document Viewer State
 const showDocViewer = ref(false)
-const pdfLoading = ref(false)
-const pdfCanvas = ref(null)
-const viewerContainer = ref(null)
 const pdfjsLib = ref(null)
 
 const currentDoc = ref({
@@ -776,47 +748,6 @@ const initPdfJs = async () => {
   })
 }
 
-const renderPdfPage = async (pdfSource, pageNum) => {
-  if (!pdfjsLib.value || !pdfCanvas.value) return
-
-  pdfLoading.value = true
-  try {
-    let pdf
-    if (typeof pdfSource === 'string') {
-      // URL string
-      const loadingTask = pdfjsLib.value.getDocument(pdfSource)
-      pdf = await loadingTask.promise
-    } else {
-      // Blob
-      const arrayBuffer = await pdfSource.arrayBuffer()
-      const loadingTask = pdfjsLib.value.getDocument({ data: arrayBuffer })
-      pdf = await loadingTask.promise
-    }
-
-    const page = await pdf.getPage(pageNum)
-    const canvas = pdfCanvas.value
-    const context = canvas.getContext('2d')
-
-    const containerWidth = viewerContainer.value?.clientWidth || 600
-    const unscaledViewport = page.getViewport({ scale: 1 })
-    const scale = (containerWidth - 40) / unscaledViewport.width
-    const viewport = page.getViewport({ scale })
-
-    canvas.height = viewport.height
-    canvas.width = viewport.width
-
-    // Sync page dimensions for SVG highlight overlay
-    currentDoc.value.pageWidth = unscaledViewport.width
-    currentDoc.value.pageHeight = unscaledViewport.height
-
-    await page.render({ canvasContext: context, viewport }).promise
-  } catch (err) {
-    console.error('PDF render error:', err)
-  } finally {
-    pdfLoading.value = false
-  }
-}
-
 const viewDocument = async (fact) => {
   if (!fact.source || fact.source === 'Unknown') return
 
@@ -827,30 +758,15 @@ const viewDocument = async (fact) => {
   const pageWidth = fact.page_width || 0
   const pageHeight = fact.page_height || 0
 
-  try {
-    const apiUrl = `${window.location.origin}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}?t=${Date.now()}`
-
-    if (!pdfjsLib.value) await initPdfJs()
-
-    currentDoc.value = {
-      filename,
-      url: apiUrl,
-      page,
-      bbox,
-      pageWidth,
-      pageHeight
-    }
-    showDocViewer.value = true
-
-    nextTick(() => {
-      setTimeout(() => {
-        renderPdfPage(apiUrl, page)
-      }, 300)
-    })
-  } catch (err) {
-    console.error('Document preview error:', err)
-    alert('无法加载文档，请重试')
+  currentDoc.value = {
+    filename,
+    url: `${window.location.origin}/api/graph/project/${identifier}/document/${encodeURIComponent(filename)}?t=${Date.now()}`,
+    page,
+    bbox,
+    pageWidth,
+    pageHeight
   }
+  showDocViewer.value = true
 }
 
 // Project Editing State
@@ -1479,134 +1395,6 @@ onUnmounted(() => {
 
 .document-viewer.open {
   width: 40%;
-}
-
-.viewer-header {
-  height: 50px;
-  padding: 0 15px;
-  border-bottom: 1px solid #f0f0f0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: #f8f9fa;
-}
-
-.viewer-title-group {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  overflow: hidden;
-}
-
-.viewer-filename {
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  overflow: hidden;
-}
-
-.viewer-close {
-  background: none;
-  border: none;
-  font-size: 18px;
-  cursor: pointer;
-  color: #999;
-}
-
-.viewer-content {
-  flex: 1;
-  position: relative;
-  background: #525659;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.pdf-render-container {
-  flex: 1;
-  width: 100%;
-  height: 100%;
-  position: relative;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-.pdf-scroll-wrapper {
-  flex: 1;
-  overflow: auto;
-  display: flex;
-  justify-content: center;
-  padding: 20px;
-}
-
-.pdf-page-wrapper {
-  position: relative;
-  box-shadow: 0 5px 15px rgba(0,0,0,0.3);
-  background: white;
-  height: fit-content;
-}
-
-.pdf-canvas {
-  display: block;
-  max-width: 100%;
-}
-
-.pdf-highlight-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 2;
-}
-
-.highlight-rect {
-  fill: rgba(255, 165, 0, 0.35);
-  stroke: #ff4500;
-  stroke-width: 1.5px;
-  stroke-dasharray: 2;
-  animation: pulse-highlight 2s infinite;
-}
-
-@keyframes pulse-highlight {
-  0% { fill: rgba(255, 165, 0, 0.25); }
-  50% { fill: rgba(255, 165, 0, 0.45); }
-  100% { fill: rgba(255, 165, 0, 0.25); }
-}
-
-.pdf-loading-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(255,255,255,0.8);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  z-index: 10;
-  color: #666;
-  font-size: 13px;
-}
-
-.viewer-empty {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  color: #999;
-}
-
-.viewer-empty .empty-icon {
-  font-size: 40px;
-  margin-bottom: 10px;
-  opacity: 0.3;
 }
 
 .facts-scroll-area {

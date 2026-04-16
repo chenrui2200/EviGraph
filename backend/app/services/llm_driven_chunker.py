@@ -1818,7 +1818,7 @@ topic：{topic}
         # Step 0: 数据准备 - 直接从 chunks_data 构建章节和条款
         # =====================================================================
         self._report_progress(0.0, "🚀 开始智能标注分析...")
-        self.logger.info("[LLM分块] Step 0/4: 从 chunks.json 构建章节和条款结构")
+        self._report_progress(-1, "[LLM分块] Step 0/4: 从 chunks.json 构建章节和条款结构")
 
         # 优先使用 chunks_data
         if not chunks_data:
@@ -1841,7 +1841,7 @@ topic：{topic}
         sections_data, clauses_data, chapter_plan = self._build_sections_and_clauses_from_chunks(chunks_data, chapter_anchor=chapter_anchor, clause_container=clause_container)
         chapter_count = len(sections_data)
 
-        self.logger.info(f"[LLM分块] ✅ 章节构建完成: {chapter_count} 章节, {len(clauses_data)} 条款")
+        self._report_progress(-1, f"[LLM分块] ✅ 章节构建完成: {chapter_count} 章节, {len(clauses_data)} 条款")
         if chapter_count == 0:
             # 调试：打印前 3 条 chunks_data 的结构
             sample = chunks_data[:3] if chunks_data else []
@@ -1851,10 +1851,10 @@ topic：{topic}
         # =====================================================================
         # Step 1: 初始化/恢复检查点
         # =====================================================================
-        self.logger.info("[LLM分块] Step 1/4: 初始化检查点")
+        self._report_progress(-1, "[LLM分块] Step 1/4: 初始化检查点")
         if checkpoint and checkpoint.chapter_plan:
             # 从检查点恢复
-            self.logger.info(f"[LLM分块] 从检查点恢复: 已处理 {len(checkpoint.completed_clauses)} 条文")
+            self._report_progress(-1, f"[LLM分块] 从检查点恢复: 已处理 {len(checkpoint.completed_clauses)} 条文")
             current_checkpoint = checkpoint
             start_index = checkpoint.current_chapter_index + 1
 
@@ -1883,7 +1883,7 @@ topic：{topic}
         # =====================================================================
         # Step 2: 逐章 LLM 提取实体（章节串行 + 章节内 batch 并行 + 内容缓存）
         # =====================================================================
-        self.logger.info(f"[LLM分块] Step 2/4: 逐章 LLM 提取实体（共 {chapter_count} 章）")
+        self._report_progress(-1, f"[LLM分块] Step 2/4: 逐章 LLM 提取实体（共 {chapter_count} 章）")
 
         if chapter_count == 0:
             self.logger.error(f"[LLM分块] 警告：未识别到任何章节！chunks_data 条数={len(chunks_data) if chunks_data else 0}")
@@ -1935,7 +1935,7 @@ topic：{topic}
 
             # 跳过已完成的章节（all_clauses 已通过 checkpoint 恢复包含了所有已完成 clauses）
             if i < start_index:
-                self.logger.info(f"[LLM分块] 跳过章节 {chapter_num} (已处理)")
+                self._report_progress(-1, f"[LLM分块] 跳过章节 {chapter_num} (已处理)")
                 section = SectionSegment(
                     chapter_number=chapter_num,
                     title=chapter_title,
@@ -1959,7 +1959,7 @@ topic：{topic}
 
             chapter_progress_base = 0.1 + (i / chapter_count) * 0.65
 
-            self.logger.info(f"[LLM分块] ▶ 处理章节 {chapter_num}/{chapter_count}: {chapter_title}")
+            self._report_progress(-1, f"[LLM分块] ▶ 处理章节 {chapter_num}/{chapter_count}: {chapter_title}")
 
             self._report_progress(
                 chapter_progress_base,
@@ -1980,11 +1980,11 @@ topic：{topic}
 
             # 启发式计算该章节的目标实体数量范围
             entity_count_range = self.calc_target_entity_count(chapter_clause_count)
-            self.logger.info(f"[LLM分块] 章节 {chapter_num} 条款数={chapter_clause_count}, 目标实体数量={entity_count_range[0]}-{entity_count_range[1]}")
+            self._report_progress(-1, f"[LLM分块] 章节 {chapter_num} 条款数={chapter_clause_count}, 目标实体数量={entity_count_range[0]}-{entity_count_range[1]}")
 
             # 将本章 clauses 拆分为 batch
             batches = _make_batches(chapter_clauses)
-            self.logger.info(f"[LLM分块] 章节 {chapter_num} 拆分为 {len(batches)} 个 batch")
+            self._report_progress(-1, f"[LLM分块] 章节 {chapter_num} 拆分为 {len(batches)} 个 batch")
 
             # 章节内 batch 并行执行（线程池大小 = min(8, batch数)）
             # 关键：max_workers 保持合理（<=8），避免打爆 LLM 服务
@@ -2006,7 +2006,8 @@ topic：{topic}
             chapter_entities_count = sum(len(c.metadata.get("entities", [])) for c in chapter_clauses)
             para_time = time.time() - para_start
 
-            self.logger.info(
+            self._report_progress(
+                -1,
                 f"[LLM分块]   ← 章节 {chapter_num} 条款分析完成: {len(chapter_clauses)} 条文, "
                 f"{chapter_entities_count} 实体 (并行耗时 {para_time:.1f}s)"
             )
@@ -2052,7 +2053,7 @@ topic：{topic}
                     "chapter_completed": True
                 }
             )
-            self.logger.info(f"[LLM分块] ✅ 章节 {chapter_num} 处理完成，JSONL 已增量写入")
+            self._report_progress(-1, f"[LLM分块] ✅ 章节 {chapter_num} 处理完成，JSONL 已增量写入")
 
             chapter_results.append((section, list(chapter_clauses)))
             all_clauses.extend(chapter_clauses)
@@ -2064,7 +2065,7 @@ topic：{topic}
         # =====================================================================
         # Step 3: 保存结果（JSONL 已增量写入，sections + edges 最后写入）
         # =====================================================================
-        self.logger.info(f"[LLM分块] Step 3/4: 保存 sections + edges 元数据")
+        self._report_progress(-1, "[LLM分块] Step 3/4: 保存 sections + edges 元数据")
         self._report_progress(0.80, "💾 保存 sections + edges 元数据...")
 
         # 从 chapter_results 构建 sections
@@ -2087,12 +2088,12 @@ topic：{topic}
                 edges=all_edges or [],
                 clauses=clauses_data_out
             )
-            self.logger.info(f"[LLM分块] ✅ intelligent_chunks_tree.json 已生成")
+            self._report_progress(-1, "[LLM分块] ✅ intelligent_chunks_tree.json 已生成")
 
         # =====================================================================
         # Step 4: 汇总报告
         # =====================================================================
-        self.logger.info("[LLM分块] Step 4/4: 汇总报告")
+        self._report_progress(-1, "[LLM分块] Step 4/4: 汇总报告")
         total_entities = sum(len(c.metadata.get("entities", [])) for c in all_clauses)
         total_time = time.time() - start_time
         self._report_progress(
@@ -2102,7 +2103,8 @@ topic：{topic}
 
         self._report_progress(1.0, f"✅ 智能标注分析完成! (总耗时 {total_time:.1f}s)")
 
-        self.logger.info(
+        self._report_progress(
+            -1,
             f"[LLM分块] ✅ 分析完成 - 章节: {len(result.sections)}, 条文: {len(all_clauses)}, 实体: {total_entities}, "
             f"总耗时: {total_time:.1f}s"
         )
@@ -2342,7 +2344,7 @@ topic：{topic}
 
             # 调试日志：打印前 5 条 chunk 的 type 和 content
             if i < 5:
-                self.logger.info(f"[章节构建] chunk[{i}] type={chunk_type!r}, content={str(content)[:60]!r}")
+                self.logger.debug(f"[章节构建] chunk[{i}] type={chunk_type!r}, content={str(content)[:60]!r}")
             if isinstance(content, str):
                 content = content.strip()
             else:
@@ -2372,7 +2374,7 @@ topic：{topic}
             if chapter_m:
                 chapter_num_str = chapter_m.group(1)
                 title = chapter_m.group(2).strip()
-                self.logger.info(f"[章节构建] ✅ 一级章节锚点: page={page_idx}, idx={i}, chapter={chapter_num_str}, title={title!r}")
+                self._report_progress(-1, f"[章节构建] ✅ 一级章节锚点: page={page_idx}, idx={i}, chapter={chapter_num_str}, title={title!r}")
 
                 # 章节编号保留原始字符串（支持 2, 2.0.1 等多级格式）
                 chapter_num = chapter_num_str
@@ -2401,7 +2403,7 @@ topic：{topic}
                 # 重置二级容器
                 current_container = None
 
-                self.logger.info(f"[章节构建] {chapter_num}. {title} (page={page_idx})")
+                self._report_progress(-1, f"[章节构建] {chapter_num}. {title} (page={page_idx})")
                 anchor_found = True  # 标记已找到锚点
                 continue  # 锚点 title 不作为 clause，只作为章节节点
 
@@ -2410,7 +2412,7 @@ topic：{topic}
                 m = APPENDIX_PATTERN.match(content)
                 appendix_letter = m.group(0)[2]
                 title = m.group(1).strip() if m.group(1) else appendix_letter
-                self.logger.info(f"[章节构建] ✅ 识别到附录标题: page={page_idx}, idx={i}, appendix={appendix_letter}, title={title!r}")
+                self._report_progress(-1, f"[章节构建] ✅ 识别到附录标题: page={page_idx}, idx={i}, appendix={appendix_letter}, title={title!r}")
 
                 chapter_num = f"附录{appendix_letter}"
                 current_chapter_idx += 1
@@ -2438,13 +2440,13 @@ topic：{topic}
                 # 重置二级容器
                 current_container = None
 
-                self.logger.info(f"[章节构建] 附录 {appendix_letter}: {title} (page={page_idx})")
+                self._report_progress(-1, f"[章节构建] 附录 {appendix_letter}: {title} (page={page_idx})")
                 anchor_found = True  # 标记已找到锚点
                 continue
 
             # 如果 type=='title' 但不符合章节编号格式（如 "前 言"、"目 录"），且尚未进入任何章节，跳过
             if chunk_type == 'title' and chapter_m is None and current_chapter is None:
-                self.logger.info(f"[章节构建] ⏭️ type=title 但无章节编号，跳过: page={page_idx}, idx={i}, content={content[:50]!r}")
+                self._report_progress(-1, f"[章节构建] ⏭️ type=title 但无章节编号，跳过: page={page_idx}, idx={i}, content={content[:50]!r}")
                 continue
 
             # 如果有当前章节（锚点），处理条款容器和条款
@@ -2460,7 +2462,7 @@ topic：{topic}
                 if container_m:
                     container_num_str = container_m.group(1)
                     container_title = container_m.group(2).strip()
-                    self.logger.info(f"[章节构建] ✅ 二级条款容器: page={page_idx}, idx={i}, container={container_num_str}, title={container_title!r}")
+                    self._report_progress(-1, f"[章节构建] ✅ 二级条款容器: page={page_idx}, idx={i}, container={container_num_str}, title={container_title!r}")
 
                     # 创建条款容器作为特殊 clause
                     container_clause_id = container_num_str
@@ -2514,7 +2516,7 @@ topic：{topic}
                     }
                     current_chapter['sub_chapters'].append(container_clause_id)
 
-                    self.logger.info(f"[条款构建]   {container_clause_id} {container_title[:30]}... [条款容器挂载到 {current_chapter['chapter_number']}]")
+                    self._report_progress(-1, f"[条款构建]   {container_clause_id} {container_title[:30]}... [条款容器挂载到 {current_chapter['chapter_number']}]")
                     continue
 
                 # 检查是否为条款（先检查普通条款，再检查附录条款）
@@ -2616,7 +2618,7 @@ topic：{topic}
                 status=ChapterStatus.PENDING,
                 chapter_type='normative'
             ))
-            self.logger.info(f"[章节构建] ⏺ [无锚点，创建虚拟章节] {virtual_chapter_num}. {virtual_title}")
+            self._report_progress(-1, f"[章节构建] ⏺ [无锚点，创建虚拟章节] {virtual_chapter_num}. {virtual_title}")
 
             # 虚拟章节下不再生成内容块伪 clause
 
@@ -2638,7 +2640,7 @@ topic：{topic}
             bbox = chunk.get('bbox_viewport') or chunk.get('bbox_pdf') or []
             chunk_type = chunk.get('type', '')
             # 查找该 chunk 的 clause_id（通过 content 中的条款编号）
-            chunk_content = _fix_encoding(chunk.get('content', ''))
+            chunk_content = chunk.get('content', '')
             m = CLAUSE_PATTERN.match(chunk_content.strip())
             if not m:
                 # 尝试附录条款（如 A.0.1）
@@ -2758,12 +2760,12 @@ topic：{topic}
                 seen_chapters[sec['chapter_number']] = idx
 
             if len(seen_chapters) < len(sections):
-                self.logger.info(f"[章节构建] 发现重复章节锚点: 原始 {len(sections)} 个，去重后 {len(seen_chapters)} 个")
+                self._report_progress(-1, f"[章节构建] 发现重复章节锚点: 原始 {len(sections)} 个，去重后 {len(seen_chapters)} 个")
                 keep_indices = set(seen_chapters.values())
                 sections = [s for i, s in enumerate(sections) if i in keep_indices]
                 chapter_plan = [p for i, p in enumerate(chapter_plan) if i in keep_indices]
 
-        self.logger.info(f"[章节构建] 完成: {len(sections)} 章节, {len(clauses)} 条款，bboxs 聚合完成")
+        self._report_progress(-1, f"[章节构建] 完成: {len(sections)} 章节, {len(clauses)} 条款，bboxs 聚合完成")
         return sections, clauses, chapter_plan
 
     # =========================================================================

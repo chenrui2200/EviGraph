@@ -704,7 +704,7 @@ const logScrollEl = ref(null)
 
 // 重新标注模态窗口
 const showParseMethodModal = ref(false)
-const selectedParseMethod = ref('ocr')
+const selectedParseMethod = ref('auto')
 
 // 章节匹配模式选择弹窗
 const showChapterPatternModal = ref(false)
@@ -921,11 +921,12 @@ async function loadExistingProject() {
     if (res.data.status === 'graph_chunked' || res.data.status === 'graph_completed') {
       tasks.push(loadAnalysis())
     } else if (res.data.status === 'graph_chunking') {
-      // 注意：graph_chunking 状态时 project.graph_build_task_id 指向的是图谱构建任务，
-      // 不是智能分块任务。ChunkAnalysisView 不应连接图谱构建的 SSE。
-      // 如果需要恢复分析，用户应主动点击"重新分析"触发新的智能分块任务。
       tasks.push(loadAnalysis())
-      // 不调用 startTaskSEE()/startProgressPolling()，避免接入 graph_build_task_id 的日志流
+      if (res.data.graph_build_task_id) {
+        taskId.value = res.data.graph_build_task_id
+        startTaskSSE()
+        startProgressPolling()
+      }
     } else if (res.data.status === 'ontology_generation' || res.data.status === 'ontology_generated' || res.data.status === 'created') {
       // ontology_generation 状态下 MinerU 正在解析，需要建立 SSE 接收日志
       if (res.data.ontology_task_id) {
@@ -1218,13 +1219,9 @@ function startTaskSSE() {
       const { type: msgType, data } = JSON.parse(event.data)
 
       if (msgType === 'init') {
-        // 初始化：加载已有日志
+        // 初始化：直接替换已有日志，避免重复
         if (data.logs?.length) {
-          data.logs.forEach(l => {
-            if (!realtimeLogs.value.find(existing => existing === l.message)) {
-              realtimeLogs.value.push(l.message)
-            }
-          })
+          realtimeLogs.value = data.logs.map(l => l.message)
         }
         return
       }
@@ -1281,6 +1278,25 @@ function startTaskSSE() {
   taskSource.onerror = () => {
     taskSource.close()
     taskSource = null
+    // REST fallback: 拉回历史日志和最终状态
+    if (taskId.value) {
+      getTaskStatus(taskId.value).then(res => {
+        if (res.success) {
+          const task = res.data
+          if (task.logs?.length) {
+            realtimeLogs.value = task.logs.map(l => l.message)
+          }
+          if (task.status === 'completed') {
+            analysisStatus.value = 'graph_chunked'
+            realtimeLogs.value.push('✅ 分析完成！')
+            loadAnalysis()
+          } else if (task.status === 'failed') {
+            analysisStatus.value = 'failed'
+            realtimeLogs.value.push(`❌ 分析失败: ${task.error || '未知错误'}`)
+          }
+        }
+      }).catch(() => { /* ignore */ })
+    }
   }
 }
 
