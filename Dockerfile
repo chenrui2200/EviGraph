@@ -14,7 +14,7 @@ RUN npm run build
 # =============================================
 # Stage 2: Python backend
 # =============================================
-FROM python:3.13-slim AS backend-builder
+FROM python:3.12-slim AS backend-builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -30,21 +30,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy uv from official image
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
 WORKDIR /app/backend
 
-# Copy backend source and install dependencies
-COPY backend/pyproject.toml backend/uv.lock* ./
-RUN uv sync --no-dev
+# Copy requirements and install dependencies via pip
+COPY backend/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ ./
 
 # =============================================
 # Stage 3: Final runtime
 # =============================================
-FROM python:3.13-slim AS runtime
+FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -61,12 +58,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Copy uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
 WORKDIR /app
 
-# Copy backend (including .venv)
+# Copy backend (site-packages + source)
+COPY --from=backend-builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=backend-builder /usr/local/bin /usr/local/bin
 COPY --from=backend-builder /app/backend /app/backend
 
 # Copy built frontend
@@ -77,7 +73,6 @@ COPY nginx.conf /etc/nginx/nginx.conf
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 ENV PYTHONPATH=/app/backend
-ENV PATH="/app/backend/.venv/bin:$PATH"
 
 EXPOSE 5001 80
 
