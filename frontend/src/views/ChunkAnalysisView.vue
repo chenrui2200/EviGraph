@@ -538,22 +538,29 @@
               <label class="pattern-option" :class="{ active: chapterAnchor === 'x' }">
                 <input type="radio" v-model="chapterAnchor" value="x" />
                 <div class="pattern-content">
-                  <span class="pattern-name">一级模式 (x)</span>
+                  <span class="pattern-name">x</span>
                   <span class="pattern-desc">如 "2 术语"</span>
                 </div>
               </label>
               <label class="pattern-option" :class="{ active: chapterAnchor === 'x.x' }">
                 <input type="radio" v-model="chapterAnchor" value="x.x" />
                 <div class="pattern-content">
-                  <span class="pattern-name">二级模式 (x.x)</span>
+                  <span class="pattern-name">x.x</span>
                   <span class="pattern-desc">如 "2.1 配电"</span>
                 </div>
               </label>
               <label class="pattern-option" :class="{ active: chapterAnchor === 'x.x.x' }">
                 <input type="radio" v-model="chapterAnchor" value="x.x.x" />
                 <div class="pattern-content">
-                  <span class="pattern-name">三级模式 (x.x.x)</span>
+                  <span class="pattern-name">x.x.x</span>
                   <span class="pattern-desc">如 "2.1.1 导体"</span>
+                </div>
+              </label>
+              <label class="pattern-option" :class="{ active: chapterAnchor === 'x.x.x.x' }">
+                <input type="radio" v-model="chapterAnchor" value="x.x.x.x" />
+                <div class="pattern-content">
+                  <span class="pattern-name">x.x.x.x</span>
+                  <span class="pattern-desc">如 "2.1.1.1 子导体"</span>
                 </div>
               </label>
             </div>
@@ -562,25 +569,32 @@
           <div class="pattern-section">
             <div class="pattern-section-title">最小条款容器锚点（二级）：</div>
             <div class="pattern-options">
-              <label class="pattern-option" :class="{ active: clauseContainer === 'x.x', disabled: chapterAnchor === 'x' }">
-                <input type="radio" v-model="clauseContainer" value="x.x" :disabled="chapterAnchor === 'x'" />
+              <label class="pattern-option" :class="{ active: clauseContainer === 'x.x', disabled: anchorDepth > 2 }">
+                <input type="radio" v-model="clauseContainer" value="x.x" :disabled="anchorDepth > 2" />
                 <div class="pattern-content">
-                  <span class="pattern-name">一级模式 (x.x)</span>
+                  <span class="pattern-name">x.x</span>
                   <span class="pattern-desc">如 "2.0.1"</span>
                 </div>
               </label>
-              <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x' }">
-                <input type="radio" v-model="clauseContainer" value="x.x.x" />
+              <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x', disabled: anchorDepth > 3 }">
+                <input type="radio" v-model="clauseContainer" value="x.x.x" :disabled="anchorDepth > 3" />
                 <div class="pattern-content">
-                  <span class="pattern-name">二级模式 (x.x.x)</span>
+                  <span class="pattern-name">x.x.x</span>
                   <span class="pattern-desc">如 "2.0.1"</span>
                 </div>
               </label>
-              <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x.x' }">
-                <input type="radio" v-model="clauseContainer" value="x.x.x.x" />
+              <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x.x', disabled: anchorDepth > 4 }">
+                <input type="radio" v-model="clauseContainer" value="x.x.x.x" :disabled="anchorDepth > 4" />
                 <div class="pattern-content">
-                  <span class="pattern-name">三级模式 (x.x.x.x)</span>
+                  <span class="pattern-name">x.x.x.x</span>
                   <span class="pattern-desc">如 "2.0.1.1"</span>
+                </div>
+              </label>
+              <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x.x.x', disabled: anchorDepth > 5 }">
+                <input type="radio" v-model="clauseContainer" value="x.x.x.x.x" :disabled="anchorDepth > 5" />
+                <div class="pattern-content">
+                  <span class="pattern-name">x.x.x.x.x</span>
+                  <span class="pattern-desc">如 "2.0.1.1.1"</span>
                 </div>
               </label>
             </div>
@@ -710,6 +724,22 @@ const selectedParseMethod = ref('auto')
 const showChapterPatternModal = ref(false)
 const chapterAnchor = ref('x.x')  // 章节锚点（一级父节点）
 const clauseContainer = ref('x.x.x')  // 最小条款容器锚点（二级）
+
+const anchorDepth = computed(() => {
+  const depthMap = { 'x': 1, 'x.x': 2, 'x.x.x': 3, 'x.x.x.x': 4, 'x.x.x.x.x': 5 }
+  return depthMap[chapterAnchor.value] || 1
+})
+
+// 当章节锚点变深时，自动修正最小条款容器为同级或更深的合法选项
+watch(chapterAnchor, (newVal) => {
+  const depthMap = { 'x': 1, 'x.x': 2, 'x.x.x': 3, 'x.x.x.x': 4, 'x.x.x.x.x': 5 }
+  const containerDepth = depthMap[clauseContainer.value] || 5
+  const anchorDepthValue = depthMap[newVal] || 1
+  if (containerDepth < anchorDepthValue) {
+    const next = Object.entries(depthMap).find(([k, v]) => v >= anchorDepthValue)
+    clauseContainer.value = next ? next[0] : 'x.x.x.x.x'
+  }
+})
 
 // 实体编辑
 const editingClauseId = ref(null)

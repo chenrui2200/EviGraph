@@ -2301,18 +2301,20 @@ topic：{topic}
         clauses = []
         chapter_plan = []
 
-        # 章节锚点匹配正则
+        # 章节锚点匹配正则（支持末尾可选点号及可选空格，如 "1. 前言" / "3.基础信息管理" / "3.2.2.人员信息"）
+        # 使用 (?!\.\d) 负向前瞻，防止低一级锚点错误吞掉高一级编号
         anchor_patterns_config = {
-            'x': re.compile(r'^(\d+)\s+(.+)'),
-            'x.x': re.compile(r'^(\d+\.\d+)\s+(.+)'),
-            'x.x.x': re.compile(r'^(\d+\.\d+\.\d+)\s+(.+)'),
+            'x': re.compile(r'^(\d+)(?!\.\d)\.?\s*(.+)'),
+            'x.x': re.compile(r'^(\d+\.\d+)(?!\.\d)\.?\s*(.+)'),
+            'x.x.x': re.compile(r'^(\d+\.\d+\.\d+)(?!\.\d)\.?\s*(.+)'),
+            'x.x.x.x': re.compile(r'^(\d+\.\d+\.\d+\.\d+)\.?\s*(.+)'),
         }
 
         # 条款容器锚点匹配正则（支持 x.x, x.x.x, x.x.x.x）
         container_patterns_config = {
-            'x.x': re.compile(r'^(\d+\.\d+)\s+(.+)'),
-            'x.x.x': re.compile(r'^(\d+\.\d+\.\d+)\s+(.+)'),
-            'x.x.x.x': re.compile(r'^(\d+\.\d+\.\d+\.\d+)\s+(.+)'),
+            'x.x': re.compile(r'^(\d+\.\d+)(?!\.\d)\.?\s*(.+)'),
+            'x.x.x': re.compile(r'^(\d+\.\d+\.\d+)(?!\.\d)\.?\s*(.+)'),
+            'x.x.x.x': re.compile(r'^(\d+\.\d+\.\d+\.\d+)\.?\s*(.+)'),
         }
 
         # 获取章节锚点正则
@@ -2320,13 +2322,13 @@ topic：{topic}
         # 获取条款容器正则
         clause_container_regex = container_patterns_config.get(clause_container, container_patterns_config['x.x.x'])
 
-        # 条款匹配正则：匹配任意 X.Y 或 X.Y.Z 格式的条款编号
-        CLAUSE_PATTERN = re.compile(r'^(\d+\.\d+(?:\.\d+)?)\s*(.*)')
+        # 条款匹配正则：匹配任意多级数字编号（支持末尾可选点号）
+        CLAUSE_PATTERN = re.compile(r'^(\d+(?:\.\d+)+)\.?\s*(.*)')
 
         # 用于匹配附录标题（如 "附录A"）
         APPENDIX_PATTERN = re.compile(r'^附录[A-Z](?:\s+(.+))?$')
         # 用于匹配附录条款（如 "A.0.7"）
-        APPENDIX_CLAUSE_PATTERN = re.compile(r'^([A-Z]\.\d+(?:\.\d+)?)\s*(.*)')
+        APPENDIX_CLAUSE_PATTERN = re.compile(r'^([A-Z](?:\.\d+)+)\s*(.*)')
 
         current_chapter = None  # 当前锚点章节
         current_container = None  # 当前条款容器（二级）
@@ -2586,8 +2588,49 @@ topic：{topic}
                     container_info = f" [容器: {parent_container_id}]" if parent_container_id else ""
                     self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx}) [{clause_type}] [挂载到 {parent_ch}{container_info}]")
                 else:
-                    # 非条款内容块（如解释性文字、表格描述等）不再生成独立伪 clause
-                    self.logger.debug(f"[条款构建]   跳过非条款内容块: idx={i}, type={chunk_type}")
+                    # 非条款内容块：挂载到当前章节或容器下作为伪 clause
+                    # （兼容操作手册等无标准条款编号的文档）
+                    if current_chapter is not None and content.strip():
+                        pseudo_id = f"{current_chapter['chapter_number']}.content_{i}"
+                        parent_ch = current_chapter['chapter_number']
+                        if current_container:
+                            pseudo_id = f"{current_container['clause_id']}.content_{i}"
+
+                        clause = ClauseSegment(
+                            clause_id=pseudo_id,
+                            clause_title=content[:60].strip(),
+                            content=content,
+                            paragraphs=[],
+                            requirement_type=RequirementType.RECOMMENDED,
+                            applicable_systems=[],
+                            cross_refs=[],
+                            source=source,
+                            page=page_idx,
+                            triplets=[],
+                            clause_items=[],
+                            is_term_definition=False,
+                            terms=[],
+                            formula_content=None,
+                            semantics_enriched=False,
+                            parent_chapter=parent_ch,
+                            referenced_clauses=[],
+                            referenced_standards=[],
+                            metadata={
+                                "chunk_type": chunk_type,
+                                "chunk_id": chunk_id,
+                                "parent_chapter": parent_ch,
+                                "page_idx": page_idx,
+                                "bbox_viewport": bbox_viewport,
+                                "bboxs": [[page_idx + 1, *bbox_viewport]] if bbox_viewport and len(bbox_viewport) >= 4 else [],
+                                "is_pseudo_clause": True,
+                                "entities": []
+                            }
+                        )
+                        clauses.append(clause)
+                        if current_container:
+                            current_container['clause'].metadata.setdefault('child_clauses', []).append(pseudo_id)
+                        current_chapter['sub_chapters'].append(pseudo_id)
+                        self.logger.debug(f"[条款构建]   生成伪条款挂载: {pseudo_id} [到 {parent_ch}{' / ' + current_container['clause_id'] if current_container else ''}]")
             else:
                 # 没有找到锚点前的内容块直接跳过
                 pass
