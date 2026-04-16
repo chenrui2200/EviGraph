@@ -46,7 +46,6 @@ WORKDIR /app
 # Install runtime system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx supervisor \
-    tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
