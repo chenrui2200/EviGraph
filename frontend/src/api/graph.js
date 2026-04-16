@@ -75,7 +75,7 @@ export function getTaskStatus(taskId) {
  * @returns {String}
  */
 export function getTaskEventsURL(taskId) {
-  const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001'
+  const baseURL = import.meta.env.VITE_API_BASE_URL
   return `${baseURL}/api/graph/task/${taskId}/events`
 }
 

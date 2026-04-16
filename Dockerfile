@@ -20,15 +20,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8
 
-# Install build dependencies for PyMuPDF
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libmupdf-dev \
-    poppler-utils \
-    tesseract-ocr \
-    tesseract-ocr-chn \
-    tesseract-ocr-eng \
-    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app/backend
 
@@ -37,6 +28,9 @@ COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ ./
+
+# 创建稳定软链接，避免不同 Python 小版本路径差异
+RUN ln -s $(python -c "import site; print(site.getsitepackages()[0])") /python-site-packages
 
 # =============================================
 # Stage 3: Final runtime
@@ -47,21 +41,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libmupdf1 \
-    poppler-utils \
-    tesseract-ocr \
-    tesseract-ocr-chn \
-    tesseract-ocr-eng \
-    nginx \
-    supervisor \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
-
 WORKDIR /app
 
+# Install runtime system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nginx supervisor \
+    tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra \
+    poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy backend (site-packages + source)
-COPY --from=backend-builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=backend-builder /python-site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=backend-builder /usr/local/bin /usr/local/bin
 COPY --from=backend-builder /app/backend /app/backend
 
