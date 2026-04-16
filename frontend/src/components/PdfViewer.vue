@@ -15,25 +15,30 @@
           @mousemove="e => $emit('mousemove', e)"
           @mouseup="e => $emit('mouseup', e)"
         >
-          <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
-
-          <!-- 默认高亮 overlay -->
-          <svg
-            v-if="!$slots.overlay && (bbox || pdfBboxes)"
-            class="pdf-highlight-overlay"
-            :viewBox="`0 0 ${effectivePageWidth} ${effectivePageHeight}`"
+          <!-- 多页连续渲染（或单页） -->
+          <div
+            v-for="p in renderedPages"
+            :key="p"
+            class="pdf-page-wrapper"
           >
-            <rect
-              v-if="bbox && bbox.length === 4"
-              :x="bbox[0]"
-              :y="bbox[1]"
-              :width="bbox[2] - bbox[0]"
-              :height="bbox[3] - bbox[1]"
-              class="highlight-rect"
-            />
-            <template v-if="pdfBboxes && Array.isArray(pdfBboxes)">
+            <canvas :ref="el => setCanvasRef(el, p)" class="pdf-canvas"></canvas>
+
+            <!-- 默认高亮 overlay -->
+            <svg
+              v-if="!$slots.overlay && (getPageBbox(p) || getPagePdfBboxes(p).length)"
+              class="pdf-highlight-overlay"
+              :viewBox="`0 0 ${pageDimensions[p]?.width || pageWidth || 600} ${pageDimensions[p]?.height || pageHeight || 800}`"
+            >
               <rect
-                v-for="(bb, idx) in currentPageBboxes"
+                v-if="getPageBbox(p) && getPageBbox(p).length === 4"
+                :x="getPageBbox(p)[0]"
+                :y="getPageBbox(p)[1]"
+                :width="getPageBbox(p)[2] - getPageBbox(p)[0]"
+                :height="getPageBbox(p)[3] - getPageBbox(p)[1]"
+                class="highlight-rect"
+              />
+              <rect
+                v-for="(bb, idx) in getPagePdfBboxes(p)"
                 :key="'multi-bbox-' + idx"
                 :x="bb[1]"
                 :y="bb[2]"
@@ -41,11 +46,11 @@
                 :height="bb[4] - bb[2]"
                 class="highlight-rect multi-page-highlight"
               />
-            </template>
-          </svg>
+            </svg>
 
-          <!-- 自定义 overlay 插槽 -->
-          <slot name="overlay"></slot>
+            <!-- 自定义 overlay 插槽（带当前页号作用域参数） -->
+            <slot name="overlay" :page="p"></slot>
+          </div>
         </div>
       </template>
 
@@ -82,23 +87,43 @@ const props = defineProps({
 
 const emit = defineEmits(['update:modelValue', 'mousedown', 'mousemove', 'mouseup'])
 
-const pdfCanvas = ref(null)
 const viewerContainer = ref(null)
 const pdfjsLib = ref(null)
+let pdfDoc = null
+let renderLock = false
 const pdfLoading = ref(false)
-const renderedPageWidth = ref(0)
-const renderedPageHeight = ref(0)
 const pdfBboxesBasePage = ref(props.page)
+const pageDimensions = ref({})
+const pageCanvasRefs = {}
 
-const currentPageBboxes = computed(() => {
-  if (!props.pdfBboxes || !Array.isArray(props.pdfBboxes) || props.pdfBboxes.length === 0) return []
-  const basePage = pdfBboxesBasePage.value
-  const offset = props.pdfBboxes[0][0] - basePage
-  return props.pdfBboxes.filter(b => b && b.length >= 5 && b[0] - offset === props.page)
+const getBboxOffset = () => {
+  if (!props.pdfBboxes || !Array.isArray(props.pdfBboxes) || props.pdfBboxes.length === 0) return 0
+  return props.pdfBboxes[0][0] - pdfBboxesBasePage.value
+}
+
+const renderedPages = computed(() => {
+  if (!props.pdfBboxes || !Array.isArray(props.pdfBboxes) || props.pdfBboxes.length === 0) {
+    return [props.page]
+  }
+  const offset = getBboxOffset()
+  const pages = new Set(props.pdfBboxes.map(b => b && b.length >= 5 ? b[0] - offset : props.page))
+  return Array.from(pages).sort((a, b) => a - b)
 })
 
-const effectivePageWidth = computed(() => props.pageWidth || renderedPageWidth.value || 600)
-const effectivePageHeight = computed(() => props.pageHeight || renderedPageHeight.value || 800)
+const getPagePdfBboxes = (pageNum) => {
+  if (!props.pdfBboxes || !Array.isArray(props.pdfBboxes)) return []
+  const offset = getBboxOffset()
+  return props.pdfBboxes.filter(b => b && b.length >= 5 && b[0] - offset === pageNum)
+}
+
+const getPageBbox = (pageNum) => {
+  if (pageNum === props.page) return props.bbox
+  return null
+}
+
+const setCanvasRef = (el, pageNum) => {
+  if (el) pageCanvasRefs[pageNum] = el
+}
 
 const closeViewer = () => {
   emit('update:modelValue', false)
@@ -122,62 +147,110 @@ const initPdfJs = async () => {
   })
 }
 
-const renderPdfPage = async (pdfSource, pageNum) => {
-  if (!pdfjsLib.value || !pdfCanvas.value) {
-    console.warn('PDF.js lib or canvas not ready')
-    return
-  }
+const renderPage = async (doc, pageNum) => {
+  if (!doc) return
+  const canvas = pageCanvasRefs[pageNum]
+  if (!canvas) return
 
-  pdfLoading.value = true
   try {
-    const loadingTask = pdfjsLib.value.getDocument(
-      typeof pdfSource === 'string' ? pdfSource : { data: new Uint8Array(pdfSource) }
-    )
-    const pdf = await loadingTask.promise
-    const page = await pdf.getPage(pageNum)
-
-    const canvas = pdfCanvas.value
+    const page = await doc.getPage(pageNum)
     const context = canvas.getContext('2d')
     const containerWidth = viewerContainer.value?.clientWidth || 600
     const unscaledViewport = page.getViewport({ scale: 1 })
     const scale = (containerWidth - 40) / unscaledViewport.width
     const viewport = page.getViewport({ scale })
 
-    renderedPageWidth.value = unscaledViewport.width
-    renderedPageHeight.value = unscaledViewport.height
+    pageDimensions.value[pageNum] = {
+      width: unscaledViewport.width,
+      height: unscaledViewport.height
+    }
 
     canvas.height = viewport.height
     canvas.width = viewport.width
 
     await page.render({ canvasContext: context, viewport }).promise
   } catch (err) {
-    console.error('PDF render error:', err)
+    console.error(`PDF render error (page ${pageNum}):`, err)
+  }
+}
+
+const renderAllPages = async (pdfSource) => {
+  if (!pdfjsLib.value || renderLock) return
+  renderLock = true
+  pdfLoading.value = true
+  pageDimensions.value = {}
+  try {
+    const loadingTask = pdfjsLib.value.getDocument(
+      typeof pdfSource === 'string' ? pdfSource : { data: new Uint8Array(pdfSource) }
+    )
+    pdfDoc = await loadingTask.promise
+    const doc = pdfDoc
+
+    // 等待 DOM 更新后再渲染
+    await nextTick()
+    const pages = renderedPages.value
+    for (const p of pages) {
+      await renderPage(doc, p)
+    }
+  } catch (err) {
+    console.error('PDF load error:', err)
   } finally {
     pdfLoading.value = false
+    renderLock = false
   }
 }
 
 watch(() => props.url, (newUrl, oldUrl) => {
   if (newUrl && newUrl !== oldUrl) {
     pdfBboxesBasePage.value = props.page
+    // 清空旧 canvas refs
+    Object.keys(pageCanvasRefs).forEach(k => delete pageCanvasRefs[k])
   }
 }, { immediate: true })
 
-watch(() => [props.url, props.page], async ([newUrl, newPage]) => {
+watch(() => [props.url, props.page], async ([newUrl]) => {
   if (props.modelValue && newUrl) {
     await initPdfJs()
     nextTick(() => {
-      setTimeout(() => renderPdfPage(newUrl, newPage || 1), 300)
+      setTimeout(() => renderAllPages(newUrl), 300)
     })
   }
 }, { immediate: true })
 
+// 兼容旧 expose：pdfCanvas 指向第一页 canvas
+const pdfCanvas = computed(() => pageCanvasRefs[renderedPages.value[0]] || null)
+
+// 兼容旧 renderPdfPage 签名：渲染指定页（单页场景）
+const renderPdfPage = async (pdfSource, pageNum) => {
+  if (!pdfjsLib.value) await initPdfJs()
+  if (renderLock) return
+  renderLock = true
+  pdfLoading.value = true
+  try {
+    const loadingTask = pdfjsLib.value.getDocument(
+      typeof pdfSource === 'string' ? pdfSource : { data: new Uint8Array(pdfSource) }
+    )
+    pdfDoc = await loadingTask.promise
+    const doc = pdfDoc
+    await nextTick()
+    await renderPage(doc, pageNum)
+  } catch (err) {
+    console.error('PDF render error:', err)
+  } finally {
+    pdfLoading.value = false
+    renderLock = false
+  }
+}
+
 defineExpose({
   initPdfJs,
   renderPdfPage,
+  renderAllPages,
   viewerContainer,
   pdfCanvas,
-  pdfjsLib
+  pdfjsLib,
+  get pdfDoc() { return pdfDoc },
+  pageCanvasRefs
 })
 </script>
 
@@ -230,8 +303,16 @@ defineExpose({
 .pdf-render-wrapper {
   position: relative;
   height: fit-content;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.pdf-page-wrapper {
+  position: relative;
   box-shadow: 0 5px 15px rgba(0,0,0,0.3);
   background: #fff;
+  height: fit-content;
 }
 
 .pdf-canvas {
@@ -257,24 +338,10 @@ defineExpose({
   animation: pulse-highlight 2s infinite;
 }
 
-.multi-page-highlight {
-  fill: rgba(0, 200, 255, 0.25);
-  stroke: #00aaff;
-  stroke-width: 2px;
-  stroke-dasharray: 4 2;
-  animation: pulse-highlight-multi 2s infinite;
-}
-
 @keyframes pulse-highlight {
   0% { fill: rgba(255, 165, 0, 0.25); }
   50% { fill: rgba(255, 165, 0, 0.45); }
   100% { fill: rgba(255, 165, 0, 0.25); }
-}
-
-@keyframes pulse-highlight-multi {
-  0% { fill: rgba(0, 200, 255, 0.2); }
-  50% { fill: rgba(0, 200, 255, 0.4); }
-  100% { fill: rgba(0, 200, 255, 0.2); }
 }
 
 .viewer-loading {

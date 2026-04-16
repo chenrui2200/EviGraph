@@ -154,13 +154,6 @@
                     </div>
                     <div class="object-score">
                       <span class="score-tag">{{ (row.relevance_score || 0).toFixed(1) }}</span>
-                      <button
-                        v-if="row.object_node?.pdf_info?.source"
-                        class="locate-btn"
-                        @click="viewDocument({ uuid: row.object_node.uuid, source: row.object_node.pdf_info.source, page: row.object_node.pdf_info.page || 1, bbox: row.object_node.pdf_info.bbox, page_width: row.object_node.pdf_info.page_width, page_height: row.object_node.pdf_info.page_height, graph_id: row.object_node.graph_id })"
-                      >
-                        定位文档
-                      </button>
                     </div>
                   </div>
 

@@ -141,14 +141,6 @@
                       <span class="score-tag" :title="`相关性: ${row.relevance_score?.toFixed(1)}`">
                         {{ row.relevance_score?.toFixed(1) || '?' }}
                       </span>
-                      <button
-                        v-if="row.object_node?.pdf_info?.source && !invalidSources.includes(row.object_node.pdf_info.source)"
-                        class="locate-btn root-locate-btn"
-                        @click.stop="viewDocument({ uuid: row.object_node.uuid, source: row.object_node.pdf_info.source, page: row.object_node.pdf_info.page || 1, bbox: row.object_node.pdf_info.bbox, page_width: row.object_node.pdf_info.page_width, page_height: row.object_node.pdf_info.page_height, graph_id: graphId || projectId })"
-                        title="定位到文档"
-                      >
-                        定位文档
-                      </button>
                     </div>
                   </div>
 
