@@ -899,6 +899,13 @@ async function handleNewProject() {
     pending.files.forEach(f => formData.append('files', f))
     formData.append('simulation_requirement', pending.simulationRequirement)
 
+    // 默认项目名使用第一个上传文件的文件名（去掉扩展名）
+    const firstFile = pending.files[0]
+    if (firstFile && firstFile.name) {
+      const baseName = firstFile.name.replace(/\.[^/.]+$/, '')
+      formData.append('project_name', baseName)
+    }
+
     const res = await generateOntology(formData)
     if (res.success) {
       clearPendingUpload()

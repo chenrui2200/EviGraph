@@ -37,11 +37,18 @@ def generate_ontology():
     try:
         logger.info("=== Starting 文件上传与文本提取流程 ===")
 
-        # Get parameters
-        project_name = request.form.get('project_name', 'Unnamed Project')
-
-        # Get uploaded files
+        # Get uploaded files first (needed for default project name)
         uploaded_files = request.files.getlist('files')
+
+        # Get parameters
+        project_name = request.form.get('project_name', '').strip()
+
+        # 如果没有提供项目名称，默认使用第一个上传文件的文件名（去掉扩展名）
+        if not project_name:
+            first_filename = uploaded_files[0].filename if uploaded_files else ''
+            base_name = os.path.splitext(first_filename)[0] if first_filename else 'Unnamed Project'
+            project_name = ProjectManager.generate_unique_name(base_name or 'Unnamed Project')
+
         if not uploaded_files or all(not f.filename for f in uploaded_files):
             return jsonify({
                 "success": False,

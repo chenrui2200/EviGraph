@@ -273,6 +273,22 @@ class ProjectManager:
         return os.path.join(cls._get_project_dir(project_id), 'chunks.json')
 
     @classmethod
+    def generate_unique_name(cls, base_name: str) -> str:
+        """
+        基于 base_name 生成唯一项目名称。如果已存在同名项目，则追加数字编号。
+        例如：base, base1, base2, ...
+        """
+        existing_names = {p.name for p in cls.list_projects(limit=10000)}
+        if base_name not in existing_names:
+            return base_name
+        counter = 1
+        while True:
+            candidate = f"{base_name}{counter}"
+            if candidate not in existing_names:
+                return candidate
+            counter += 1
+
+    @classmethod
     def create_project(cls, name: str = "Unnamed Project") -> Project:
         """
         Create new project (in-memory only, no directory/file I/O).
