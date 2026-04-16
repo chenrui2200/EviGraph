@@ -21,7 +21,7 @@
           <svg
             v-if="!$slots.overlay && (bbox || pdfBboxes)"
             class="pdf-highlight-overlay"
-            :viewBox="`0 0 ${pageWidth || 600} ${pageHeight || 800}`"
+            :viewBox="`0 0 ${effectivePageWidth} ${effectivePageHeight}`"
           >
             <rect
               v-if="bbox && bbox.length === 4"
@@ -86,11 +86,19 @@ const pdfCanvas = ref(null)
 const viewerContainer = ref(null)
 const pdfjsLib = ref(null)
 const pdfLoading = ref(false)
+const renderedPageWidth = ref(0)
+const renderedPageHeight = ref(0)
+const pdfBboxesBasePage = ref(props.page)
 
 const currentPageBboxes = computed(() => {
-  if (!props.pdfBboxes || !Array.isArray(props.pdfBboxes)) return []
-  return props.pdfBboxes.filter(b => b && b.length >= 5 && b[0] === props.page)
+  if (!props.pdfBboxes || !Array.isArray(props.pdfBboxes) || props.pdfBboxes.length === 0) return []
+  const basePage = pdfBboxesBasePage.value
+  const offset = props.pdfBboxes[0][0] - basePage
+  return props.pdfBboxes.filter(b => b && b.length >= 5 && b[0] - offset === props.page)
 })
+
+const effectivePageWidth = computed(() => props.pageWidth || renderedPageWidth.value || 600)
+const effectivePageHeight = computed(() => props.pageHeight || renderedPageHeight.value || 800)
 
 const closeViewer = () => {
   emit('update:modelValue', false)
@@ -135,6 +143,9 @@ const renderPdfPage = async (pdfSource, pageNum) => {
     const scale = (containerWidth - 40) / unscaledViewport.width
     const viewport = page.getViewport({ scale })
 
+    renderedPageWidth.value = unscaledViewport.width
+    renderedPageHeight.value = unscaledViewport.height
+
     canvas.height = viewport.height
     canvas.width = viewport.width
 
@@ -145,6 +156,12 @@ const renderPdfPage = async (pdfSource, pageNum) => {
     pdfLoading.value = false
   }
 }
+
+watch(() => props.url, (newUrl, oldUrl) => {
+  if (newUrl && newUrl !== oldUrl) {
+    pdfBboxesBasePage.value = props.page
+  }
+}, { immediate: true })
 
 watch(() => [props.url, props.page], async ([newUrl, newPage]) => {
   if (props.modelValue && newUrl) {

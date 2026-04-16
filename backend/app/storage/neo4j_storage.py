@@ -2220,6 +2220,10 @@ class Neo4jStorage(GraphStorage):
 
                     target_uuid = target_uuid_result["uuid"]
 
+                    # 避免自环
+                    if target_uuid == _clause_uuid:
+                        return
+
                     # 添加目标类型标签
                     # 使用白名单验证，防止 Cypher 注入
                     target_type = rel.get("target_type", "Entity")
@@ -4778,6 +4782,9 @@ class Neo4jStorage(GraphStorage):
         Returns:
             是否成功
         """
+        if source_uuid == target_uuid:
+            return False
+
         rel_type = properties.get("type", "RELATES_TO")
 
         try:

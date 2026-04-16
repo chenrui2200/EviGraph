@@ -351,6 +351,7 @@
         :bbox="currentDoc.bbox"
         :page-width="currentDoc.pageWidth"
         :page-height="currentDoc.pageHeight"
+        :pdf-bboxes="currentDoc.pdfBboxes"
       />
     </div> <!-- End Main Container -->
 
@@ -757,6 +758,7 @@ const viewDocument = async (fact) => {
   const bbox = fact.bbox || null
   const pageWidth = fact.page_width || 0
   const pageHeight = fact.page_height || 0
+  const pdfBboxes = fact.pdf_bboxes || null
 
   currentDoc.value = {
     filename,
@@ -764,7 +766,8 @@ const viewDocument = async (fact) => {
     page,
     bbox,
     pageWidth,
-    pageHeight
+    pageHeight,
+    pdfBboxes
   }
   showDocViewer.value = true
 }
