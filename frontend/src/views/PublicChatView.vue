@@ -205,11 +205,12 @@ const renderEvidenceScreenshots = async () => {
       const page = await pdfDoc.getPage(fact.page || 1)
       const context = canvas.getContext('2d')
       const bbox = fact.bbox
-      const padding = 30
-      const cropX = Math.max(0, bbox[0] - padding)
-      const cropY = Math.max(0, bbox[1] - padding)
-      const cropW = (bbox[2] - bbox[0]) + padding * 2
-      const cropH = (bbox[3] - bbox[1]) + padding * 2
+      const hPadding = 80
+      const vPadding = 240
+      const cropX = Math.max(0, bbox[0] - hPadding)
+      const cropY = Math.max(0, bbox[1] - vPadding)
+      const cropW = (bbox[2] - bbox[0]) + hPadding * 2
+      const cropH = (bbox[3] - bbox[1]) + vPadding * 2
       const scale = 2.5
       const viewport = page.getViewport({ scale })
 

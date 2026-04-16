@@ -654,11 +654,12 @@ const renderEvidenceScreenshots = async (type = 'node') => {
 
       // Logic: Extract the bbox area + some padding
       const bbox = fact.bbox
-      const padding = type === 'modal' ? 40 : 20
-      const cropX = Math.max(0, bbox[0] - padding)
-      const cropY = Math.max(0, bbox[1] - padding)
-      const cropW = (bbox[2] - bbox[0]) + padding * 2
-      const cropH = (bbox[3] - bbox[1]) + padding * 2
+      const hPadding = type === 'modal' ? 120 : 60
+      const vPadding = type === 'modal' ? 360 : 180
+      const cropX = Math.max(0, bbox[0] - hPadding)
+      const cropY = Math.max(0, bbox[1] - vPadding)
+      const cropW = (bbox[2] - bbox[0]) + hPadding * 2
+      const cropH = (bbox[3] - bbox[1]) + vPadding * 2
 
       const scale = type === 'modal' ? 3.0 : 2.0
       const viewport = page.getViewport({ scale })
@@ -675,7 +676,7 @@ const renderEvidenceScreenshots = async (type = 'node') => {
       const sW = cropW * scale
       const sH = cropH * scale
 
-      const targetWidth = type === 'modal' ? 700 : 240
+      const targetWidth = type === 'modal' ? 1100 : 480
       canvas.width = targetWidth
       canvas.height = (sH / sW) * targetWidth
 
