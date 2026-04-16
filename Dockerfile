@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ ./
 
 # 创建稳定软链接，避免不同 Python 小版本路径差异
-# RUN ln -s $(python -c "import site; print(site.getsitepackages()[0])") /python-site-packages
+RUN ln -s $(python -c "import site; print(site.getsitepackages()[0])") /python-site-packages
 
 # =============================================
 # Stage 3: Final runtime
