@@ -253,6 +253,10 @@ def get_project_document(project_id: str, filename: str):
     Get a specific document (e.g. PDF) associated with a project for preview.
     Supports both project_id and graph_id as the first parameter.
     """
+    target_file_path = None
+    target_dir = None
+    found_filename = None
+
     project = ProjectManager.get_project(project_id)
 
     if not project:
