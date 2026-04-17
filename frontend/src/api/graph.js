@@ -318,6 +318,71 @@ export function updateClauseEntity(projectId, data) {
 }
 
 // ============================================================================
+// KB Pipeline API
+// ============================================================================
+
+/**
+ * 获取 MinIO 中的 PDF 文件列表
+ * @param {String} prefix - 前缀过滤
+ * @returns {Promise}
+ */
+export function getKbPipelineMinioFiles(prefix = '') {
+  return service({
+    url: '/api/graph/kb-pipeline/minio-files',
+    method: 'get',
+    params: { prefix }
+  })
+}
+
+/**
+ * 启动 KB Pipeline
+ * @param {String} minio_object - MinIO 对象名称
+ * @returns {Promise}
+ */
+export function startKbPipeline(minio_object) {
+  return service({
+    url: '/api/graph/kb-pipeline/start',
+    method: 'post',
+    data: { minio_object }
+  })
+}
+
+/**
+ * 获取 KB Pipeline 列表
+ * @param {Number} limit - 最大数量
+ * @returns {Promise}
+ */
+export function getKbPipelineList(limit = 100) {
+  return service({
+    url: '/api/graph/kb-pipeline/list',
+    method: 'get',
+    params: { limit }
+  })
+}
+
+/**
+ * 获取单个 KB Pipeline 状态
+ * @param {String} pipelineId
+ * @returns {Promise}
+ */
+export function getKbPipeline(pipelineId) {
+  return service({
+    url: `/api/graph/kb-pipeline/${pipelineId}`,
+    method: 'get'
+  })
+}
+
+/**
+ * 获取 KB Pipeline SSE Events URL
+ * @param {String} pipelineId
+ * @returns {String}
+ */
+export function getKbPipelineEventsURL(pipelineId) {
+  const baseURL = import.meta.env.VITE_API_BASE_URL
+  return `${baseURL}/api/graph/kb-pipeline/${pipelineId}/events`
+}
+
+// ============================================================================
 // MinerU PDF 解析 API
 // ============================================================================
 

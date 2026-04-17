@@ -5,6 +5,8 @@ import AiQaView from '../views/AiQaView.vue'
 import HitTestView from '../views/HitTestView.vue'
 import PublicChatView from '../views/PublicChatView.vue'
 import ChunkAnalysisView from '../views/ChunkAnalysisView.vue'
+import KbPipelineLaunchView from '../views/KbPipelineLaunchView.vue'
+import KbPipelineTrackView from '../views/KbPipelineTrackView.vue'
 
 const routes = [
   {
@@ -40,6 +42,17 @@ const routes = [
     path: '/ai-qa/:id',
     name: 'AiQa',
     component: AiQaView,
+    props: true
+  },
+  {
+    path: '/kb-pipeline',
+    name: 'KbPipelineLaunch',
+    component: KbPipelineLaunchView
+  },
+  {
+    path: '/kb-pipeline/:pipelineId',
+    name: 'KbPipelineTrack',
+    component: KbPipelineTrackView,
     props: true
   },
 ]

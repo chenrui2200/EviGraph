@@ -142,7 +142,21 @@
 
             <div :style="s.consoleSection">
               <div class="console-header" :style="s.consoleHeader">
-                <span>>_ 03 / 创建AI应用</span>
+                <span>>_ 03 / KB Pipeline</span>
+              </div>
+
+              <button
+                :style="s.aiAppBtn"
+                @click="goToKbPipeline"
+              >
+                <span>启动知识库流水线</span>
+                <span>➝</span>
+              </button>
+            </div>
+
+            <div :style="s.consoleSection">
+              <div class="console-header" :style="s.consoleHeader">
+                <span>>_ 04 / 创建AI应用</span>
               </div>
 
               <button
@@ -265,6 +279,10 @@ const router = useRouter()
 
 const goToAiApp = () => {
   router.push({ name: 'AiQa', params: { id: 'new' } })
+}
+
+const goToKbPipeline = () => {
+  router.push({ name: 'KbPipelineLaunch' })
 }
 
 const formData = ref({ simulationRequirement: '' })
