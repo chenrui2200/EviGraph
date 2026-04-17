@@ -234,6 +234,18 @@ export function chatWithAgent(data) {
   })
 }
 
+/**
+ * 重新执行 Pipeline 的图谱构建阶段
+ * @param {String} pipelineId - Pipeline ID
+ * @returns {Promise}
+ */
+export function retryGraphBuilding(pipelineId) {
+  return service({
+    url: `/api/graph/kb-pipeline/${pipelineId}/retry-graph-building`,
+    method: 'post'
+  })
+}
+
 // ============================================================================
 // 智能Chunks标注分析 API
 // ============================================================================

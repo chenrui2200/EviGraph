@@ -22,6 +22,11 @@ from ..utils.logger import get_logger
 
 logger = get_logger('mirofish.kb_pipeline')
 
+# 延迟导入 Flask app 以避免循环依赖
+def _get_app():
+    from app import create_app
+    return create_app()
+
 
 class KbPipelineRunner:
     """KB Pipeline 运行器"""
@@ -377,6 +382,12 @@ class KbPipelineRunner:
 def start_pipeline_runner(pipeline: KbPipeline):
     """在后台线程启动 pipeline"""
     runner = KbPipelineRunner(pipeline)
-    thread = threading.Thread(target=runner.run, daemon=True)
+    app = _get_app()
+
+    def run_with_context():
+        with app.app_context():
+            runner.run()
+
+    thread = threading.Thread(target=run_with_context, daemon=True)
     thread.start()
     return thread

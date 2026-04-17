@@ -67,7 +67,7 @@
     </main>
 
     <!-- Bottom Search Area -->
-    <footer class="report-footer">
+    <footer v-if="!route.query.question" class="report-footer">
       <div class="search-container">
         <textarea
           v-model="userInput"
@@ -397,7 +397,14 @@ const scrollToTop = () => {
   }
 }
 
-onMounted(loadApp)
+onMounted(async () => {
+  await loadApp()
+  const presetQuestion = route.query.question
+  if (presetQuestion && typeof presetQuestion === 'string' && presetQuestion.trim()) {
+    userInput.value = presetQuestion.trim()
+    await handleSearch()
+  }
+})
 </script>
 
 <style scoped>

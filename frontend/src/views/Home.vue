@@ -171,6 +171,7 @@
         </div>
       </section>
 
+      <KbPipelineList />
       <ProjectList />
       <AiAppList />
     </div>
@@ -182,6 +183,7 @@ import { ref, computed, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import ProjectList from '../components/ProjectList.vue'
 import AiAppList from '../components/AiAppList.vue'
+import KbPipelineList from '../components/KbPipelineList.vue'
 import { getHealth } from '../api/graph'
 
 const mono = 'JetBrains Mono, monospace'

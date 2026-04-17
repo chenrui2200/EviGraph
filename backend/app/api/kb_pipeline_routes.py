@@ -12,9 +12,69 @@ from ..utils.logger import get_logger
 from ..utils.api_utils import api_handler, success_response
 from ..utils.minio_client import list_pdf_objects
 from ..models.kb_pipeline import KbPipelineManager, KbPipeline, PipelineStageStatus
+from ..models.project import ProjectManager
+from ..models.task import TaskManager
 from ..services.kb_pipeline_runner import start_pipeline_runner
 
 logger = get_logger('mirofish.api')
+
+
+@graph_bp.route('/kb-pipeline/<pipeline_id>/retry-graph-building', methods=['POST'])
+@api_handler
+def retry_graph_building(pipeline_id: str):
+    """重新执行 Pipeline 的图谱构建阶段"""
+    pipeline = KbPipelineManager.get(pipeline_id)
+    if not pipeline:
+        return jsonify({"success": False, "error": "Pipeline 不存在"}), 404
+
+    project_id = pipeline.project_id
+    if not project_id:
+        return jsonify({"success": False, "error": "Project 尚未创建"}), 400
+
+    project = ProjectManager.get_project(project_id)
+    if not project:
+        return jsonify({"success": False, "error": "Project 不存在"}), 404
+
+    from .graph import _get_storage, _start_build_worker
+    storage = _get_storage()
+    task_manager = TaskManager()
+
+    task_id = task_manager.create_task(
+        task_type="graph_build",
+        metadata={"project_id": project_id}
+    )
+    project.graph_build_task_id = task_id
+    ProjectManager.save_project(project)
+    _start_build_worker(project_id, task_id, storage, force=False)
+
+    # 更新 graph_building stage
+    stage = next((s for s in pipeline.stages if s.name == "graph_building"), None)
+    graph_idx = 0
+    if stage:
+        graph_idx = pipeline.stages.index(stage)
+        stage.status = PipelineStageStatus.PROCESSING
+        stage.message = "重新构建中..."
+        stage.completed_at = None
+        if not stage.result:
+            stage.result = {}
+        stage.result["task_id"] = task_id
+
+    # 重置后续阶段为 pending，回退 pipeline 状态
+    if pipeline.status in (PipelineStageStatus.COMPLETED, PipelineStageStatus.FAILED):
+        pipeline.status = PipelineStageStatus.PROCESSING
+        pipeline.error = None
+    pipeline.current_stage_index = graph_idx
+    for s in pipeline.stages[graph_idx + 1:]:
+        s.status = PipelineStageStatus.PENDING
+        s.message = ""
+        s.result = {}
+        s.completed_at = None
+        s.link = None
+
+    KbPipelineManager.save(pipeline)
+    start_pipeline_runner(pipeline)
+    logger.info(f"Pipeline {pipeline_id} graph_building retried with task {task_id}")
+    return success_response(data=pipeline.to_dict())
 
 
 @graph_bp.route('/kb-pipeline/minio-files', methods=['GET'])
@@ -49,7 +109,7 @@ def list_kb_pipelines():
     """列出所有 KB Pipeline"""
     limit = request.args.get('limit', 100, type=int)
     pipelines = KbPipelineManager.list_all(limit=limit)
-    return success_response(data=[p.to_dict() for p in pipelines], count=len(pipelines))
+    return success_response(data=[p.to_dict() for p in pipelines])
 
 
 @graph_bp.route('/kb-pipeline/<pipeline_id>', methods=['GET'])
