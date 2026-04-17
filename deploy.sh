@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+git pull
 # 如果用户误用 sh 执行，自动切换到 bash
 if [ -z "${BASH_VERSION:-}" ]; then
     exec bash "$0" "$@"
