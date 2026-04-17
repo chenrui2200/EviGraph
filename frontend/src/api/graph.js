@@ -290,6 +290,20 @@ export function startChunking(data) {
 }
 
 /**
+ * 自动推断推荐的章节锚点和最小条款容器锚点
+ * @param {String} projectId - 项目ID
+ * @returns {Promise}
+ */
+export function inferChunkAnchors(projectId) {
+  return requestWithRetry(() =>
+    service({
+      url: `/api/graph/chunk/${projectId}/infer-anchors`,
+      method: 'post'
+    })
+  )
+}
+
+/**
  * 更新单个 clause 的知识实体（手动编辑）
  * @param {String} projectId - 项目ID
  * @param {Object} data - Contains clause_id, terms, conditions, actions, components

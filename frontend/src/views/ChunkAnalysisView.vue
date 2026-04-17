@@ -523,88 +523,77 @@
     </div>
 
     <!-- 章节匹配模式选择弹窗 -->
-    <div v-if="showChapterPatternModal" class="modal-overlay" @click.self="showChapterPatternModal = false">
-      <div class="modal-card" style="min-width: 480px;">
+    <div v-if="showChapterPatternModal" class="modal-overlay" @click="showChapterPatternModal = false" @keydown.esc="showChapterPatternModal = false" tabindex="-1">
+      <div class="modal-card anchor-modal" @click.stop>
         <div class="modal-header">
-          <h3>重新分析 - 章节模式选择</h3>
+          <h3>智能分析 - 章节模式选择</h3>
           <button class="modal-close" @click="showChapterPatternModal = false">×</button>
         </div>
         <div class="modal-body">
-          <p class="modal-desc">重新分析将清除已有数据。请选择章节锚点和最小条款容器锚点：</p>
+          <div v-if="anchorAutoRecommended" class="anchor-recommendation">
+            <div class="anchor-rec-title">🎯 自动推荐结果</div>
+            <div class="anchor-rec-body">
+              章节 <strong>{{ chapterAnchor }}</strong>
+              <span class="anchor-rec-sep">·</span>
+              容器 <strong>{{ clauseContainer }}</strong>
+            </div>
+            <div v-if="anchorReason" class="anchor-rec-reason">{{ anchorReason }}</div>
+          </div>
 
           <div class="pattern-section">
-            <div class="pattern-section-title">章节锚点（一级父节点）：</div>
+            <div class="pattern-section-title">章节锚点（一级父节点）</div>
             <div class="pattern-options">
               <label class="pattern-option" :class="{ active: chapterAnchor === 'x' }">
                 <input type="radio" v-model="chapterAnchor" value="x" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x</span>
-                  <span class="pattern-desc">如 "2 术语"</span>
-                </div>
+                <span class="pattern-name">x</span>
+                <span class="pattern-desc">2 术语</span>
               </label>
               <label class="pattern-option" :class="{ active: chapterAnchor === 'x.x' }">
                 <input type="radio" v-model="chapterAnchor" value="x.x" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x</span>
-                  <span class="pattern-desc">如 "2.1 配电"</span>
-                </div>
+                <span class="pattern-name">x.x</span>
+                <span class="pattern-desc">2.1 配电</span>
               </label>
               <label class="pattern-option" :class="{ active: chapterAnchor === 'x.x.x' }">
                 <input type="radio" v-model="chapterAnchor" value="x.x.x" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x.x</span>
-                  <span class="pattern-desc">如 "2.1.1 导体"</span>
-                </div>
+                <span class="pattern-name">x.x.x</span>
+                <span class="pattern-desc">2.1.1 导体</span>
               </label>
               <label class="pattern-option" :class="{ active: chapterAnchor === 'x.x.x.x' }">
                 <input type="radio" v-model="chapterAnchor" value="x.x.x.x" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x.x.x</span>
-                  <span class="pattern-desc">如 "2.1.1.1 子导体"</span>
-                </div>
+                <span class="pattern-name">x.x.x.x</span>
+                <span class="pattern-desc">2.1.1.1</span>
               </label>
             </div>
           </div>
 
           <div class="pattern-section">
-            <div class="pattern-section-title">最小条款容器锚点（二级）：</div>
+            <div class="pattern-section-title">最小条款容器锚点（二级）</div>
             <div class="pattern-options">
               <label class="pattern-option" :class="{ active: clauseContainer === 'x.x', disabled: anchorDepth > 2 }">
                 <input type="radio" v-model="clauseContainer" value="x.x" :disabled="anchorDepth > 2" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x</span>
-                  <span class="pattern-desc">如 "2.0.1"</span>
-                </div>
+                <span class="pattern-name">x.x</span>
+                <span class="pattern-desc">2.1</span>
               </label>
               <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x', disabled: anchorDepth > 3 }">
                 <input type="radio" v-model="clauseContainer" value="x.x.x" :disabled="anchorDepth > 3" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x.x</span>
-                  <span class="pattern-desc">如 "2.0.1"</span>
-                </div>
+                <span class="pattern-name">x.x.x</span>
+                <span class="pattern-desc">2.1.1</span>
               </label>
               <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x.x', disabled: anchorDepth > 4 }">
                 <input type="radio" v-model="clauseContainer" value="x.x.x.x" :disabled="anchorDepth > 4" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x.x.x</span>
-                  <span class="pattern-desc">如 "2.0.1.1"</span>
-                </div>
+                <span class="pattern-name">x.x.x.x</span>
+                <span class="pattern-desc">2.1.1.1</span>
               </label>
               <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x.x.x', disabled: anchorDepth > 5 }">
                 <input type="radio" v-model="clauseContainer" value="x.x.x.x.x" :disabled="anchorDepth > 5" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x.x.x.x</span>
-                  <span class="pattern-desc">如 "2.0.1.1.1"</span>
-                </div>
+                <span class="pattern-name">x.x.x.x.x</span>
+                <span class="pattern-desc">2.1.1.1.1</span>
               </label>
             </div>
           </div>
 
           <div class="pattern-hint">
-            <div>说明：</div>
-            <div>· 章节锚点作为章节树的父节点（一级）</div>
-            <div>· 最小条款容器锚点在两个章节锚点之间作为二级容器</div>
-            <div>· 二级容器下的条款合并后挂在一级节点下</div>
+            章节锚点决定一级节点，容器锚点决定二级分组；无匹配容器时条款直接挂载到章节下。
           </div>
         </div>
         <div class="modal-footer">
@@ -658,6 +647,7 @@ import {
   getChunkAnalysis,
   getChunkProgress,
   startChunking,
+  inferChunkAnchors,
   updateClauseEntity,
   getTaskStatus,
   getMineruChunks,
@@ -724,6 +714,9 @@ const selectedParseMethod = ref('auto')
 const showChapterPatternModal = ref(false)
 const chapterAnchor = ref('x.x')  // 章节锚点（一级父节点）
 const clauseContainer = ref('x.x.x')  // 最小条款容器锚点（二级）
+const anchorAutoRecommended = ref(false)
+const anchorReason = ref('')
+const isResetChunking = ref(false)  // 标记当前是首次分析(false)还是重置分析(true)
 
 const anchorDepth = computed(() => {
   const depthMap = { 'x': 1, 'x.x': 2, 'x.x.x': 3, 'x.x.x.x': 4, 'x.x.x.x.x': 5 }
@@ -1140,30 +1133,40 @@ async function renderAllPages(pdf) {
 // 智能分析控制
 // ============================================================================
 
-async function handleStartChunking() {
-  if (starting.value) return
+async function openAnchorModal(reset) {
   starting.value = true
-  showStartButton.value = false
-  realtimeLogs.value.push('🚀 启动智能Chunks标注分析...')
+  isResetChunking.value = reset
+  anchorAutoRecommended.value = false
+  anchorReason.value = ''
 
   try {
-    const res = await startChunking({ project_id: currentProjectId.value, reset: false })
+    const res = await inferChunkAnchors(currentProjectId.value)
     if (res.success) {
-      taskId.value = res.data.task_id
-      analysisStatus.value = 'graph_chunking'
-      realtimeLogs.value.push(`任务已启动: ${res.data.message}`)
-      startTaskSSE()
-      startProgressPolling()
+      chapterAnchor.value = res.data.chapter_anchor || 'x.x'
+      clauseContainer.value = res.data.clause_container || 'x.x.x'
+      anchorReason.value = res.data.reason || ''
+      anchorAutoRecommended.value = true
     } else {
-      realtimeLogs.value.push(`❌ 启动失败: ${res.error}`)
-      showStartButton.value = true
+      chapterAnchor.value = 'x.x'
+      clauseContainer.value = 'x.x.x'
     }
   } catch (err) {
-    realtimeLogs.value.push(`❌ 异常: ${err.message}`)
-    showStartButton.value = true
+    chapterAnchor.value = 'x.x'
+    clauseContainer.value = 'x.x.x'
   } finally {
     starting.value = false
+    showChapterPatternModal.value = true
   }
+}
+
+async function handleStartChunking() {
+  if (starting.value) return
+  await openAnchorModal(false)
+}
+
+async function handleResetChunking() {
+  if (starting.value) return
+  await openAnchorModal(true)
 }
 
 async function handleReAnnotate() {
@@ -1197,42 +1200,42 @@ async function doReAnnotate(parseMethod) {
   }
 }
 
-async function handleResetChunking() {
-  if (starting.value) return
-  // 弹出章节匹配模式选择框
-  chapterAnchor.value = 'x.x'  // 默认值
-  clauseContainer.value = 'x.x.x'  // 默认值
-  showChapterPatternModal.value = true
-}
-
 async function confirmChapterPattern() {
   showChapterPatternModal.value = false
   starting.value = true
+  showStartButton.value = false
   hasAutoExpanded.value = false
-  realtimeLogs.value.push(`🔄 重置并重新分析 (章节锚点: ${chapterAnchor.value}, 条款容器: ${clauseContainer.value})...`)
+
+  const actionLabel = isResetChunking.value ? '重置并重新分析' : '开始智能分析'
+  realtimeLogs.value.push(`${isResetChunking.value ? '🔄' : '🚀'} ${actionLabel} (章节锚点: ${chapterAnchor.value}, 条款容器: ${clauseContainer.value})...`)
 
   try {
     const res = await startChunking({
       project_id: currentProjectId.value,
-      reset: true,
+      reset: isResetChunking.value,
       chapter_anchor: chapterAnchor.value,
       clause_container: clauseContainer.value
     })
     if (res.success) {
       taskId.value = res.data.task_id
       analysisStatus.value = 'graph_chunking'
-      analysisData.value = null
-      allAnnotations.value = []
-      expandedChapters.value = {}
-      expandedClauseId.value = null
-      highlightedClauseId.value = null
+      if (isResetChunking.value) {
+        analysisData.value = null
+        allAnnotations.value = []
+        expandedChapters.value = {}
+        expandedClauseId.value = null
+        highlightedClauseId.value = null
+      }
+      realtimeLogs.value.push(`任务已启动: ${res.data.message}`)
       startTaskSSE()
       startProgressPolling()
     } else {
-      realtimeLogs.value.push(`❌ 重置失败: ${res.error}`)
+      realtimeLogs.value.push(`❌ 启动失败: ${res.error}`)
+      showStartButton.value = true
     }
   } catch (err) {
     realtimeLogs.value.push(`❌ 异常: ${err.message}`)
+    showStartButton.value = true
   } finally {
     starting.value = false
   }
@@ -2176,23 +2179,49 @@ header.ca-header {
 .modal-btn.cancel:hover { background: #f0f0f0; }
 .modal-btn.confirm { background: #667eea; border: none; color: white; }
 .modal-btn.confirm:hover { background: #5a67e8; }
-.pattern-section { margin-bottom: 20px; }
-.pattern-section-title { font-size: 13px; font-weight: 600; color: #1a1a2e; margin-bottom: 10px; }
-.pattern-options { display: flex; flex-direction: column; gap: 8px; }
+.anchor-modal { width: 420px; max-width: 92vw; }
+.anchor-modal .modal-header { padding: 14px 16px; }
+.anchor-modal .modal-body { padding: 14px 16px 16px; }
+.anchor-modal .modal-footer { padding: 12px 16px; }
+.anchor-recommendation {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, #e6f7ff 0%, #f0faff 100%);
+  border: 1px solid #91d5ff;
+  border-radius: 8px;
+}
+.anchor-rec-title { font-weight: 600; color: #096dd9; margin-bottom: 4px; font-size: 13px; }
+.anchor-rec-body { color: #262626; font-size: 13px; }
+.anchor-rec-body strong { color: #1890ff; font-weight: 700; }
+.anchor-rec-sep { margin: 0 6px; color: #bfbfbf; }
+.anchor-rec-reason { color: #595959; font-size: 11px; margin-top: 4px; line-height: 1.4; }
+
+.pattern-section { margin-bottom: 16px; }
+.pattern-section-title { font-size: 12px; font-weight: 600; color: #4b5563; margin-bottom: 8px; }
+.pattern-options { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .pattern-option {
-  display: flex; align-items: center; gap: 12px;
-  padding: 10px 14px;
-  border: 2px solid #e5e7eb; border-radius: 8px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px;
+  padding: 8px 4px;
+  border: 1.5px solid #e5e7eb; border-radius: 8px;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.15s;
+  min-height: 56px;
 }
 .pattern-option:hover { border-color: #667eea; background: #f9fafb; }
-.pattern-option.active { border-color: #667eea; background: #eef2ff; }
-.pattern-option.disabled { opacity: 0.5; cursor: not-allowed; }
-.pattern-option.disabled:hover { border-color: #e5e7eb; background: transparent; }
+.pattern-option.active { border-color: #667eea; background: #eef2ff; box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.15); }
+.pattern-option.disabled { opacity: 0.45; cursor: not-allowed; background: #f5f5f5; }
+.pattern-option.disabled:hover { border-color: #e5e7eb; background: #f5f5f5; }
 .pattern-option input[type="radio"] { display: none; }
-.pattern-content { display: flex; flex-direction: column; gap: 2px; }
-.pattern-name { font-size: 13px; font-weight: 600; color: #1a1a2e; }
-.pattern-desc { font-size: 11px; color: #6b7280; }
-.pattern-hint { margin-top: 16px; padding: 12px; background: #f9fafb; border-radius: 8px; font-size: 12px; color: #6b7280; line-height: 1.6; }
+.pattern-option .pattern-name { font-size: 14px; font-weight: 700; color: #1a1a2e; }
+.pattern-option .pattern-desc { font-size: 10px; color: #6b7280; }
+.pattern-hint {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #f6f7f9;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #6b7280;
+  line-height: 1.5;
+}
 </style>

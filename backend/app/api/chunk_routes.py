@@ -271,6 +271,33 @@ def intelligent_chunk():
         return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
 
 
+@graph_bp.route('/chunk/<project_id>/infer-anchors', methods=['POST'])
+@api_handler
+def infer_chunk_anchors(project_id: str):
+    """
+    基于 chunks.json 自动推断推荐的章节锚点和最小条款容器锚点。
+    """
+    try:
+        project = ProjectManager.get_project(project_id)
+        if not project:
+            return jsonify({"success": False, "error": f"项目不存在: {project_id}"}), 404
+
+        chunks_data = ProjectManager.get_chunks(project_id)
+        if not chunks_data:
+            return jsonify({"success": False, "error": "未找到 chunks.json，请先完成 MinerU 解析"}), 400
+
+        from ..services.llm_driven_chunker import infer_anchor_patterns
+        result = infer_anchor_patterns(chunks_data)
+
+        return jsonify({
+            "success": True,
+            "data": result
+        })
+    except Exception as e:
+        logger.error(f"推断章节锚点失败: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @graph_bp.route('/chunk/<project_id>/progress', methods=['GET'])
 @api_handler
 def get_chunk_progress(project_id: str):

@@ -208,6 +208,185 @@ def element_to_dict(element: "ElementSegment") -> Dict[str, Any]:
     }
 
 
+def _evaluate_container_page_ratio(chunks_data: List[Dict[str, Any]], pattern: re.Pattern) -> Dict[str, Any]:
+    """
+    评估某个 pattern 作为 clause_container 时，每个容器在页面上的垂直占比。
+    返回平均占比、最大占比、容器数量。
+
+    理想目标：平均占比 <= 0.5（50% 页高），更优 <= 0.2（20% 页高）。
+    """
+    containers = {}  # container_id -> {page_idx: {min_y, max_y, page_height, chunk_count}}
+    current_id = None
+
+    for chunk in chunks_data:
+        content = (chunk.get('content') or chunk.get('text', '')).strip()
+        chunk_type = chunk.get('type', '')
+        page_idx = chunk.get('page_idx', 0)
+        bbox = chunk.get('bbox_pdf') or chunk.get('bbox_viewport') or []
+        page_height = chunk.get('page_height', 841)
+
+        # 开启新容器：任何匹配该 pattern 的块都可以作为容器边界
+        # （MinerU 可能把条款编号标为 text 而非 title）
+        m = pattern.match(content)
+        if m:
+            current_id = m.group(1)
+            if current_id not in containers:
+                containers[current_id] = {}
+
+        if current_id is None:
+            continue
+
+        page_info = containers[current_id].setdefault(page_idx, {
+            'min_y': float('inf'),
+            'max_y': float('-inf'),
+            'page_height': page_height or 841,
+            'chunk_count': 0,
+        })
+
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            y0, y1 = float(bbox[1]), float(bbox[3])
+            page_info['min_y'] = min(page_info['min_y'], y0)
+            page_info['max_y'] = max(page_info['max_y'], y1)
+        page_info['chunk_count'] += 1
+
+    if not containers:
+        return {'avg_ratio': 1.0, 'max_ratio': 1.0, 'count': 0}
+
+    ratios = []
+    for cid, pages in containers.items():
+        for page_idx, info in pages.items():
+            ph = info['page_height'] or 841
+            if info['min_y'] != float('inf') and info['max_y'] != float('-inf'):
+                span = info['max_y'] - info['min_y']
+                ratios.append(min(span / ph, 1.0))
+            else:
+                # 无 bbox：按 chunk 数估算，假设每个 text chunk 约占 0.05 页
+                ratios.append(min(info['chunk_count'] * 0.05, 1.0))
+
+    return {
+        'avg_ratio': round(sum(ratios) / len(ratios), 2) if ratios else 1.0,
+        'max_ratio': round(max(ratios), 2) if ratios else 1.0,
+        'count': len(containers),
+    }
+
+
+def infer_anchor_patterns(chunks_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    基于 chunks.json 的内容分布自动推断 chapter_anchor 和 clause_container。
+
+    返回字典：
+        {
+            "chapter_anchor": str,
+            "clause_container": str,
+            "reason": str,
+            "stats": {
+                "x_title": int, "x_all": int,
+                "x.x_title": int, "x.x_all": int,
+                "x.x.x_title": int, "x.x.x_all": int,
+            }
+        }
+    """
+    patterns = {
+        'x': re.compile(r'^(\d+)(?!\.\d)'),
+        'x.x': re.compile(r'^(\d+\.\d+)(?!\.\d)'),
+        'x.x.x': re.compile(r'^(\d+\.\d+\.\d+)(?!\.\d)'),
+        'x.x.x.x': re.compile(r'^(\d+\.\d+\.\d+\.\d+)'),
+    }
+
+    title_nums = {k: set() for k in patterns}
+    all_nums = {k: set() for k in patterns}
+
+    for chunk in chunks_data:
+        content = (chunk.get('content') or chunk.get('text', '')).strip()
+        chunk_type = chunk.get('type', '')
+        if not content:
+            continue
+        for name, pat in patterns.items():
+            m = pat.match(content)
+            if m:
+                num = m.group(1)
+                all_nums[name].add(num)
+                if chunk_type == 'title':
+                    title_nums[name].add(num)
+
+    depth_map = ['x', 'x.x', 'x.x.x', 'x.x.x.x']
+
+    # 推断 chapter_anchor
+    chapter_anchor = 'x.x'
+    reason_parts = []
+    for cand in ['x', 'x.x', 'x.x.x']:
+        t = len(title_nums[cand])
+        a = len(all_nums[cand])
+        if t >= 3 or (a >= 5 and t >= 1):
+            chapter_anchor = cand
+            reason_parts.append(f"选择 {cand} 作为章节锚点：title 中 {t} 个，总计 {a} 个")
+            break
+    else:
+        reason_parts.append("未检测到足够的编号层级，使用默认 x.x 作为章节锚点")
+
+    # 推断 clause_container（先按数量逻辑初选）
+    ch_idx = depth_map.index(chapter_anchor)
+    clause_container = depth_map[min(ch_idx + 1, len(depth_map) - 1)]
+    ch_count = max(len(title_nums[chapter_anchor]), len(all_nums[chapter_anchor]))
+
+    for next_idx in range(ch_idx + 1, len(depth_map)):
+        cand = depth_map[next_idx]
+        t_cnt = len(title_nums[cand])
+        a_cnt = len(all_nums[cand])
+        if t_cnt >= 3 and t_cnt >= ch_count * 0.15:
+            clause_container = cand
+            reason_parts.append(f"选择 {cand} 作为条款容器：title 中 {t_cnt} 个（>= 章节数 {ch_count} 的 15%）")
+            break
+        elif a_cnt >= 5 and t_cnt >= 1:
+            deeper = depth_map[next_idx + 1] if next_idx + 1 < len(depth_map) else None
+            if deeper and len(all_nums[deeper]) > a_cnt * 1.5:
+                clause_container = cand
+                reason_parts.append(f"选择 {cand} 作为条款容器：更深一级数量显著更多，推断其为结构层")
+                break
+    else:
+        reason_parts.append(f"未检测到合适的二级容器，默认使用 {clause_container}")
+
+    # === 页占比修正：确保容器跨度在 1/10 ~ 1/2 页之间 ===
+    PAGE_RATIO_SOFT = 0.50  # 软性上限：50% 页高
+    PAGE_RATIO_HARD = 0.20  # 理想上限：20% 页高
+
+    current_ratio = _evaluate_container_page_ratio(chunks_data, patterns[clause_container])
+    reason_parts.append(f"{clause_container} 平均页占比 {current_ratio['avg_ratio'] * 100:.0f}%（最大 {current_ratio['max_ratio'] * 100:.0f}%）")
+
+    if current_ratio['avg_ratio'] > PAGE_RATIO_SOFT:
+        # 尝试逐级拆细，直到满足页占比要求或无法继续
+        refined = False
+        for deeper_idx in range(depth_map.index(clause_container) + 1, len(depth_map)):
+            deeper = depth_map[deeper_idx]
+            deeper_count = len(title_nums[deeper])
+            if deeper_count < 3:
+                continue
+            deeper_ratio = _evaluate_container_page_ratio(chunks_data, patterns[deeper])
+            if deeper_ratio['avg_ratio'] < current_ratio['avg_ratio'] * 0.7:
+                clause_container = deeper
+                current_ratio = deeper_ratio
+                reason_parts.append(f"降级为 {deeper}：平均页占比降至 {current_ratio['avg_ratio'] * 100:.0f}%")
+                refined = True
+                if current_ratio['avg_ratio'] <= PAGE_RATIO_HARD:
+                    break
+        if not refined:
+            reason_parts.append(f"{clause_container} 跨页偏大但无更细层级可拆，保持当前")
+    elif current_ratio['avg_ratio'] <= PAGE_RATIO_HARD:
+        reason_parts.append(f"页占比良好，无需调整")
+
+    stats = {}
+    for k in patterns:
+        stats[f"{k}_title"] = len(title_nums[k])
+        stats[f"{k}_all"] = len(all_nums[k])
+
+    return {
+        "chapter_anchor": chapter_anchor,
+        "clause_container": clause_container,
+        "reason": "；".join(reason_parts),
+        "stats": stats,
+    }
+
+
 class LLMDrivenChunker:
     """
     基于 LLM 的智能分块引擎
