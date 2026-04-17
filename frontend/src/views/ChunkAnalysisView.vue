@@ -523,13 +523,15 @@
     </div>
 
     <!-- 章节匹配模式选择弹窗 -->
-    <div v-if="showChapterPatternModal" class="modal-overlay" @click="showChapterPatternModal = false" @keydown.esc="showChapterPatternModal = false" tabindex="-1">
-      <div class="modal-card anchor-modal" @click.stop>
-        <div class="modal-header">
-          <h3>智能分析 - 章节模式选择</h3>
-          <button class="modal-close" @click="showChapterPatternModal = false">×</button>
-        </div>
-        <div class="modal-body">
+    <template v-if="showChapterPatternModal">
+      <div class="modal-backdrop" @click="showChapterPatternModal = false"></div>
+      <div class="modal-wrapper" @keydown.esc="showChapterPatternModal = false" tabindex="-1">
+        <div class="modal-card anchor-modal">
+          <div class="modal-header">
+            <h3>智能分析 - 章节模式选择</h3>
+            <button class="modal-close" @click="showChapterPatternModal = false">×</button>
+          </div>
+          <div class="modal-body">
           <div v-if="anchorAutoRecommended" class="anchor-recommendation">
             <div class="anchor-rec-title">🎯 自动推荐结果</div>
             <div class="anchor-rec-body">
@@ -602,6 +604,7 @@
         </div>
       </div>
     </div>
+    </template>
 
     <!-- 实时日志抽屉 -->
     <div class="log-drawer" :class="{ open: logDrawerOpen }">
@@ -2137,6 +2140,18 @@ header.ca-header {
   display: flex; align-items: center; justify-content: center;
   z-index: 1000;
 }
+.modal-backdrop {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 1000;
+}
+.modal-wrapper {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1001;
+  pointer-events: none;
+}
+.modal-wrapper > .modal-card { pointer-events: auto; }
 .modal-card {
   background: #ffffff; border-radius: 12px;
   padding: 0; min-width: 360px; max-width: 420px;

@@ -2767,49 +2767,8 @@ topic：{topic}
                     container_info = f" [容器: {parent_container_id}]" if parent_container_id else ""
                     self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx}) [{clause_type}] [挂载到 {parent_ch}{container_info}]")
                 else:
-                    # 非条款内容块：挂载到当前章节或容器下作为伪 clause
-                    # （兼容操作手册等无标准条款编号的文档）
-                    if current_chapter is not None and content.strip():
-                        pseudo_id = f"{current_chapter['chapter_number']}.content_{i}"
-                        parent_ch = current_chapter['chapter_number']
-                        if current_container:
-                            pseudo_id = f"{current_container['clause_id']}.content_{i}"
-
-                        clause = ClauseSegment(
-                            clause_id=pseudo_id,
-                            clause_title=content[:60].strip(),
-                            content=content,
-                            paragraphs=[],
-                            requirement_type=RequirementType.RECOMMENDED,
-                            applicable_systems=[],
-                            cross_refs=[],
-                            source=source,
-                            page=page_idx,
-                            triplets=[],
-                            clause_items=[],
-                            is_term_definition=False,
-                            terms=[],
-                            formula_content=None,
-                            semantics_enriched=False,
-                            parent_chapter=parent_ch,
-                            referenced_clauses=[],
-                            referenced_standards=[],
-                            metadata={
-                                "chunk_type": chunk_type,
-                                "chunk_id": chunk_id,
-                                "parent_chapter": parent_ch,
-                                "page_idx": page_idx,
-                                "bbox_viewport": bbox_viewport,
-                                "bboxs": [[page_idx + 1, *bbox_viewport]] if bbox_viewport and len(bbox_viewport) >= 4 else [],
-                                "is_pseudo_clause": True,
-                                "entities": []
-                            }
-                        )
-                        clauses.append(clause)
-                        if current_container:
-                            current_container['clause'].metadata.setdefault('child_clauses', []).append(pseudo_id)
-                        current_chapter['sub_chapters'].append(pseudo_id)
-                        self.logger.debug(f"[条款构建]   生成伪条款挂载: {pseudo_id} [到 {parent_ch}{' / ' + current_container['clause_id'] if current_container else ''}]")
+                    # 非条款内容块直接跳过，不再生成伪 clause
+                    pass
             else:
                 # 没有找到锚点前的内容块直接跳过
                 pass
