@@ -61,7 +61,7 @@ class Config:
     # File upload configuration
     MAX_CONTENT_LENGTH = 500 * 1024 * 1024  # 500MB
     UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), '../uploads')
-    ALLOWED_EXTENSIONS = {'pdf', 'md', 'txt', 'markdown'}
+    ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx'}
 
     # Text processing configuration
     DEFAULT_CHUNK_SIZE = 1500  # Increased for engineering standards to keep clauses intact

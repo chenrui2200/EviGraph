@@ -86,7 +86,7 @@
             <div :style="s.consoleSection">
               <div class="console-header" :style="s.consoleHeader">
                 <span>01 / 现实种子</span>
-                <span>支持格式: PDF, MD, TXT</span>
+                <span>支持格式: PDF, WORD</span>
               </div>
               <div
                 :style="s.uploadZone"
@@ -95,7 +95,7 @@
                 @drop.prevent="handleDrop"
                 @click="triggerFileInput"
               >
-                <input ref="fileInput" type="file" accept=".pdf,.md,.txt" @change="handleFileSelect" style="display: none" :disabled="loading" />
+                <input ref="fileInput" type="file" accept=".pdf,.doc,.docx" @change="handleFileSelect" style="display: none" :disabled="loading" />
                 <div v-if="files.length === 0" :style="s.uploadPlaceholder">
                   <div :style="s.uploadIcon">↑</div>
                   <div :style="s.uploadTitle">将文件拖放到此处</div>
@@ -305,7 +305,7 @@ const handleDragLeave = (e) => { isDragOver.value = false }
 const handleDrop = (e) => { isDragOver.value = false; addFiles(Array.from(e.dataTransfer.files)) }
 
 const addFiles = (newFiles) => {
-  const allowed = ['.pdf', '.md', '.txt']
+  const allowed = ['.pdf', '.doc', '.docx']
   const valid = newFiles.filter(f => allowed.some(ext => f.name.toLowerCase().endsWith(ext)))
   // 只保留第一个有效文件
   if (valid.length > 0) {

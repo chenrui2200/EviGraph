@@ -94,8 +94,36 @@ def generate_ontology():
             shutil.rmtree(ProjectManager._get_project_dir(project.project_id), ignore_errors=True)
             return jsonify({"success": False, "error": "No valid files uploaded"}), 400
 
-        # 5. 保存项目元数据
-        ProjectManager.save_project(project)
+        # 5. Word 文件统一转换为 PDF，以便共享后续 MinerU 解析逻辑
+        from ..utils.word_converter import convert_word_to_pdf
+        _word_exts = {'.doc', '.docx'}
+        converted_files = []
+        for f in saved_files:
+            orig_name = f["original_filename"]
+            if os.path.splitext(orig_name)[1].lower() in _word_exts:
+                try:
+                    pdf_path = convert_word_to_pdf(f["path"])
+                    pdf_name = os.path.splitext(orig_name)[0] + ".pdf"
+                    converted_files.append({
+                        "original_filename": pdf_name,
+                        "saved_filename": os.path.basename(pdf_path),
+                        "path": pdf_path,
+                        "size": os.path.getsize(pdf_path)
+                    })
+                except Exception as conv_err:
+                    logger.warning(f"Failed to convert Word to PDF for {orig_name}: {conv_err}")
+                    converted_files.append(f)
+            else:
+                converted_files.append(f)
+
+        if converted_files != saved_files:
+            saved_files = converted_files
+            project.files = [{
+                "filename": fi["original_filename"],
+                "path": fi["path"],
+                "size": fi["size"]
+            } for fi in saved_files]
+            ProjectManager.save_project(project)
 
         # Create task
         task_manager = TaskManager()
