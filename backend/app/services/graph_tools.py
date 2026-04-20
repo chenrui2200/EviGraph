@@ -791,55 +791,76 @@ Your response:"""
 
         all_rows: List[ObjectFirstRow] = []
         seen_fact_texts: set = set()
+        seen_root_uuids: set = set()  # 跨查询去重根节点
 
-        # Search each graph
+        # --- 长查询关键词多路召回：提取核心关键词，与原始查询并行搜索 ---
+        search_queries = [query]
+        if len(query) > 15:
+            try:
+                optimized = self.optimize_query(query)
+                if optimized and optimized != query:
+                    keywords = [k.strip() for k in optimized.split() if k.strip()]
+                    keywords = [k for k in keywords if k != query]
+                    search_queries.extend(keywords)
+                    logger.info(f"[search_with_dfs_flow] Long query ({len(query)} chars), "
+                                f"added keyword searches: {keywords}")
+            except Exception as e:
+                logger.warning(f"[search_with_dfs_flow] Keyword extraction failed: {e}")
+
+        # Search each graph with each query
         for graph_id in graph_ids:
-            # --- Entity root search ---
-            if "Entity" in root_types:
-                object_roots = self.storage.search_object_nodes(
-                    graph_id=graph_id,
-                    query=query,
-                    limit=limit,
-                )
+            for search_query in search_queries:
+                is_original = (search_query == query)
+                query_limit = limit if is_original else max(5, limit // 2)
 
-                for obj_node in object_roots:
-                    obj_uuid = obj_node.get("uuid", "")
-                    if not obj_uuid:
-                        continue
-                    # Hybrid search score (0-1) converted to 0-100 scale for similarity_threshold
-                    root_score = (obj_node.get("score", 0)) * 100
-                    row = self._dfs_from_object(
+                # --- Entity root search ---
+                if "Entity" in root_types:
+                    object_roots = self.storage.search_object_nodes(
                         graph_id=graph_id,
-                        object_uuid=obj_uuid,
-                        object_data=obj_node,
-                        max_depth=max_depth,
-                        seen_fact_texts=seen_fact_texts,
-                        root_score=root_score,
+                        query=search_query,
+                        limit=query_limit,
                     )
-                    all_rows.append(row)
 
-            # --- Term root search ---
-            if "Term" in root_types:
-                term_roots = self.storage.search_term_nodes(
-                    graph_id=graph_id,
-                    query=query,
-                    limit=limit,
-                )
+                    for obj_node in object_roots:
+                        obj_uuid = obj_node.get("uuid", "")
+                        if not obj_uuid or obj_uuid in seen_root_uuids:
+                            continue
+                        seen_root_uuids.add(obj_uuid)
+                        # Hybrid search score (0-1) converted to 0-100 scale for similarity_threshold
+                        root_score = (obj_node.get("score", 0)) * 100
+                        row = self._dfs_from_object(
+                            graph_id=graph_id,
+                            object_uuid=obj_uuid,
+                            object_data=obj_node,
+                            max_depth=max_depth,
+                            seen_fact_texts=seen_fact_texts,
+                            root_score=root_score,
+                        )
+                        all_rows.append(row)
 
-                for term_node in term_roots:
-                    term_uuid = term_node.get("uuid", "")
-                    if not term_uuid:
-                        continue
-                    root_score = (term_node.get("score", 0)) * 100
-                    row = self._dfs_from_object(
+                # --- Term root search ---
+                if "Term" in root_types:
+                    term_roots = self.storage.search_term_nodes(
                         graph_id=graph_id,
-                        object_uuid=term_uuid,
-                        object_data=term_node,
-                        max_depth=max_depth,
-                        seen_fact_texts=seen_fact_texts,
-                        root_score=root_score,
+                        query=search_query,
+                        limit=query_limit,
                     )
-                    all_rows.append(row)
+
+                    for term_node in term_roots:
+                        term_uuid = term_node.get("uuid", "")
+                        if not term_uuid or term_uuid in seen_root_uuids:
+                            continue
+                        seen_root_uuids.add(term_uuid)
+                        root_score = (term_node.get("score", 0)) * 100
+                        row = self._dfs_from_object(
+                            graph_id=graph_id,
+                            object_uuid=term_uuid,
+                            object_data=term_node,
+                            max_depth=max_depth,
+                            seen_fact_texts=seen_fact_texts,
+                            root_score=root_score,
+                        )
+                        all_rows.append(row)
 
         if not all_rows:
             return ObjectFirstSearchResult(
