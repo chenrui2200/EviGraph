@@ -485,20 +485,27 @@ class GraphToolsService:
         """Use LLM to extract 3-5 core keywords/phrases from user query"""
         logger.info(f"Optimizing query: {query[:50]}...")
 
-        extract_prompt = f"""你是一个搜索专家。请从用户的问题中提取出 3-5 个核心关键词或短语，用于在知识图谱中进行检索。
-提取的关键词应能代表问题的核心实体、动作和约束。
+        extract_prompt = f"""你是一个工程规范知识图谱搜索专家。请从用户问题中提取用于知识图谱检索的核心关键词短语。
+
+知识图谱节点类型：术语(Term)、组件(Component)、条款(Clause)、参数(Parameter)。
+
+提取规则（按优先级）：
+1. **主语实体**：问题中的核心对象（如"局部等电位联结"、"剩余电流保护电器"）
+2. **关联实体**：与主语相关的设备/材料/属性（如"保护联结导体"、"截面积"）
+3. **忽略**：通用问句词（"应符合什么规定"、"应如何"、"是什么"、"怎么"）
+
+特殊句式处理：
+- "A用B的C" → 提取 A、B、C（如"局部等电位联结 保护联结导体 截面积"）
+- "A的B应符合" → 提取 A、B
+- "A在B时候" → 提取 A、B
+- 逗号分隔的成分要分别提取
+
+输出格式：空格分隔的关键词字符串，最多5个，不要编号，不要解释。
 
 ### 用户问题:
 {query}
 
-### 要求:
-1. 关键词应简洁、具有代表性。
-2. 以空格分隔返回关键词。
-
-输出示例:
-多孔导管 敷设 规定
-
-请直接输出提取后的关键词字符串："""
+请直接输出关键词："""
 
         try:
             optimized_keywords = self.llm.chat(messages=[{"role": "user", "content": extract_prompt}], temperature=0.1)
@@ -796,16 +803,42 @@ Your response:"""
         # --- 长查询关键词多路召回：提取核心关键词，与原始查询并行搜索 ---
         search_queries = [query]
         if len(query) > 15:
+            keywords = []
+            # 1. LLM 提取关键词
             try:
                 optimized = self.optimize_query(query)
                 if optimized and optimized != query:
                     keywords = [k.strip() for k in optimized.split() if k.strip()]
                     keywords = [k for k in keywords if k != query]
-                    search_queries.extend(keywords)
-                    logger.info(f"[search_with_dfs_flow] Long query ({len(query)} chars), "
-                                f"added keyword searches: {keywords}")
+                    logger.info(f"[search_with_dfs_flow] LLM keywords: {keywords}")
             except Exception as e:
                 logger.warning(f"[search_with_dfs_flow] Keyword extraction failed: {e}")
+
+            # 2. Fallback：标点切分补充（当 LLM 未提取到有效中文实体时）
+            import re
+            has_valid_chinese_entity = any(
+                len(re.findall(r'[\u4e00-\u9fff]', kw)) >= 4
+                for kw in keywords
+            )
+            if not has_valid_chinese_entity:
+                # 按常见标点切分
+                segments = re.split(r'[,，。;；:：？?!！\s]+', query)
+                stop_phrases = {
+                    '应符合什么规定', '应如何', '是什么', '怎么', '多少', '哪些',
+                    '什么', '符合', '规定', '要求', '选择', '应', '的', '和',
+                }
+                for seg in segments:
+                    seg = seg.strip()
+                    # 保留：长度>=4 且有至少4个中文字符，且不是停用词
+                    if len(seg) >= 4 and len(re.findall(r'[\u4e00-\u9fff]', seg)) >= 4:
+                        if seg not in stop_phrases and seg not in keywords:
+                            keywords.append(seg)
+                            logger.info(f"[search_with_dfs_flow] Fallback segment added: {seg}")
+
+            search_queries.extend(keywords)
+            if keywords:
+                logger.info(f"[search_with_dfs_flow] Long query ({len(query)} chars), "
+                            f"all searches: {search_queries}")
 
         # Search each graph with each query
         for graph_id in graph_ids:
@@ -2759,14 +2792,23 @@ Your response:"""
             return rows
 
         # 预评分：fact 数量越多 + Object name 匹配度越高，得分越高
+        import re
         fact_count_max = max(len(r.facts) for r in rows) or 1
         query_lower = query.lower()
+        # 提取中文实体词（>=4个中文字符）和英文/数字词（>=2字符）
+        chinese_keywords = re.findall(r'[\u4e00-\u9fff]{4,}', query_lower)
+        english_keywords = [kw for kw in query_lower.split() if len(kw) > 1]
 
         for row in rows:
             obj_name = row.object_node.get("name", "").lower()
-            name_score = 50 if query_lower in obj_name else (
-                30 if any(kw in obj_name for kw in query_lower.split() if len(kw) > 1) else 0
-            )
+            if query_lower in obj_name:
+                name_score = 50
+            elif any(kw in obj_name for kw in chinese_keywords):
+                name_score = 35
+            elif any(kw in obj_name for kw in english_keywords):
+                name_score = 20
+            else:
+                name_score = 0
             fact_score = (len(row.facts) / fact_count_max) * 30
             row.relevance_score = name_score + fact_score + 20  # 基础分 20
 
