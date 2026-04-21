@@ -9,6 +9,10 @@ set -euo pipefail
 # =============================================
 # Knowledge EviGraph 一键部署脚本
 # 用法: 将项目放到 Linux 机器上，执行 bash deploy.sh
+#
+# 首次部署: 构建完整镜像并打 tag 为 base
+# 后续部署: 仅同步代码到运行中的容器，重启服务（跳过依赖层重建）
+# 强制重建: bash deploy.sh --force-rebuild
 # =============================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,13 +22,25 @@ cd "${SCRIPT_DIR}"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-info() { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+step()  { echo -e "${CYAN}[STEP]${NC}  $*"; }
 
-# 检查 Docker
+# =============================================
+# 参数解析
+# =============================================
+FORCE_REBUILD=false
+if [[ "${1:-}" == "--force-rebuild" ]]; then
+    FORCE_REBUILD=true
+fi
+
+# =============================================
+# Docker 检查
+# =============================================
 if ! command -v docker &>/dev/null; then
     error "Docker 未安装，请先安装 Docker: https://docs.docker.com/engine/install/"
     exit 1
@@ -43,27 +59,29 @@ fi
 info "使用 Compose 命令: ${COMPOSE_CMD}"
 
 # =============================================
-# 系统依赖检查
+# 系统依赖检查（仅 Linux）
 # =============================================
-info "检查系统依赖..."
-
-# 检查 LibreOffice（Word→PDF 转换必需）
-if ! command -v soffice &>/dev/null; then
-    warn "LibreOffice (soffice) 未安装，正在安装..."
-    if command -v apt-get &>/dev/null; then
-        apt-get update && apt-get install -y --no-install-recommends libreoffice-writer
-        info "LibreOffice 安装完成"
+if [[ "$(uname -s)" == "Linux" ]]; then
+    info "检查系统依赖..."
+    if ! command -v soffice &>/dev/null; then
+        warn "LibreOffice (soffice) 未安装，正在安装..."
+        if command -v apt-get &>/dev/null; then
+            apt-get update && apt-get install -y --no-install-recommends libreoffice-writer
+            info "LibreOffice 安装完成"
+        else
+            warn "无法自动安装 LibreOffice，请手动安装: https://www.libreoffice.org/download/download/"
+        fi
     else
-        error "无法自动安装 LibreOffice，请手动安装: https://www.libreoffice.org/download/download/"
-        error "LibreOffice 是 Word 文件转换为 PDF 的必要依赖，上传 .docx 文件时需要用到。"
+        info "LibreOffice 已安装: $(soffice --version 2>/dev/null || echo 'soffice found')"
     fi
-else
-    info "LibreOffice 已安装: $(soffice --version 2>/dev/null || echo 'soffice found')"
 fi
+
 mkdir -p backend/uploads
 info "已确保目录存在: backend/uploads"
 
-# 检查 .env 文件
+# =============================================
+# .env 检查
+# =============================================
 if [ ! -f ".env" ]; then
     if [ -f ".env.example" ]; then
         cp .env.example .env
@@ -80,15 +98,67 @@ if [ ! -f ".env" ]; then
     fi
 fi
 
-# 构建并启动服务
-info "开始构建镜像 knowledge-evigraph:latest ..."
-${COMPOSE_CMD} build --no-cache
+# =============================================
+# 镜像是否存在（决定走首次构建还是代码同步）
+# =============================================
+BASE_IMAGE="knowledge-evigraph:base"
+LATEST_IMAGE="knowledge-evigraph:latest"
+CONTAINER_NAME="knowledge-evigraph"
 
-info "启动服务..."
-${COMPOSE_CMD} up -d
+check_base_exists() {
+    docker image inspect "${BASE_IMAGE}" &>/dev/null
+}
 
-# 等待服务就绪
-info "等待服务健康检查（约 10-30 秒）..."
+# =============================================
+# 构建策略
+# =============================================
+if $FORCE_REBUILD; then
+    # --force-rebuild: 删除旧镜像，重新完整构建
+    step "强制重建模式，删除旧镜像..."
+    docker rmi "${BASE_IMAGE}" "${LATEST_IMAGE}" 2>/dev/null || true
+    step "完整构建镜像 (知识图谱 base 层 + 代码层)..."
+    ${COMPOSE_CMD} build --no-cache
+    docker tag "${LATEST_IMAGE}" "${BASE_IMAGE}"
+    info "Base 镜像已更新: ${BASE_IMAGE}"
+    RESTART_MODE="recreate"
+
+elif check_base_exists; then
+    # 有 base 镜像：仅同步代码到运行中容器
+    step "检测到 base 镜像 '${BASE_IMAGE}'，进入增量部署模式"
+
+    # 容器是否在运行
+    if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+        step "同步代码到容器..."
+        # 同步后端代码
+        docker cp backend/. "${CONTAINER_NAME}:/app/backend/"
+        # 同步前端构建产物
+        docker cp frontend/dist/. "${CONTAINER_NAME}:/app/frontend/dist/"
+        # 同步 nginx/supervisord 配置（如果存在）
+        [ -f nginx.conf ]           && docker cp nginx.conf "${CONTAINER_NAME}:/etc/nginx/nginx.conf"
+        [ -f supervisord.conf ]      && docker cp supervisord.conf "${CONTAINER_NAME}:/etc/supervisor/conf.d/supervisord.conf"
+        info "代码已同步，重启服务..."
+        docker restart "${CONTAINER_NAME}"
+    else
+        warn "容器未运行，以增量模式启动新容器..."
+        ${COMPOSE_CMD} up -d --no-build
+    fi
+    RESTART_MODE="restart"
+
+else
+    # 无 base 镜像：首次完整构建
+    step "首次部署，完整构建镜像并打 tag 为 base..."
+    ${COMPOSE_CMD} build --no-cache
+    docker tag "${LATEST_IMAGE}" "${BASE_IMAGE}"
+    info "Base 镜像已生成: ${BASE_IMAGE}"
+    step "启动服务..."
+    ${COMPOSE_CMD} up -d
+    RESTART_MODE="recreate"
+fi
+
+# =============================================
+# 健康检查
+# =============================================
+info "等待服务就绪（约 10-30 秒）..."
 for i in {1..30}; do
     if curl -sf http://localhost:5001/api/health &>/dev/null; then
         info "后端服务已就绪"
@@ -96,21 +166,23 @@ for i in {1..30}; do
     fi
     sleep 2
     if [ "$i" -eq 30 ]; then
-        warn "后端服务健康检查超时，请手动查看日志: ${COMPOSE_CMD} logs -f knowledge-evigraph"
+        warn "健康检查超时，请手动查看: ${COMPOSE_CMD} logs -f ${CONTAINER_NAME}"
     fi
 done
 
 echo ""
 echo "==============================================="
 info "部署完成！"
-echo "  - 前端访问: http://<服务器IP>"
-echo "  - 后端 API: http://<服务器IP>:5001"
-echo "  - Neo4j Browser: http://<服务器IP>:7474"
-echo "  - Supervisor Web UI: http://<服务器IP>:9001"
-echo "    (默认账号: admin / 默认密码: admin)"
+[ "$RESTART_MODE" == "restart" ] && info "(增量模式: 仅同步代码 + 重启)"
+[ "$RESTART_MODE" == "recreate" ] && info "(全新模式: 完整构建 + 启动)"
+echo "  - 前端访问:  http://<服务器IP>"
+echo "  - 后端 API:  http://<服务器IP>:5001"
+echo "  - Neo4j:    http://<服务器IP>:7474"
+echo "  - Supervisor: http://<服务器IP>:9001 (admin/admin)"
 echo ""
 echo "常用命令:"
-echo "  查看日志: ${COMPOSE_CMD} logs -f knowledge-evigraph"
-echo "  停止服务: ${COMPOSE_CMD} down"
-echo "  重启服务: ${COMPOSE_CMD} restart"
+echo "  查看日志:   ${COMPOSE_CMD} logs -f ${CONTAINER_NAME}"
+echo "  停止服务:   ${COMPOSE_CMD} down"
+echo "  重启服务:   docker restart ${CONTAINER_NAME}"
+echo "  强制重建:   bash deploy.sh --force-rebuild"
 echo "==============================================="
