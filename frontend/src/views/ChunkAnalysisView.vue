@@ -540,6 +540,9 @@
               容器 <strong>{{ clauseContainer }}</strong>
             </div>
             <div v-if="anchorReason" class="anchor-rec-reason">{{ anchorReason }}</div>
+            <div v-if="useMineruTitles" class="anchor-title-mode-hint">
+              📄 检测到文档无标准条款层级（x.x.x），已自动切换为 <strong>MinerU Title 分段模式</strong>，将以文档标题作为章节切分。
+            </div>
           </div>
 
           <div class="pattern-section">
@@ -719,6 +722,7 @@ const chapterAnchor = ref('x.x')  // 章节锚点（一级父节点）
 const clauseContainer = ref('x.x.x')  // 最小条款容器锚点（二级）
 const anchorAutoRecommended = ref(false)
 const anchorReason = ref('')
+const useMineruTitles = ref(false)  // 为 true 时切换为 MinerU title 分段模式
 const isResetChunking = ref(false)  // 标记当前是首次分析(false)还是重置分析(true)
 
 const anchorDepth = computed(() => {
@@ -994,8 +998,13 @@ async function loadMineruResults() {
   }
 }
 
-function toggleMineruMode() {
-  mineruMode.value = !mineruMode.value
+async function toggleMineruMode() {
+  const turningOn = !mineruMode.value
+  if (turningOn && mineruChunks.value.length === 0) {
+    await loadMineruResults()
+  } else {
+    mineruMode.value = !mineruMode.value
+  }
   mineruSelectedChunk.value = null
 }
 
@@ -1141,6 +1150,7 @@ async function openAnchorModal(reset) {
   isResetChunking.value = reset
   anchorAutoRecommended.value = false
   anchorReason.value = ''
+  useMineruTitles.value = false
 
   try {
     const res = await inferChunkAnchors(currentProjectId.value)
@@ -1148,6 +1158,7 @@ async function openAnchorModal(reset) {
       chapterAnchor.value = res.data.chapter_anchor || 'x.x'
       clauseContainer.value = res.data.clause_container || 'x.x.x'
       anchorReason.value = res.data.reason || ''
+      useMineruTitles.value = res.data.use_mineru_titles || false
       anchorAutoRecommended.value = true
     } else {
       chapterAnchor.value = 'x.x'
@@ -1217,7 +1228,8 @@ async function confirmChapterPattern() {
       project_id: currentProjectId.value,
       reset: isResetChunking.value,
       chapter_anchor: chapterAnchor.value,
-      clause_container: clauseContainer.value
+      clause_container: clauseContainer.value,
+      use_mineru_titles: useMineruTitles.value
     })
     if (res.success) {
       taskId.value = res.data.task_id
@@ -2210,6 +2222,17 @@ header.ca-header {
 .anchor-rec-body strong { color: #1890ff; font-weight: 700; }
 .anchor-rec-sep { margin: 0 6px; color: #bfbfbf; }
 .anchor-rec-reason { color: #595959; font-size: 11px; margin-top: 4px; line-height: 1.4; }
+.anchor-title-mode-hint {
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #ad6800;
+  margin-top: 8px;
+  line-height: 1.5;
+}
+.anchor-title-mode-hint strong { color: #d46b08; }
 
 .pattern-section { margin-bottom: 16px; }
 .pattern-section-title { font-size: 12px; font-weight: 600; color: #4b5563; margin-bottom: 8px; }

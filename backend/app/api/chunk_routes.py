@@ -62,6 +62,7 @@ def intelligent_chunk():
         reset = data.get('reset', False)
         chapter_anchor = data.get('chapter_anchor', 'x.x')  # 章节锚点（一级父节点）
         clause_container = data.get('clause_container', 'x.x.x')  # 最小条款容器锚点（二级）
+        use_mineru_titles = data.get('use_mineru_titles')  # None 表示由 infer_anchor_patterns 自动推断
 
         if not project_id:
             return jsonify({"success": False, "error": "请提供 project_id"}), 400
@@ -182,10 +183,27 @@ def intelligent_chunk():
                     return
 
                 chunker_logger.info(f"[{task_id}] chunks_data 条数: {len(chunks_data)}, checkpoint: {checkpoint is not None}")
+
+                # 使用局部副本避免 Python 闭包作用域陷阱（UnboundLocalError）
+                local_use_mineru_titles = use_mineru_titles
+                local_chapter_anchor = chapter_anchor
+                local_clause_container = clause_container
+                # 自动推断章节模式（当 use_mineru_titles 未显式指定时）
+                if local_use_mineru_titles is None:
+                    from ..services.llm_driven_chunker import infer_anchor_patterns
+                    anchor_result = infer_anchor_patterns(chunks_data)
+                    local_use_mineru_titles = anchor_result.get('use_mineru_titles', False)
+                    # 如果显式传了 anchor 参数，优先使用传入值（保持向后兼容）
+                    if data.get('chapter_anchor'):
+                        local_chapter_anchor = anchor_result.get('chapter_anchor', 'x.x')
+                    if data.get('clause_container'):
+                        local_clause_container = anchor_result.get('clause_container', 'x.x.x')
+                    chunker_logger.info(f"[{task_id}] 自动推断章节模式: use_mineru_titles={local_use_mineru_titles}, reason={anchor_result.get('reason', '')}")
+
                 task_mgr.update_task(task_id, status=TaskStatus.PROCESSING, progress=0, message="🚀 开始 LLM 语义分块...")
 
                 chunker = LLMDrivenChunker(progress_callback=progress_callback, stop_event=stop_event)
-                result = chunker.chunk(text_chunks, progress_callback, checkpoint=checkpoint, project_id=project_id, md_content=md_content, chunks_data=chunks_data, pdf_path=pdf_path, chapter_anchor=chapter_anchor, clause_container=clause_container)
+                result = chunker.chunk(text_chunks, progress_callback, checkpoint=checkpoint, project_id=project_id, md_content=md_content, chunks_data=chunks_data, pdf_path=pdf_path, chapter_anchor=local_chapter_anchor, clause_container=local_clause_container, use_mineru_titles=local_use_mineru_titles)
 
                 # 防御性检查：result 不为空
                 if not result:

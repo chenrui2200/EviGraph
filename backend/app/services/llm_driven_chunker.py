@@ -286,6 +286,7 @@ def infer_anchor_patterns(chunks_data: List[Dict[str, Any]]) -> Dict[str, Any]:
             }
         }
     """
+    # 仅匹配阿拉伯数字编号（中文编号统一走 title 模式）
     patterns = {
         'x': re.compile(r'^(\d+)(?!\.\d)'),
         'x.x': re.compile(r'^(\d+\.\d+)(?!\.\d)'),
@@ -295,12 +296,15 @@ def infer_anchor_patterns(chunks_data: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     title_nums = {k: set() for k in patterns}
     all_nums = {k: set() for k in patterns}
+    total_title_chunks = 0  # 统计所有 type='title' 的 chunk 数量
 
     for chunk in chunks_data:
         content = (chunk.get('content') or chunk.get('text', '')).strip()
         chunk_type = chunk.get('type', '')
         if not content:
             continue
+        if chunk_type == 'title':
+            total_title_chunks += 1
         for name, pat in patterns.items():
             m = pat.match(content)
             if m:
@@ -314,12 +318,14 @@ def infer_anchor_patterns(chunks_data: List[Dict[str, Any]]) -> Dict[str, Any]:
     # 推断 chapter_anchor
     chapter_anchor = 'x.x'
     reason_parts = []
+    has_enough_anchors = False
     for cand in ['x', 'x.x', 'x.x.x']:
         t = len(title_nums[cand])
         a = len(all_nums[cand])
         if t >= 3 or (a >= 5 and t >= 1):
             chapter_anchor = cand
             reason_parts.append(f"选择 {cand} 作为章节锚点：title 中 {t} 个，总计 {a} 个")
+            has_enough_anchors = True
             break
     else:
         reason_parts.append("未检测到足够的编号层级，使用默认 x.x 作为章节锚点")
@@ -379,11 +385,26 @@ def infer_anchor_patterns(chunks_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         stats[f"{k}_title"] = len(title_nums[k])
         stats[f"{k}_all"] = len(all_nums[k])
 
+    # 检测是否应切换到 MinerU title 分段模式
+    x_title_count = len(title_nums.get('x', set())) + len(title_nums.get('x.x', set()))
+    has_x_dot_x_dot_clauses = len(all_nums.get('x.x.x', set())) >= 3
+
+    use_mineru_titles = False
+    if not has_enough_anchors:
+        # 未找到足够的标准编号层级 → 强制 title 模式
+        use_mineru_titles = True
+        reason_parts.append("未检测到足够的标准编号层级，切换为 MinerU title 分段模式")
+    elif not has_x_dot_x_dot_clauses and total_title_chunks >= 3 and x_title_count < 3:
+        # 兜底：有大量 title 块但标准编号不足
+        use_mineru_titles = True
+        reason_parts.append(f"检测到 {total_title_chunks} 个标题块但标准编号不足，切换为 MinerU title 分段模式")
+
     return {
         "chapter_anchor": chapter_anchor,
         "clause_container": clause_container,
         "reason": "；".join(reason_parts),
         "stats": stats,
+        "use_mineru_titles": use_mineru_titles,
     }
 
 
@@ -1739,10 +1760,23 @@ topic：{topic}
         entities: List[str] = []
         terms: List[Dict] = []
 
+        # 拼接图片 VLM 描述（如果有），丰富 topic 提取上下文
+        clause_text = clause.content[:2000]
+        images: List[Dict] = clause.metadata.get('images', [])
+        vlm_descriptions = []
+        for img in images:
+            vlm_content = img.get('img_vlm_content', '')
+            if vlm_content and img.get('vlm_status') == 'ok':
+                caption = img.get('caption', '') or '（无图注）'
+                vlm_descriptions.append(f"【图注：{caption}】{vlm_content}")
+        if vlm_descriptions:
+            clause_text += "\n\n--- 关联图片内容 ---\n" + "\n\n".join(vlm_descriptions)
+            self.logger.info(f"[LLM 单阶段提取] clause_id={clause.clause_id}: 追加 {len(vlm_descriptions)} 张图片VLM描述到上下文")
+
         try:
-            self.logger.info(f"[LLM 单阶段提取] 开始, clause_id={clause.clause_id}, len={len(clause.content)}")
+            self.logger.info(f"[LLM 单阶段提取] 开始, clause_id={clause.clause_id}, len={len(clause_text)}")
             user_prompt = self.UNIFIED_USER_PROMPT.format(
-                clause_text=clause.content[:2000],
+                clause_text=clause_text,
                 min_cnt=min_cnt,
                 max_cnt=max_cnt
             )
@@ -1807,7 +1841,8 @@ topic：{topic}
         clauses: List[ClauseSegment],
         entity_count_range: tuple,
         project_id: Optional[str] = None,
-        cache: Optional[Dict[str, Dict]] = None
+        cache: Optional[Dict[str, Dict]] = None,
+        use_mineru_titles: bool = False
     ) -> None:
         """批量处理 clause 的 topic + entities + terms 提取（使用传入的进程内缓存）"""
         if not clauses:
@@ -1843,10 +1878,20 @@ topic：{topic}
         if not clauses_to_llm:
             return
 
-        # 2. 对未命中的 clauses 批量调用 LLM
+        # 2. 对未命中的 clauses 批量调用 LLM（拼接图片VLM描述以丰富上下文）
         clauses_text = ""
         for idx, clause in enumerate(clauses_to_llm, 1):
-            clauses_text += f"--- 条文 {idx} ---\nclause_id: {clause.clause_id}\n内容: {clause.content[:2000]}\n\n"
+            clause_text = clause.content[:2000]
+            images: List[Dict] = clause.metadata.get('images', [])
+            vlm_parts = []
+            for img in images:
+                vlm_content = img.get('img_vlm_content', '')
+                if vlm_content and img.get('vlm_status') == 'ok':
+                    caption = img.get('caption', '') or '（无图注）'
+                    vlm_parts.append(f"【图注：{caption}】{vlm_content}")
+            if vlm_parts:
+                clause_text += "\n\n--- 关联图片内容 ---\n" + "\n\n".join(vlm_parts)
+            clauses_text += f"--- 条文 {idx} ---\nclause_id: {clause.clause_id}\n内容: {clause_text}\n\n"
 
         user_prompt = self.BATCH_USER_PROMPT.format(
             batch_size=len(clauses_to_llm),
@@ -1959,7 +2004,8 @@ topic：{topic}
         chunks_data: Optional[List[Dict]] = None,
         pdf_path: Optional[str] = None,
         chapter_anchor: str = 'x.x',
-        clause_container: str = 'x.x.x'
+        clause_container: str = 'x.x.x',
+        use_mineru_titles: bool = False
     ) -> HierarchicalChunkResult:
         """
         主入口：基于 chunks.json 的智能分块
@@ -2017,7 +2063,7 @@ topic：{topic}
         source_info = {"source": chunks_data[0].get('source', '') if chunks_data else ''}
 
         # 直接从 chunks_data 构建章节和条款
-        sections_data, clauses_data, chapter_plan = self._build_sections_and_clauses_from_chunks(chunks_data, chapter_anchor=chapter_anchor, clause_container=clause_container)
+        sections_data, clauses_data, chapter_plan = self._build_sections_and_clauses_from_chunks(chunks_data, chapter_anchor=chapter_anchor, clause_container=clause_container, use_mineru_titles=use_mineru_titles)
         chapter_count = len(sections_data)
 
         self._report_progress(-1, f"[LLM分块] ✅ 章节构建完成: {chapter_count} 章节, {len(clauses_data)} 条款")
@@ -2170,7 +2216,7 @@ topic：{topic}
             chapter_max_workers = min(8, len(batches)) if batches else 1
             with ThreadPoolExecutor(max_workers=chapter_max_workers) as executor:
                 futures = {
-                    executor.submit(self._process_clause_batch, batch, entity_count_range, project_id, project_cache): batch
+                    executor.submit(self._process_clause_batch, batch, entity_count_range, project_id, project_cache, use_mineru_titles): batch
                     for batch in batches
                 }
                 for future in as_completed(futures):
@@ -2452,21 +2498,27 @@ topic：{topic}
         self,
         chunks_data: List[Dict],
         chapter_anchor: str = 'x.x',
-        clause_container: str = 'x.x.x'
+        clause_container: str = 'x.x.x',
+        use_mineru_titles: bool = False
     ) -> tuple:
         """
         直接从 chunks.json 构建两级章节和条款结构。
 
-        两级锚点逻辑：
+        标准锚点模式（use_mineru_titles=False）：
         1. chapter_anchor (如 'x.x'): 匹配 type='title' 作为一级章节锚点
         2. clause_container (如 'x.x.x'): 在两个一级锚点之间，匹配 type='title' 作为二级条款容器
         3. clause_container 下的条款（如 x.x.x.x）作为三级内容，挂到二级容器下
-        4. 如果没有找到任何一级锚点，创建虚拟章节兜底
+
+        MinerU Title 模式（use_mineru_titles=True）：
+        - 直接以 MinerU 的 type='title' 块作为章节切分边界
+        - 每个 title 及其后续 content/text 块组成一个章节
+        - 适用于没有标准条款编号的文档（如一般技术手册、说明书）
 
         Args:
             chunks_data: chunks.json 数据列表
             chapter_anchor: 章节锚点模式 (x/x.x/x.x.x)，用于匹配一级章节标题
             clause_container: 最小条款容器锚点模式 (x.x/x.x.x/x.x.x.x)，用于匹配二级条款容器
+            use_mineru_titles: 为 True 时，强制使用 MinerU title 作为章节切分
 
         Returns:
             (sections, clauses, chapter_plan)
@@ -2514,6 +2566,32 @@ topic：{topic}
         current_chapter_idx = -1
         anchor_found = False  # 是否找到过锚点
 
+        # MinerU Title 模式：预创建单一虚拟根章节，后续所有 title 都降为条款容器
+        if use_mineru_titles:
+            source_name = chunks_data[0].get('source', '') if chunks_data else ''
+            virtual_title = source_name or '文档内容'
+            current_chapter = {
+                'chapter_number': '1',
+                'title': virtual_title,
+                'page_idx': 0,
+                'start_idx': 0,
+                'end_idx': len(chunks_data) - 1,
+                'level': 1,
+                'sub_chapters': [],
+                'chapter_type': 'title_root'  # 标记为 title 模式的根章节
+            }
+            sections.append(current_chapter)
+            chapter_plan.append(ChapterPlan(
+                chapter_number='1',
+                title=virtual_title,
+                start_position=0,
+                end_position=len(chunks_data) - 1,
+                status=ChapterStatus.PENDING,
+                chapter_type='title_root'
+            ))
+            anchor_found = True
+            self._report_progress(-1, f"[章节构建] [Title模式] 虚拟根章节: {virtual_title}，共 {len(chunks_data)} 个 chunk")
+
         for i, chunk in enumerate(chunks_data):
             # 兼容多种 chunk 格式
             # 1. 顶层字段：chunk.get('type'), chunk.get('content')
@@ -2548,9 +2626,13 @@ topic：{topic}
             # 判断是否为一级章节锚点 (type='title' 且匹配 chapter_anchor 模式)
             chapter_m = None
             if chunk_type == 'title':
-                match = chapter_anchor_regex.match(content)
-                if match:
-                    chapter_m = match
+                if use_mineru_titles:
+                    # MinerU Title 模式：所有 type='title' 都是章节锚点
+                    chapter_m = None  # 不做编号匹配
+                else:
+                    match = chapter_anchor_regex.match(content)
+                    if match:
+                        chapter_m = match
 
             if chapter_m:
                 chapter_num_str = chapter_m.group(1)
@@ -2625,10 +2707,64 @@ topic：{topic}
                 anchor_found = True  # 标记已找到锚点
                 continue
 
-            # 如果 type=='title' 但不符合章节编号格式（如 "前 言"、"目 录"），且尚未进入任何章节，跳过
-            if chunk_type == 'title' and chapter_m is None and current_chapter is None:
-                self._report_progress(-1, f"[章节构建] ⏭️ type=title 但无章节编号，跳过: page={page_idx}, idx={i}, content={content[:50]!r}")
-                continue
+            # 如果 type=='title' 但不符合章节编号格式（如 "前 言"、"目 录"）
+            if chunk_type == 'title' and chapter_m is None:
+                # MinerU Title 模式：所有 title 都作为条款容器挂到虚拟根章节下
+                if use_mineru_titles and current_chapter is not None:
+                    container_clause_id = f"container-{len(clauses) + 1}"
+                    container_title = content.strip()
+                    req_type = RequirementType.RECOMMENDED
+                    if any(kw in content for kw in ['应', '必须', '严禁', '不得', '应不', '不应', '不宜']):
+                        req_type = RequirementType.MANDATORY
+                    elif any(kw in content for kw in ['宜', '可', '建议', '推荐']):
+                        req_type = RequirementType.RECOMMENDED
+                    elif any(kw in content for kw in ['禁止', '不应', '不得']):
+                        req_type = RequirementType.PROHIBITED
+                    container_clause = ClauseSegment(
+                        clause_id=container_clause_id,
+                        clause_title=container_title,
+                        content=content,
+                        paragraphs=[],
+                        requirement_type=req_type,
+                        applicable_systems=[],
+                        cross_refs=[],
+                        source=source,
+                        page=page_idx,
+                        triplets=[],
+                        clause_items=[],
+                        is_term_definition=False,
+                        terms=[],
+                        formula_content=None,
+                        semantics_enriched=False,
+                        parent_chapter=current_chapter['chapter_number'],
+                        referenced_clauses=[],
+                        referenced_standards=[],
+                        metadata={
+                            "chunk_type": chunk_type,
+                            "chunk_id": chunk_id,
+                            "parent_chapter": current_chapter['chapter_number'],
+                            "parent_chapter_title": current_chapter['title'],
+                            "container_clause_id": container_clause_id,
+                            "container_clause_title": container_title,
+                            "page_idx": page_idx,
+                            "bbox_viewport": bbox_viewport,
+                            "is_clause_container": True,
+                            "is_sub_chapter": True,
+                            "entities": []
+                        }
+                    )
+                    clauses.append(container_clause)
+                    current_container = {
+                        'clause_id': container_clause_id,
+                        'clause': container_clause
+                    }
+                    current_chapter['sub_chapters'].append(container_clause_id)
+                    self._report_progress(-1, f"[条款构建]   [Title模式] 条款容器: {container_clause_id} {container_title[:40]}... [挂载到 {current_chapter['chapter_number']}]")
+                    continue
+                # 标准模式：尚未进入任何章节时跳过（如前言、目录）
+                if current_chapter is None:
+                    self._report_progress(-1, f"[章节构建] ⏭️ type=title 但无章节编号，跳过: page={page_idx}, idx={i}, content={content[:50]!r}")
+                    continue
 
             # 如果有当前章节（锚点），处理条款容器和条款
             if current_chapter is not None:
@@ -2701,7 +2837,7 @@ topic：{topic}
                     continue
 
                 # 检查是否为条款（先检查普通条款，再检查附录条款）
-                clause_match = CLAUSE_PATTERN.match(content)
+                clause_match = CLAUSE_PATTERN.match(content) if not use_mineru_titles else None
                 appendix_match = APPENDIX_CLAUSE_PATTERN.match(content) if not clause_match else None
 
                 m = clause_match or appendix_match
@@ -2766,6 +2902,50 @@ topic：{topic}
                     clause_type = "附录条款" if is_appendix_clause else "条款"
                     container_info = f" [容器: {parent_container_id}]" if parent_container_id else ""
                     self.logger.debug(f"[条款构建]   {clause_id} {clause_title[:30]}... (page={page_idx}) [{clause_type}] [挂载到 {parent_ch}{container_info}]")
+                elif use_mineru_titles and chunk_type == 'text' and content.strip():
+                    # MinerU Title 模式：所有 text 块都是条款，无需编号匹配
+                    clause_id = f"{current_chapter['chapter_number']}-{len(clauses) + 1}"
+                    clause_title = content.strip()[:60]
+                    req_type = RequirementType.RECOMMENDED
+                    if any(kw in content for kw in ['应', '必须', '严禁', '不得', '应不', '不应', '不宜']):
+                        req_type = RequirementType.MANDATORY
+                    elif any(kw in content for kw in ['宜', '可', '建议', '推荐']):
+                        req_type = RequirementType.RECOMMENDED
+                    elif any(kw in content for kw in ['禁止', '不应', '不得']):
+                        req_type = RequirementType.PROHIBITED
+                    clause = ClauseSegment(
+                        clause_id=clause_id,
+                        clause_title=clause_title,
+                        content=content,
+                        paragraphs=[],
+                        requirement_type=req_type,
+                        applicable_systems=[],
+                        cross_refs=[],
+                        source=source,
+                        page=page_idx,
+                        triplets=[],
+                        clause_items=[],
+                        is_term_definition=False,
+                        terms=[],
+                        formula_content=None,
+                        semantics_enriched=False,
+                        parent_chapter=current_chapter['chapter_number'],
+                        referenced_clauses=[],
+                        referenced_standards=[],
+                        metadata={
+                            "chunk_type": chunk_type,
+                            "chunk_id": chunk_id,
+                            "parent_chapter": current_chapter['chapter_number'],
+                            "parent_chapter_title": current_chapter['title'],
+                            "page_idx": page_idx,
+                            "bbox_viewport": bbox_viewport,
+                            "is_title_mode": True,
+                            "entities": []
+                        }
+                    )
+                    clauses.append(clause)
+                    current_chapter['sub_chapters'].append(clause_id)
+                    self.logger.debug(f"[条款构建]   [Title模式] {clause_id} {clause_title[:30]}... (page={page_idx}) [挂载到 {current_chapter['chapter_number']}]")
                 else:
                     # 非条款内容块直接跳过，不再生成伪 clause
                     pass
@@ -2947,6 +3127,77 @@ topic：{topic}
                 chapter_plan = [p for i, p in enumerate(chapter_plan) if i in keep_indices]
 
         self._report_progress(-1, f"[章节构建] 完成: {len(sections)} 章节, {len(clauses)} 条款，bboxs 聚合完成")
+
+        # =====================================================================
+        # 图片 VLM 分析：使用多模态 LLM 读取图片内容
+        # =====================================================================
+        clauses_with_images = [c for c in clauses if c.metadata.get('images')]
+        if clauses_with_images:
+            self._report_progress(-1, f"[VLM分析] 检测到 {len(clauses_with_images)} 个条款包含图片，开始多模态分析...")
+            vlm_count = 0
+            vlm_fail = 0
+            for clause in clauses_with_images:
+                images: List[Dict] = clause.metadata.get('images', [])
+                clause_vlm_results = []
+                for img in images:
+                    content_base64 = img.get('content', '')
+                    if not content_base64:
+                        clause_vlm_results.append({'img_path': img.get('img_path', ''), 'img_vlm_content': '', 'status': 'no_base64'})
+                        continue
+
+                    caption = img.get('caption', '') or ''
+                    img_path = img.get('img_path', '') or ''
+                    page_idx = img.get('page_idx', 0)
+
+                    prompt = (
+                        "你是一个专业的工程图纸和技术图表分析助手。你的任务是详细描述图片中包含的所有内容。\n\n"
+                        "描述要求：\n"
+                        "1. 识别图片类型：流程图、接线图、系统架构图、原理图、设备布置图、表格截图等\n"
+                        "2. 详细描述所有文字、符号、线条、箭头及其含义\n"
+                        "3. 说明各组件/模块之间的连接关系和数据流向\n"
+                        "4. 提取图中所有可读的技术参数、型号、规格数值\n"
+                        "5. 如有尺寸标注、线缆编号、设备编号请全部列出\n"
+                        "6. 对于表格，请还原表格的完整行列内容\n\n"
+                        f"图片图注信息：{caption}\n"
+                        f"图片来源页码：第 {page_idx + 1} 页\n"
+                        "请给出详尽、精确的描述，确保不遗漏任何细节："
+                    )
+
+                    try:
+                        from ..utils.llm_client import LLMClient
+                        vlm = LLMClient()
+                        vlm_description = vlm.chat_image(
+                            image_base64=content_base64,
+                            prompt=prompt,
+                            temperature=0.3,
+                            max_tokens=2048,
+                        )
+                        clause_vlm_results.append({
+                            'img_path': img_path,
+                            'caption': caption,
+                            'img_vlm_content': vlm_description,
+                            'status': 'ok',
+                        })
+                        vlm_count += 1
+                        self._report_progress(-1, f"[VLM分析] clause={clause.clause_id} 图{vlm_count}: {vlm_description[:60]}...")
+                    except Exception as e:
+                        vlm_fail += 1
+                        clause_vlm_results.append({
+                            'img_path': img_path,
+                            'caption': caption,
+                            'img_vlm_content': '',
+                            'status': f'error: {str(e)}',
+                        })
+                        self.logger.warning(f"[VLM分析] clause={clause.clause_id} 图片分析失败: {e}")
+
+                # 将 VLM 结果写回 clause metadata（替换原有 images 中的对应条目）
+                for i, result in enumerate(clause_vlm_results):
+                    if i < len(clause.metadata['images']):
+                        clause.metadata['images'][i]['img_vlm_content'] = result['img_vlm_content']
+                        clause.metadata['images'][i]['vlm_status'] = result['status']
+
+            self._report_progress(-1, f"[VLM分析] 完成: 成功 {vlm_count} 张，失败 {vlm_fail} 张")
+
         return sections, clauses, chapter_plan
 
     # =========================================================================

@@ -20,9 +20,16 @@ def call_qwen_api(messages, model="qwen3.5-plus", temperature=0.7, max_tokens=20
         API 响应结果
     """
     # API 配置
-    api_url = "http://192.168.1.246:3000/v1/chat/completions"
-    api_key = "sk-OC5Y16Hcm6FTkd4TF1B891Ec53Be4940AdF2Bb15C8Ad90Ca"
-    
+    import os
+    from dotenv import load_dotenv
+
+    # 加载 .env 文件
+    load_dotenv()
+
+    api_url = os.getenv("API_URL")
+    api_key = os.getenv("API_KEY")
+    model = os.getenv("MODEL_NAME")
+
     # 请求头
     headers = {
         "Content-Type": "application/json",

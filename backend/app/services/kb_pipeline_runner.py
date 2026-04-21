@@ -191,6 +191,7 @@ class KbPipelineRunner:
         anchor_result = self._get_stage("chapter_analysis").result
         chapter_anchor = anchor_result.get("chapter_anchor", "x.x")
         clause_container = anchor_result.get("clause_container", "x.x.x")
+        use_mineru_titles = anchor_result.get("use_mineru_titles", False)
 
         # 准备 text_chunks
         from ..utils.file_parser import TextChunk
@@ -251,6 +252,7 @@ class KbPipelineRunner:
             pdf_path=pdf_path,
             chapter_anchor=chapter_anchor,
             clause_container=clause_container,
+            use_mineru_titles=use_mineru_titles,
         )
 
         if not result:

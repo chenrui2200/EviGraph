@@ -236,6 +236,90 @@ class LLMClient:
 
         raise last_error if last_error else Exception("LLM call failed")
 
+    def chat_image(
+        self,
+        image_base64: str,
+        prompt: str,
+        temperature: float = 0.3,
+        max_tokens: int = 4096
+    ) -> str:
+        """
+        多模态图像分析：发送图片（base64）+ 文本提示词，返回 LLM 描述。
+
+        支持 OpenAI 兼容格式（Qwen2.5-VL、GPT-4V）和 Ollama Vision 模型（llava 等）。
+
+        Args:
+            image_base64: 图片 base64 编码（可带 data URI 前缀，如 data:image/jpeg;base64,...)
+            prompt:      给 LLM 的提示词
+            temperature: 生成温度
+            max_tokens: 最大 token 数
+
+        Returns:
+            LLM 对图片的文本描述
+        """
+        # 构建 image_url 内容块
+        image_url_content = {
+            "type": "image_url",
+            "image_url": {
+                "url": image_base64 if image_base64.startswith('data:') else f"data:image/jpeg;base64,{image_base64}"
+            }
+        }
+
+        messages = [
+            {"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                image_url_content,
+            ]}
+        ]
+
+        is_azure = 'azure' in (self.base_url or '').lower()
+        is_ollama = self._is_ollama()
+
+        # Azure 不支持 vision，直接报错
+        if is_azure:
+            raise NotImplementedError("Azure OpenAI does not support vision chat. Please use a vision-capable model via Ollama or OpenAI.")
+
+        # Ollama vision 模型：用 messages 格式（与 chat 一致）
+        if is_ollama:
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if self._num_ctx:
+                kwargs["extra_body"] = {"options": {"num_ctx": self._num_ctx}}
+        else:
+            # OpenAI / 兼容 API：转为 chat completions
+            kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+
+        last_error = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+                return response.choices[0].message.content.strip()
+            except (APIConnectionError, APITimeoutError) as e:
+                last_error = e
+                if hasattr(self._thread_local, "client"):
+                    del self._thread_local.client
+                if attempt < self.max_retries:
+                    wait_time = (2 ** attempt) + random.random()
+                    logger.warning(f"VLM connection error (attempt {attempt + 1}): {e}. Retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"VLM connection failed after {self.max_retries + 1} attempts: {e}")
+                    raise
+            except Exception as e:
+                logger.error(f"VLM unexpected error: {e}\n{traceback.format_exc()}")
+                raise
+
+        raise last_error if last_error else Exception("VLM chat failed")
+
     def chat_json(
         self,
         messages: List[Dict[str, str]],
