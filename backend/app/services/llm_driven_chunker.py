@@ -2531,6 +2531,7 @@ topic：{topic}
         sections = []
         clauses = []
         chapter_plan = []
+        chunk_clause_map: Dict[int, str] = {}
 
         # 章节锚点匹配正则（支持末尾可选点号及可选空格，如 "1. 前言" / "3.基础信息管理" / "3.2.2.人员信息"）
         # 使用 (?!\.\d) 负向前瞻，防止低一级锚点错误吞掉高一级编号
@@ -2592,6 +2593,7 @@ topic：{topic}
             anchor_found = True
             self._report_progress(-1, f"[章节构建] [Title模式] 虚拟根章节: {virtual_title}，共 {len(chunks_data)} 个 chunk")
 
+        current_clause_id: Optional[str] = None
         for i, chunk in enumerate(chunks_data):
             # 兼容多种 chunk 格式
             # 1. 顶层字段：chunk.get('type'), chunk.get('content')
@@ -2665,6 +2667,7 @@ topic：{topic}
 
                 # 重置二级容器
                 current_container = None
+                current_clause_id = None
 
                 self._report_progress(-1, f"[章节构建] {chapter_num}. {title} (page={page_idx})")
                 anchor_found = True  # 标记已找到锚点
@@ -2702,6 +2705,7 @@ topic：{topic}
 
                 # 重置二级容器
                 current_container = None
+                current_clause_id = None
 
                 self._report_progress(-1, f"[章节构建] 附录 {appendix_letter}: {title} (page={page_idx})")
                 anchor_found = True  # 标记已找到锚点
@@ -2759,6 +2763,8 @@ topic：{topic}
                         'clause': container_clause
                     }
                     current_chapter['sub_chapters'].append(container_clause_id)
+                    current_clause_id = container_clause_id
+                    chunk_clause_map[i] = current_clause_id
                     self._report_progress(-1, f"[条款构建]   [Title模式] 条款容器: {container_clause_id} {container_title[:40]}... [挂载到 {current_chapter['chapter_number']}]")
                     continue
                 # 标准模式：尚未进入任何章节时跳过（如前言、目录）
@@ -2832,6 +2838,8 @@ topic：{topic}
                         'clause': container_clause
                     }
                     current_chapter['sub_chapters'].append(container_clause_id)
+                    current_clause_id = container_clause_id
+                    chunk_clause_map[i] = current_clause_id
 
                     self._report_progress(-1, f"[条款构建]   {container_clause_id} {container_title[:30]}... [条款容器挂载到 {current_chapter['chapter_number']}]")
                     continue
@@ -2898,6 +2906,8 @@ topic：{topic}
                     if current_container:
                         current_container['clause'].metadata.setdefault('child_clauses', []).append(clause_id)
                     current_chapter['sub_chapters'].append(clause_id)
+                    current_clause_id = clause_id
+                    chunk_clause_map[i] = current_clause_id
 
                     clause_type = "附录条款" if is_appendix_clause else "条款"
                     container_info = f" [容器: {parent_container_id}]" if parent_container_id else ""
@@ -2945,10 +2955,16 @@ topic：{topic}
                     )
                     clauses.append(clause)
                     current_chapter['sub_chapters'].append(clause_id)
+                    current_clause_id = clause_id
+                    chunk_clause_map[i] = current_clause_id
                     self.logger.debug(f"[条款构建]   [Title模式] {clause_id} {clause_title[:30]}... (page={page_idx}) [挂载到 {current_chapter['chapter_number']}]")
                 else:
                     # 非条款内容块直接跳过，不再生成伪 clause
                     pass
+
+                # 记录当前 chunk 归属的 clause，用于后续 bbox 聚合
+                if current_clause_id is not None:
+                    chunk_clause_map[i] = current_clause_id
             else:
                 # 没有找到锚点前的内容块直接跳过
                 pass
@@ -2994,21 +3010,22 @@ topic：{topic}
         clause_bbox_map: Dict[str, List[tuple]] = {}
         clause_chunk_map: Dict[str, List[str]] = {}
         clause_image_map: Dict[str, List[Dict]] = {}  # clause_id → [{caption, content, img_path, chunk_id}]
-        current_clause_id: Optional[str] = None
-        for chunk in chunks_data:
+        for i, chunk in enumerate(chunks_data):
             chunk_id = chunk.get('chunk_id', '')
             page_idx = chunk.get('page_idx', 0)
             bbox = chunk.get('bbox_viewport') or chunk.get('bbox_pdf') or []
             chunk_type = chunk.get('type', '')
-            # 查找该 chunk 的 clause_id（通过 content 中的条款编号）
-            chunk_content = chunk.get('content', '')
-            m = CLAUSE_PATTERN.match(chunk_content.strip())
-            if not m:
-                # 尝试附录条款（如 A.0.1）
-                m = APPENDIX_CLAUSE_PATTERN.match(chunk_content.strip())
-            if m:
-                current_clause_id = m.group(1)
-            # 当前 chunk 归属到 current_clause_id（直到遇到新的条款编号）
+            # 查找该 chunk 的 clause_id（优先使用构建阶段记录的映射）
+            current_clause_id: Optional[str] = chunk_clause_map.get(i)
+            if current_clause_id is None and not use_mineru_titles:
+                # 回退：标准模式下通过 content 中的条款编号匹配
+                chunk_content = chunk.get('content', '')
+                m = CLAUSE_PATTERN.match(chunk_content.strip())
+                if not m:
+                    m = APPENDIX_CLAUSE_PATTERN.match(chunk_content.strip())
+                if m:
+                    current_clause_id = m.group(1)
+            # 当前 chunk 归属到 current_clause_id
             if current_clause_id is not None:
                 # bbox
                 if bbox and len(bbox) >= 4:
