@@ -36,6 +36,11 @@ class Config:
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'qwen2.5:32b')
     LLM_MAX_RETRIES = int(os.environ.get('LLM_MAX_RETRIES', '3'))
 
+    # VLM configuration (vision-capable model for image analysis)
+    VLM_API_KEY = os.environ.get('VLM_API_KEY')
+    VLM_BASE_URL = os.environ.get('VLM_BASE_URL', 'http://localhost:11434/v1')
+    VLM_MODEL_NAME = os.environ.get('VLM_MODEL_NAME', 'qwen2.5-vl:7b')
+
     # Neo4j configuration
     NEO4J_URI = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
     NEO4J_USER = os.environ.get('NEO4J_USER', 'neo4j')

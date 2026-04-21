@@ -275,6 +275,9 @@ class LLMClient:
         is_azure = 'azure' in (self.base_url or '').lower()
         is_ollama = self._is_ollama()
 
+        base64_len = len(image_base64)
+        logger.info(f"[VLM-CLIENT] chat_image 开始: model={self.model}, base_url={self.base_url}, base64_len={base64_len}, is_ollama={is_ollama}")
+
         # Azure 不支持 vision，直接报错
         if is_azure:
             raise NotImplementedError("Azure OpenAI does not support vision chat. Please use a vision-capable model via Ollama or OpenAI.")
@@ -301,8 +304,11 @@ class LLMClient:
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
+                logger.info(f"[VLM-CLIENT] 调用 chat.completions.create (attempt {attempt + 1}/{self.max_retries + 1})")
                 response = self.client.chat.completions.create(**kwargs)
-                return response.choices[0].message.content.strip()
+                content = response.choices[0].message.content.strip() if response.choices[0].message.content else ''
+                logger.info(f"[VLM-CLIENT] 调用成功: content_len={len(content)}, preview={content[:80] if content else '(空)'}")
+                return content
             except (APIConnectionError, APITimeoutError) as e:
                 last_error = e
                 if hasattr(self._thread_local, "client"):

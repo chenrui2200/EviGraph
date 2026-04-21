@@ -47,6 +47,7 @@ from ..models.project import (
 )
 from ..utils.file_parser import TextChunk
 from ..utils.llm_client import LLMClient
+from ..config import Config
 
 logger = logging.getLogger('mirofish.llm_chunker')
 
@@ -3129,6 +3130,18 @@ topic：{topic}
                             clause.content = txt
                             self.logger.debug(f"[条款合并] clause_id={cid}: 单 chunk，content 已更新为原始文本 (len={len(txt)})")
 
+        # 诊断日志：汇总 image chunk 统计
+        total_img_chunks = sum(1 for c in chunks_data if c.get('type') == 'image')
+        img_chunks_with_content = sum(
+            1 for c in chunks_data if c.get('type') == 'image' and c.get('image_content')
+        )
+        mapped_clauses_with_img = sum(1 for c in clauses if c.metadata.get('images'))
+        self.logger.info(
+            f"[VLM诊断] image chunks 总计={total_img_chunks}, "
+            f"有content={img_chunks_with_content}, "
+            f"映射到clause={mapped_clauses_with_img}"
+        )
+
         # =====================================================================
         # 去重：按 chapter_number 保留最后一个（过滤目录页与正文重复的标题）
         # =====================================================================
@@ -3155,15 +3168,22 @@ topic：{topic}
             vlm_fail = 0
             for clause in clauses_with_images:
                 images: List[Dict] = clause.metadata.get('images', [])
+                self.logger.info(f"[VLM诊断] clause={clause.clause_id} 包含 {len(images)} 张图片")
                 clause_vlm_results = []
-                for img in images:
+                for img_idx, img in enumerate(images):
                     content_base64 = img.get('content', '')
+                    img_path = img.get('img_path', '') or ''
+                    caption = img.get('caption', '') or ''
+                    self.logger.info(
+                        f"[VLM诊断] clause={clause.clause_id} 图{img_idx + 1}/{len(images)}: "
+                        f"path={img_path}, caption={caption[:30] if caption else '(空)'}, "
+                        f"base64_len={len(content_base64)}"
+                    )
                     if not content_base64:
-                        clause_vlm_results.append({'img_path': img.get('img_path', ''), 'img_vlm_content': '', 'status': 'no_base64'})
+                        clause_vlm_results.append({'img_path': img_path, 'img_vlm_content': '', 'status': 'no_base64'})
+                        self.logger.warning(f"[VLM诊断] clause={clause.clause_id} 图{img_idx + 1} 跳过: 无 base64 内容")
                         continue
 
-                    caption = img.get('caption', '') or ''
-                    img_path = img.get('img_path', '') or ''
                     page_idx = img.get('page_idx', 0)
 
                     prompt = (
@@ -3181,14 +3201,20 @@ topic：{topic}
                     )
 
                     try:
-                        from ..utils.llm_client import LLMClient
-                        vlm = LLMClient()
+                        vlm = LLMClient(
+                            api_key=Config.VLM_API_KEY,
+                            base_url=Config.VLM_BASE_URL,
+                            model=Config.VLM_MODEL_NAME,
+                        )
+                        self.logger.info(f"[VLM诊断] 正在调用 chat_image: model={vlm.model}, base_url={vlm.base_url}")
                         vlm_description = vlm.chat_image(
                             image_base64=content_base64,
                             prompt=prompt,
                             temperature=0.3,
-                            max_tokens=2048,
+                            max_tokens=4096,
                         )
+                        desc_len = len(vlm_description) if vlm_description else 0
+                        self.logger.info(f"[VLM诊断] chat_image 返回: desc_len={desc_len}, preview={vlm_description[:80] if vlm_description else '(空)'}")
                         clause_vlm_results.append({
                             'img_path': img_path,
                             'caption': caption,
@@ -3208,12 +3234,21 @@ topic：{topic}
                         self.logger.warning(f"[VLM分析] clause={clause.clause_id} 图片分析失败: {e}")
 
                 # 将 VLM 结果写回 clause metadata（替换原有 images 中的对应条目）
+                self.logger.info(f"[VLM诊断] clause={clause.clause_id} 写回 {len(clause_vlm_results)} 条结果到 metadata")
                 for i, result in enumerate(clause_vlm_results):
                     if i < len(clause.metadata['images']):
-                        clause.metadata['images'][i]['img_vlm_content'] = result['img_vlm_content']
+                        old_val = clause.metadata['images'][i].get('img_vlm_content', '')
+                        new_val = result['img_vlm_content']
+                        clause.metadata['images'][i]['img_vlm_content'] = new_val
                         clause.metadata['images'][i]['vlm_status'] = result['status']
+                        self.logger.info(
+                            f"[VLM诊断] 写回 images[{i}]: status={result['status']}, "
+                            f"vlm_content 旧len={len(old_val)}, 新len={len(new_val) if new_val else 0}"
+                        )
 
             self._report_progress(-1, f"[VLM分析] 完成: 成功 {vlm_count} 张，失败 {vlm_fail} 张")
+        else:
+            self.logger.info("[VLM诊断] 无条款包含图片，跳过 VLM 分析")
 
         return sections, clauses, chapter_plan
 

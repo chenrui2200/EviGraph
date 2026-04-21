@@ -121,6 +121,19 @@ def intelligent_chunk():
                     os.remove(task_file)
             existing_task_id = None
 
+            # 清理 Neo4j 旧图谱数据（防止重新分析后数据叠加）
+            if project.graph_id:
+                try:
+                    from flask import current_app
+                    from ..services.graph_builder import GraphBuilderService
+                    storage = current_app.extensions.get('neo4j_storage')
+                    if storage:
+                        builder = GraphBuilderService(storage=storage)
+                        builder.delete_graph(project.graph_id)
+                        logger.info(f"[{project_id}] Neo4j 旧图谱已清理: {project.graph_id}")
+                except Exception as neo_err:
+                    logger.warning(f"[{project_id}] Neo4j 旧图谱清理失败（可能已不存在）: {neo_err}")
+
         if not reset and project.status == ProjectStatus.GRAPH_CHUNKED:
             task = TaskManager().get_task(existing_task_id) if existing_task_id else None
             return jsonify({
