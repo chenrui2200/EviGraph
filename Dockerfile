@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ ./
 
 # 创建稳定软链接，避免不同 Python 小版本路径差异
-#RUN ln -s $(python -c "import site; print(site.getsitepackages()[0])") /python-site-packages
+RUN ln -s $(python -c "import site; print(site.getsitepackages()[0])") /python-site-packages
 
 # =============================================
 # Stage 3: Final runtime
@@ -52,7 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy backend (site-packages + source)
-#COPY --from=backend-builder /python-site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=backend-builder /python-site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=backend-builder /usr/local/bin /usr/local/bin
 COPY --from=backend-builder /app/backend /app/backend
 
