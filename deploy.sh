@@ -64,12 +64,19 @@ info "使用 Compose 命令: ${COMPOSE_CMD}"
 if [[ "$(uname -s)" == "Linux" ]]; then
     info "检查系统依赖..."
     if ! command -v soffice &>/dev/null; then
-        warn "LibreOffice (soffice) 未安装，正在安装..."
         if command -v apt-get &>/dev/null; then
-            apt-get update && apt-get install -y --no-install-recommends libreoffice-writer
-            info "LibreOffice 安装完成"
+            # 检查是否有 root/sudo 权限
+            if [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; then
+                warn "LibreOffice (soffice) 未安装，正在安装..."
+                apt-get update -qq && apt-get install -y --no-install-recommends libreoffice-writer
+                info "LibreOffice 安装完成"
+            else
+                warn "LibreOffice (soffice) 未安装（缺少 root 权限，跳过自动安装）"
+                info "Docker 容器内已包含 LibreOffice，勿需担心。也可手动安装: sudo apt-get install libreoffice-writer"
+            fi
         else
-            warn "无法自动安装 LibreOffice，请手动安装: https://www.libreoffice.org/download/download/"
+            warn "LibreOffice (soffice) 未安装，apt-get 不可用"
+            info "如需安装: https://www.libreoffice.org/download/download/"
         fi
     else
         info "LibreOffice 已安装: $(soffice --version 2>/dev/null || echo 'soffice found')"
@@ -148,8 +155,31 @@ elif check_base_exists; then
         step "同步代码到容器..."
         # 同步后端代码（排除 requirements.txt，避免覆盖刚更新的）
         docker cp backend/. "${CONTAINER_NAME}:/app/backend/"
-        # 同步前端构建产物
-        docker cp frontend/dist/. "${CONTAINER_NAME}:/app/frontend/dist/"
+
+        # 检查前端源码是否有更新（比较 git hash）
+        FRONTEND_HASH_FILE="/tmp/frontend_hash_prev"
+        FE_CUR_SHA="$(git -C . log -1 --format='%ct_%h' -- frontend/ 2>/dev/null || echo "")"
+        FE_PREV_SHA="$(cat "${FRONTEND_HASH_FILE}" 2>/dev/null || echo "")"
+
+        if [ -n "$FE_CUR_SHA" ] && [ "$FE_CUR_SHA" != "$FE_PREV_SHA" ]; then
+            step "检测到前端源码有更新，重新构建..."
+            if command -v npm &>/dev/null; then
+                (cd frontend && npm run build)
+                echo "$FE_CUR_SHA" > "${FRONTEND_HASH_FILE}"
+                info "前端构建完成"
+            else
+                warn "npm 未安装，无法构建前端，跳过。请确保 frontend/dist/ 已手动构建。"
+            fi
+        fi
+
+        # 同步前端构建产物（如果 dist 存在）
+        if [ -d frontend/dist ] && [ -n "$(ls -A frontend/dist 2>/dev/null)" ]; then
+            docker cp frontend/dist/. "${CONTAINER_NAME}:/app/frontend/dist/"
+            info "前端 dist 已同步"
+        else
+            warn "frontend/dist 为空或不存在，前端未同步"
+        fi
+
         # 同步 nginx/supervisord 配置（如果存在）
         [ -f nginx.conf ]           && docker cp nginx.conf "${CONTAINER_NAME}:/etc/nginx/nginx.conf"
         [ -f supervisord.conf ]      && docker cp supervisord.conf "${CONTAINER_NAME}:/etc/supervisor/conf.d/supervisord.conf"
