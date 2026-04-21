@@ -152,22 +152,24 @@ elif check_base_exists; then
         fi
 
         step "同步代码到容器..."
-        # 同步后端代码
-        docker cp backend/. "${CONTAINER_NAME}:/app/backend/"
-
-        # 前端每次都通过 Docker BuildKit rebuild（利用 Stage 1 Node.js 环境，不依赖宿主机 npm）
-        step "前端通过 Docker BuildKit 构建..."
+        # 前端 rebuild（利用 Stage 1 Node.js，不走 --no-cache，靠 cache 自动判断变更层）
+        step "前端 rebuild（利用 Docker 缓存）..."
         ${COMPOSE_CMD} build
         docker tag "${LATEST_IMAGE}" "${BASE_IMAGE}"
 
-        # 把新构建的 dist 同步到运行中容器
-        if [ -d frontend/dist ] && [ -n "$(ls -A frontend/dist 2>/dev/null)" ]; then
-            docker cp frontend/dist/. "${CONTAINER_NAME}:/app/frontend/dist/"
-        fi
+        # 从刚构建的镜像里提取新 dist，复制到运行中容器（不用本地旧 filesystem）
+        step "从镜像提取新 dist 到运行中容器..."
+        docker run --rm \
+            -v "$(pwd)/frontend/dist:/dist_out" \
+            --entrypoint /bin/sh \
+            "${LATEST_IMAGE}" \
+            -c "cp -r /app/frontend/dist/. /dist_out/ 2>/dev/null || true"
+        docker cp frontend/dist/. "${CONTAINER_NAME}:/app/frontend/dist/"
 
-        # 同步 nginx/supervisord 配置
-        [ -f nginx.conf ]          && docker cp nginx.conf "${CONTAINER_NAME}:/etc/nginx/nginx.conf"
-        [ -f supervisord.conf ]    && docker cp supervisord.conf "${CONTAINER_NAME}:/etc/supervisor/conf.d/supervisord.conf"
+        # 同步后端代码 + 配置文件
+        docker cp backend/. "${CONTAINER_NAME}:/app/backend/"
+        [ -f nginx.conf ]       && docker cp nginx.conf "${CONTAINER_NAME}:/etc/nginx/nginx.conf"
+        [ -f supervisord.conf ] && docker cp supervisord.conf "${CONTAINER_NAME}:/etc/supervisor/conf.d/supervisord.conf"
 
         step "代码已同步，重启服务..."
         docker restart "${CONTAINER_NAME}"
