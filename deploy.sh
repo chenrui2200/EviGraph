@@ -128,8 +128,25 @@ elif check_base_exists; then
 
     # 容器是否在运行
     if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+        # 检查 requirements.txt 是否有新增依赖（通过 hash 判断）
+        REQ_TMP="/tmp/requirements.txt.sha256"
+        REQ_CUR_SHA="$(sha256sum backend/requirements.txt 2>/dev/null | cut -d' ' -f1)"
+        REQ_CONTAINER_SHA="$(docker exec "${CONTAINER_NAME}" sha256sum /usr/local/lib/python3.12/site-packages/requirements.txt 2>/dev/null | cut -d' ' -f1 || echo "")"
+
+        REQS_CHANGED=false
+        if [ -n "$REQ_CUR_SHA" ] && [ "$REQ_CUR_SHA" != "$REQ_CONTAINER_SHA" ]; then
+            REQS_CHANGED=true
+        fi
+
+        if $REQS_CHANGED; then
+            step "检测到 requirements.txt 有变更，执行依赖更新..."
+            docker cp backend/requirements.txt "${CONTAINER_NAME}:/usr/local/lib/python3.12/site-packages/requirements.txt"
+            docker exec "${CONTAINER_NAME}" pip install --no-cache-dir -r /usr/local/lib/python3.12/site-packages/requirements.txt
+            info "依赖安装完成"
+        fi
+
         step "同步代码到容器..."
-        # 同步后端代码
+        # 同步后端代码（排除 requirements.txt，避免覆盖刚更新的）
         docker cp backend/. "${CONTAINER_NAME}:/app/backend/"
         # 同步前端构建产物
         docker cp frontend/dist/. "${CONTAINER_NAME}:/app/frontend/dist/"
