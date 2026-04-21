@@ -325,6 +325,9 @@ def generate_ontology():
         })
 
     except Exception as e:
+        import sys
+        print(f"[EXCEPTION] generate_ontology FAILED: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         logger.error(f"API Error: {str(e)}\n{traceback.format_exc()}")
         if 'project' in dir() and project and project.project_id:
             try:

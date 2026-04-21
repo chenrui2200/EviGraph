@@ -43,6 +43,7 @@ def convert_word_to_pdf(word_path: str, output_dir: Optional[str] = None) -> str
         os.remove(expected_pdf)
 
     # 方案 1: LibreOffice (soffice)
+    soffice_err = None
     try:
         _convert_with_soffice(word_path, out_dir)
         if os.path.exists(expected_pdf):
@@ -53,8 +54,8 @@ def convert_word_to_pdf(word_path: str, output_dir: Optional[str] = None) -> str
                 found = os.path.join(out_dir, f)
                 if os.path.exists(found):
                     return found
-    except Exception as soffice_err:
-        pass  # 降级到方案 2
+    except Exception as e:
+        soffice_err = e  # 降级到方案 2
 
     # 方案 2: pypandoc + wkhtmltopdf
     try:
