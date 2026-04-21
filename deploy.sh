@@ -123,7 +123,7 @@ if $FORCE_REBUILD; then
     # --force-rebuild: 删除旧镜像，重新完整构建
     step "强制重建模式，删除旧镜像..."
     docker rmi "${BASE_IMAGE}" "${LATEST_IMAGE}" 2>/dev/null || true
-    step "完整构建镜像 (知识图谱 base 层 + 代码层)..."
+    step "完整构建镜像 (知识图谱 base 层 + 代码层，--no-cache 确保最新)..."
     ${COMPOSE_CMD} build --no-cache
     docker tag "${LATEST_IMAGE}" "${BASE_IMAGE}"
     info "Base 镜像已更新: ${BASE_IMAGE}"
@@ -136,7 +136,6 @@ elif check_base_exists; then
     # 容器是否在运行
     if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
         # 检查 requirements.txt 是否有新增依赖（通过 hash 判断）
-        REQ_TMP="/tmp/requirements.txt.sha256"
         REQ_CUR_SHA="$(sha256sum backend/requirements.txt 2>/dev/null | cut -d' ' -f1)"
         REQ_CONTAINER_SHA="$(docker exec "${CONTAINER_NAME}" sha256sum /usr/local/lib/python3.12/site-packages/requirements.txt 2>/dev/null | cut -d' ' -f1 || echo "")"
 
@@ -153,37 +152,24 @@ elif check_base_exists; then
         fi
 
         step "同步代码到容器..."
-        # 同步后端代码（排除 requirements.txt，避免覆盖刚更新的）
+        # 同步后端代码
         docker cp backend/. "${CONTAINER_NAME}:/app/backend/"
 
-        # 检查前端源码是否有更新（比较 git hash）
-        FRONTEND_HASH_FILE="/tmp/frontend_hash_prev"
-        FE_CUR_SHA="$(git -C . log -1 --format='%ct_%h' -- frontend/ 2>/dev/null || echo "")"
-        FE_PREV_SHA="$(cat "${FRONTEND_HASH_FILE}" 2>/dev/null || echo "")"
+        # 前端每次都通过 Docker BuildKit rebuild（利用 Stage 1 Node.js 环境，不依赖宿主机 npm）
+        step "前端通过 Docker BuildKit 构建..."
+        ${COMPOSE_CMD} build
+        docker tag "${LATEST_IMAGE}" "${BASE_IMAGE}"
 
-        if [ -n "$FE_CUR_SHA" ] && [ "$FE_CUR_SHA" != "$FE_PREV_SHA" ]; then
-            step "检测到前端源码有更新，重新构建..."
-            if command -v npm &>/dev/null; then
-                (cd frontend && npm run build)
-                echo "$FE_CUR_SHA" > "${FRONTEND_HASH_FILE}"
-                info "前端构建完成"
-            else
-                warn "npm 未安装，无法构建前端，跳过。请确保 frontend/dist/ 已手动构建。"
-            fi
-        fi
-
-        # 同步前端构建产物（如果 dist 存在）
+        # 把新构建的 dist 同步到运行中容器
         if [ -d frontend/dist ] && [ -n "$(ls -A frontend/dist 2>/dev/null)" ]; then
             docker cp frontend/dist/. "${CONTAINER_NAME}:/app/frontend/dist/"
-            info "前端 dist 已同步"
-        else
-            warn "frontend/dist 为空或不存在，前端未同步"
         fi
 
-        # 同步 nginx/supervisord 配置（如果存在）
-        [ -f nginx.conf ]           && docker cp nginx.conf "${CONTAINER_NAME}:/etc/nginx/nginx.conf"
-        [ -f supervisord.conf ]      && docker cp supervisord.conf "${CONTAINER_NAME}:/etc/supervisor/conf.d/supervisord.conf"
-        info "代码已同步，重启服务..."
+        # 同步 nginx/supervisord 配置
+        [ -f nginx.conf ]          && docker cp nginx.conf "${CONTAINER_NAME}:/etc/nginx/nginx.conf"
+        [ -f supervisord.conf ]    && docker cp supervisord.conf "${CONTAINER_NAME}:/etc/supervisor/conf.d/supervisord.conf"
+
+        step "代码已同步，重启服务..."
         docker restart "${CONTAINER_NAME}"
     else
         warn "容器未运行，以增量模式启动新容器..."
