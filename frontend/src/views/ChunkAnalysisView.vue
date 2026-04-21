@@ -433,7 +433,7 @@
                       </div>
 
                       <!-- 知识实体 -->
-                      <div class="clause-entities-section" v-if="clause.topic || (clause.entities?.length || clause.related_elements?.length)">
+                      <div class="clause-entities-section" v-if="clause.topic || (clause.entities?.length || clause.related_elements?.length) || clause.images?.length">
                         <div v-if="clause.topic" class="clause-topic-row">
                           <span class="topic-label">📝 摘要</span>
                           <span class="topic-content">{{ clause.topic }}</span>
@@ -450,6 +450,24 @@
                             <span v-if="elem.value" class="entity-value">= {{ elem.value }}</span>
                             <span v-if="elem.unit" class="entity-unit">{{ elem.unit }}</span>
                           </template>
+                        </div>
+                        <!-- 图片及 VLM 分析结果 -->
+                        <div v-if="clause.images?.length" class="clause-images-section">
+                          <div class="entity-section-label">🖼️ 图片分析</div>
+                          <div v-for="(img, ii) in clause.images" :key="'img-' + ii" class="clause-image-item">
+                            <div v-if="img.caption" class="image-caption">{{ img.caption }}</div>
+                            <div v-if="img.content" class="image-preview">
+                              <img :src="img.content" :alt="img.caption || '图片'" style="max-width: 200px; max-height: 150px; object-fit: contain; border: 1px solid #ddd; border-radius: 4px;" />
+                            </div>
+                            <div v-if="img.img_vlm_content" class="vlm-content">
+                              <span class="vlm-label">VLM 描述：</span>
+                              <span class="vlm-text">{{ img.img_vlm_content }}</span>
+                            </div>
+                            <div v-else-if="img.vlm_status && img.vlm_status !== 'ok'" class="vlm-status-error">
+                              <span class="vlm-label">VLM 状态：</span>
+                              <span class="vlm-error">{{ img.vlm_status }}</span>
+                            </div>
+                          </div>
                         </div>
                       </div>
                     </div>
