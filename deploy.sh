@@ -42,7 +42,24 @@ fi
 
 info "使用 Compose 命令: ${COMPOSE_CMD}"
 
-# 创建必要的本地持久化目录
+# =============================================
+# 系统依赖检查
+# =============================================
+info "检查系统依赖..."
+
+# 检查 LibreOffice（Word→PDF 转换必需）
+if ! command -v soffice &>/dev/null; then
+    warn "LibreOffice (soffice) 未安装，正在安装..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update && apt-get install -y --no-install-recommends libreoffice-writer
+        info "LibreOffice 安装完成"
+    else
+        error "无法自动安装 LibreOffice，请手动安装: https://www.libreoffice.org/download/download/"
+        error "LibreOffice 是 Word 文件转换为 PDF 的必要依赖，上传 .docx 文件时需要用到。"
+    fi
+else
+    info "LibreOffice 已安装: $(soffice --version 2>/dev/null || echo 'soffice found')"
+fi
 mkdir -p backend/uploads
 info "已确保目录存在: backend/uploads"
 

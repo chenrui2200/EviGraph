@@ -100,7 +100,8 @@ def generate_ontology():
         converted_files = []
         for f in saved_files:
             orig_name = f["original_filename"]
-            if os.path.splitext(orig_name)[1].lower() in _word_exts:
+            ext = os.path.splitext(orig_name)[1].lower()
+            if ext in _word_exts:
                 try:
                     pdf_path = convert_word_to_pdf(f["path"])
                     pdf_name = os.path.splitext(orig_name)[0] + ".pdf"
@@ -110,20 +111,29 @@ def generate_ontology():
                         "path": pdf_path,
                         "size": os.path.getsize(pdf_path)
                     })
+                    # 更新原始文件条目，path 指向 PDF，original_filename 也改为 .pdf
+                    f["original_filename"] = pdf_name
+                    f["path"] = pdf_path
+                    f["saved_filename"] = os.path.basename(pdf_path)
+                    f["size"] = os.path.getsize(pdf_path)
+                    logger.info(f"[Word→PDF] 转换成功: {orig_name} → {pdf_name}")
                 except Exception as conv_err:
-                    logger.warning(f"Failed to convert Word to PDF for {orig_name}: {conv_err}")
-                    converted_files.append(f)
+                    logger.error(f"[Word→PDF] 转换失败: {orig_name}, error: {conv_err}")
+                    raise RuntimeError(
+                        f"Word 文件转换为 PDF 失败: {orig_name}。"
+                        "请确保已安装 LibreOffice (soffice) 或上传 PDF 文件。"
+                    ) from conv_err
             else:
                 converted_files.append(f)
 
-        if converted_files != saved_files:
-            saved_files = converted_files
-            project.files = [{
-                "filename": fi["original_filename"],
-                "path": fi["path"],
-                "size": fi["size"]
-            } for fi in saved_files]
-            ProjectManager.save_project(project)
+        # 同步 project.files，确保后台任务使用转换后的 PDF 路径
+        project.files = [{
+            "filename": fi["original_filename"],
+            "path": fi["path"],
+            "size": fi["size"]
+        } for fi in converted_files]
+        ProjectManager.save_project(project)
+        saved_files = converted_files
 
         # Create task
         task_manager = TaskManager()
