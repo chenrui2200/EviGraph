@@ -148,7 +148,7 @@
                   <div class="object-row-header">
                     <div class="object-name">
                       <span class="object-badge" :class="{ term: row.object_node?.labels?.includes('Term') }">
-                        {{ row.object_node?.labels?.find(l => l === 'Term' || l === 'Object') || 'Object' }}
+                        {{ row.object_node?.labels?.find(l => l !== 'Entity' && l !== 'Node') || row.object_node?.labels?.[0] || 'Entity' }}
                       </span>
                       <strong>{{ row.object_node?.name || 'Unknown' }}</strong>
                     </div>
@@ -652,17 +652,30 @@ const renderEvidenceScreenshots = async (type = 'node') => {
       const page = await pdfDoc.getPage(fact.page || 1)
       const context = canvas.getContext('2d')
 
-      // Logic: Extract the bbox area + some padding
+      // 使用 pdf.js 实际解析的页面尺寸作为比例基准（和 PdfViewer 完全一致）
+      const unscaledViewport = page.getViewport({ scale: 1 })
+      const pageW = unscaledViewport.width
+      const pageH = unscaledViewport.height
+
+      // Logic: 横向截取整页宽度，纵向截取 bbox 附近区域
       const bbox = fact.bbox
-      const hPadding = type === 'modal' ? 120 : 60
       const vPadding = type === 'modal' ? 360 : 180
-      const cropX = Math.max(0, bbox[0] - hPadding)
-      const cropY = Math.max(0, bbox[1] - vPadding)
-      const cropW = (bbox[2] - bbox[0]) + hPadding * 2
-      const cropH = (bbox[3] - bbox[1]) + vPadding * 2
+      const rawCropY = bbox[1] - vPadding
+      const rawCropH = (bbox[3] - bbox[1]) + vPadding * 2
+
+      // 横向：完整页面宽度，确保 PDF 左右不截断
+      const cropX = 0
+      const cropW = pageW
+      // 纵向：限制在页面边界内
+      const cropY = Math.max(0, Math.min(rawCropY, pageH - rawCropH))
+      const cropH = Math.min(rawCropH, pageH - cropY)
 
       const scale = type === 'modal' ? 3.0 : 2.0
       const viewport = page.getViewport({ scale })
+
+      // 用 page_width 计算实际比例，处理 pdf.js 解析宽度与 MinerU 报告值不一致的情况
+      const xRatio = viewport.width / pageW
+      const yRatio = viewport.height / pageH
 
       const tempCanvas = document.createElement('canvas')
       tempCanvas.width = viewport.width
@@ -671,10 +684,10 @@ const renderEvidenceScreenshots = async (type = 'node') => {
 
       await page.render({ canvasContext: tempCtx, viewport }).promise
 
-      const sX = cropX * scale
-      const sY = cropY * scale
-      const sW = cropW * scale
-      const sH = cropH * scale
+      const sX = cropX * xRatio
+      const sY = cropY * yRatio
+      const sW = cropW * xRatio
+      const sH = cropH * yRatio
 
       const targetWidth = type === 'modal' ? 1100 : 480
       canvas.width = targetWidth
