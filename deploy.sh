@@ -170,6 +170,7 @@ elif check_base_exists; then
         docker cp backend/. "${CONTAINER_NAME}:/app/backend/"
         [ -f nginx.conf ]       && docker cp nginx.conf "${CONTAINER_NAME}:/etc/nginx/nginx.conf"
         [ -f supervisord.conf ] && docker cp supervisord.conf "${CONTAINER_NAME}:/etc/supervisor/conf.d/supervisord.conf"
+        [ -f .env ]             && docker cp .env "${CONTAINER_NAME}:/app/.env"
 
         step "代码已同步，重启服务..."
         docker restart "${CONTAINER_NAME}"
