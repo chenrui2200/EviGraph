@@ -204,22 +204,40 @@ const renderEvidenceScreenshots = async () => {
 
       const page = await pdfDoc.getPage(fact.page || 1)
       const context = canvas.getContext('2d')
+
+      // 使用 pdf.js 实际解析的页面尺寸作为比例基准（和 PdfViewer 完全一致）
+      const unscaledViewport = page.getViewport({ scale: 1 })
+      const pageW = unscaledViewport.width
+      const pageH = unscaledViewport.height
+
       const bbox = fact.bbox
-      const hPadding = 80
       const vPadding = 240
-      const cropX = Math.max(0, bbox[0] - hPadding)
-      const cropY = Math.max(0, bbox[1] - vPadding)
-      const cropW = (bbox[2] - bbox[0]) + hPadding * 2
-      const cropH = (bbox[3] - bbox[1]) + vPadding * 2
+      const rawCropY = bbox[1] - vPadding
+      const rawCropH = (bbox[3] - bbox[1]) + vPadding * 2
+
+      // 横向：完整页面宽度，确保 PDF 左右不截断
+      const cropX = 0
+      const cropW = pageW
+      // 纵向：限制在页面边界内
+      const cropY = Math.max(0, Math.min(rawCropY, pageH - rawCropH))
+      const cropH = Math.min(rawCropH, pageH - cropY)
+
       const scale = 2.5
       const viewport = page.getViewport({ scale })
+
+      // 用 page_width 计算实际比例，处理 pdf.js 解析宽度与 MinerU 报告值不一致的情况
+      const xRatio = viewport.width / pageW
+      const yRatio = viewport.height / pageH
 
       const tempCanvas = document.createElement('canvas')
       tempCanvas.width = viewport.width
       tempCanvas.height = viewport.height
       await page.render({ canvasContext: tempCanvas.getContext('2d'), viewport }).promise
 
-      const sX = cropX * scale, sY = cropY * scale, sW = cropW * scale, sH = cropH * scale
+      const sX = cropX * xRatio
+      const sY = cropY * yRatio
+      const sW = cropW * xRatio
+      const sH = cropH * yRatio
       const targetWidth = canvas.parentElement.clientWidth || 400
       canvas.width = targetWidth
       canvas.height = (sH / sW) * targetWidth
