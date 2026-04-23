@@ -152,19 +152,21 @@ elif check_base_exists; then
         fi
 
         step "同步代码到容器..."
-        # 前端 rebuild（利用 Stage 1 Node.js，不走 --no-cache，靠 cache 自动判断变更层）
+
+        # 清理旧的前端构建产物，避免宿主机残留文件导致增量部署时前端未更新
+        rm -rf frontend/dist
+        mkdir -p frontend/dist
+
+        # 前端 rebuild（利用 Stage 1 Node.js，靠 cache 自动判断变更层）
         step "前端 rebuild（利用 Docker 缓存）..."
         ${COMPOSE_CMD} build
         docker tag "${LATEST_IMAGE}" "${BASE_IMAGE}"
 
-        # 从刚构建的镜像里提取新 dist，复制到运行中容器（不用本地旧 filesystem）
+        # 从刚构建的镜像里提取新 dist，直接复制到运行中容器（不经过宿主机旧目录）
         step "从镜像提取新 dist 到运行中容器..."
-        docker run --rm \
-            -v "$(pwd)/frontend/dist:/dist_out" \
-            --entrypoint /bin/sh \
-            "${LATEST_IMAGE}" \
-            -c "cp -r /app/frontend/dist/. /dist_out/ 2>/dev/null || true"
-        docker cp frontend/dist/. "${CONTAINER_NAME}:/app/frontend/dist/"
+        TEMP_CONTAINER=$(docker create "${LATEST_IMAGE}")
+        docker cp "${TEMP_CONTAINER}:/app/frontend/dist/." "${CONTAINER_NAME}:/app/frontend/dist/"
+        docker rm "${TEMP_CONTAINER}"
 
         # 同步后端代码 + 配置文件
         docker cp backend/. "${CONTAINER_NAME}:/app/backend/"
