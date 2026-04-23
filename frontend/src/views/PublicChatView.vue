@@ -17,10 +17,17 @@
 
     <main class="report-body" ref="scrollContainer">
       <!-- Welcome State -->
-      <div v-if="!loading && !results.answer" class="welcome-screen">
+      <div v-if="!loading && !results.answer && !results.searched" class="welcome-screen">
         <div class="empty-icon">🔎</div>
         <h2>知识库分析助手</h2>
         <p>请在下方输入您的问题，我将为您检索图谱并生成详细的技术报告</p>
+      </div>
+
+      <!-- No Results State -->
+      <div v-if="!loading && !results.answer && results.searched" class="no-results-screen">
+        <div class="empty-icon">📭</div>
+        <h2>未检索到相关结果</h2>
+        <p>当前知识库中未找到与"{{ currentQuery }}"相关的内容，请尝试更换关键词或调整检索范围</p>
       </div>
 
       <!-- QA Result Report (与 /ai-qa Output 节点一致) -->
@@ -332,7 +339,7 @@ const handleSearch = async () => {
   userInput.value = ''
 
   // Reset results
-  results.value = { rows: [], facts: [], rerank_results: [], answer: '' }
+  results.value = { rows: [], facts: [], rerank_results: [], answer: '', searched: false }
   evidenceCanvasRefs.value = {}
 
   try {
@@ -360,6 +367,7 @@ const handleSearch = async () => {
 
     if (filteredRows.length === 0) {
       loadingMessage.value = '未检索到结果'
+      results.value.searched = true
       loading.value = false
       return
     }
@@ -643,10 +651,21 @@ onMounted(async () => {
 }
 
 /* ========== Misc ========== */
-.loading-screen, .welcome-screen {
+.loading-screen, .welcome-screen, .no-results-screen {
   text-align: center;
   margin-top: 10vh;
   color: #999;
+}
+
+.no-results-screen h2 {
+  color: #c0392b;
+}
+
+.no-results-screen p {
+  color: #7f8c8d;
+  max-width: 500px;
+  margin: 0 auto;
+  line-height: 1.6;
 }
 
 .empty-icon {
