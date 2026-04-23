@@ -3092,7 +3092,16 @@ topic：{topic}
                     for chunk in chunks_data:
                         c_id = chunk.get('chunk_id') or chunk.get('metadata', {}).get('chunk_id', '')
                         if c_id:
-                            chunk_content_map[c_id] = (chunk.get('content') or chunk.get('text') or '').strip()
+                            # table 类型 chunk：content 只有 caption/占位符，需提取 table_content 获取实际表格内容
+                            if chunk.get('type') == 'table':
+                                caption = (chunk.get('content') or '').strip()
+                                table_html = (chunk.get('table_content') or '').strip()
+                                if table_html:
+                                    chunk_content_map[c_id] = f"{caption}\n{table_html}" if caption else table_html
+                                else:
+                                    chunk_content_map[c_id] = caption
+                            else:
+                                chunk_content_map[c_id] = (chunk.get('content') or chunk.get('text') or '').strip()
                     chunk_content_map_built = True
 
                 if len(chunk_ids) > 1:
@@ -3243,6 +3252,19 @@ topic：{topic}
                             f"[VLM诊断] 写回 images[{i}]: status={result['status']}, "
                             f"vlm_content 旧len={len(old_val)}, 新len={len(new_val) if new_val else 0}"
                         )
+
+                # 将成功的 VLM 描述追加到 clause.content，确保进入 Neo4j summary 和 QA Pipeline
+                vlm_texts = []
+                for img in clause.metadata.get('images', []):
+                    if img.get('vlm_status') == 'ok' and img.get('img_vlm_content'):
+                        caption = img.get('caption', '') or '（无图注）'
+                        vlm_texts.append(f"【图注：{caption}】{img['img_vlm_content']}")
+                if vlm_texts:
+                    clause.content += "\n\n--- 关联图片内容 ---\n" + "\n\n".join(vlm_texts)
+                    self.logger.info(
+                        f"[VLM诊断] clause={clause.clause_id}: content 已追加 VLM 描述 "
+                        f"({len(vlm_texts)} 张图片, 追加 {sum(len(t) for t in vlm_texts)} 字符)"
+                    )
 
             self._report_progress(-1, f"[VLM分析] 完成: 成功 {vlm_count} 张，失败 {vlm_fail} 张")
         else:
