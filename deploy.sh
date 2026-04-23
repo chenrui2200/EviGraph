@@ -153,8 +153,13 @@ elif check_base_exists; then
 
         step "同步代码到容器..."
 
-        # 清理旧的前端构建产物，避免宿主机残留文件导致增量部署时前端未更新
-        rm -rf frontend/dist
+        # 清理旧的前端构建产物（容器内root创建的，用docker容器来清理避免宿主机权限不足）
+        docker run --rm \
+            -v "$(pwd)/frontend/dist:/target" \
+            --entrypoint /bin/sh \
+            alpine:latest \
+            -c "rm -rf /target/* /target/.* 2>/dev/null; exit 0" \
+            2>/dev/null || true
         mkdir -p frontend/dist
 
         # 前端 rebuild（利用 Stage 1 Node.js，靠 cache 自动判断变更层）
