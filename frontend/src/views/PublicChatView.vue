@@ -30,8 +30,15 @@
         <p>当前知识库中未找到与"{{ currentQuery }}"相关的内容，请尝试更换关键词或调整检索范围</p>
       </div>
 
+      <!-- Evidence Rendering Placeholder -->
+      <div v-if="results.answer && isRenderingEvidence" class="report-loading-placeholder">
+        <div class="skeleton-line title"></div>
+        <div class="skeleton-line content"></div>
+        <div class="rendering-hint">正在渲染证据截图...</div>
+      </div>
+
       <!-- QA Result Report (与 /ai-qa Output 节点一致) -->
-      <div v-if="results.answer" class="qa-result-container">
+      <div v-if="results.answer && !isRenderingEvidence" class="qa-result-container">
         <!-- 1. Knowledge Sources -->
         <div class="result-section">
           <div class="section-header">📚 检索依据原文</div>
@@ -123,6 +130,7 @@ const loadingMessage = ref('正在分析中...')
 const scrollContainer = ref(null)
 const textareaRef = ref(null)
 const currentQuery = ref('')
+const isRenderingEvidence = ref(false)
 
 // Results state
 const results = ref({
@@ -403,9 +411,11 @@ const handleSearch = async () => {
       results.value.answer = llmRes.data.answer || ''
     }
 
-    // Render evidence screenshots
-    nextTick(() => {
-      renderEvidenceScreenshots()
+    // 先设置渲染中状态，等 canvas 截图全部绘制完成后再展示最终 report
+    isRenderingEvidence.value = true
+    nextTick(async () => {
+      await renderEvidenceScreenshots()
+      isRenderingEvidence.value = false
       scrollToTop()
     })
   } catch (err) {
@@ -689,6 +699,14 @@ onMounted(async () => {
 
 .skeleton-line.title { width: 30%; height: 20px; }
 .skeleton-line.content { width: 100%; height: 15px; }
+
+.rendering-hint {
+  text-align: center;
+  font-size: 13px;
+  color: #409eff;
+  font-weight: 600;
+  padding: 16px 0;
+}
 
 @keyframes pulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
 @keyframes spin { to { transform: rotate(360deg); } }
