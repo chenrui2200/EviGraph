@@ -30,15 +30,8 @@
         <p>当前知识库中未找到与"{{ currentQuery }}"相关的内容，请尝试更换关键词或调整检索范围</p>
       </div>
 
-      <!-- Evidence Rendering Placeholder -->
-      <div v-if="results.answer && isRenderingEvidence" class="report-loading-placeholder">
-        <div class="skeleton-line title"></div>
-        <div class="skeleton-line content"></div>
-        <div class="rendering-hint">正在渲染证据截图...</div>
-      </div>
-
       <!-- QA Result Report (与 /ai-qa Output 节点一致) -->
-      <div v-if="results.answer && !isRenderingEvidence" class="qa-result-container">
+      <div v-if="results.answer" class="qa-result-container">
         <!-- 1. Knowledge Sources -->
         <div class="result-section">
           <div class="section-header">📚 检索依据原文</div>
@@ -317,7 +310,7 @@ const loadApp = async () => {
       appConfig.value = {
         selectedGraphIds: resolvedGraphIds,
         rootTypes: wf.rootTypes || ['Entity', 'Term'],
-        similarityThreshold: wf.similarityThreshold ?? 50,
+        similarityThreshold: wf.similarityThreshold ?? 0,
         topK: wf.topK ?? 5,
         rerankMinScore: wf.rerankMinScore ?? 0,
         temperature: wf.temperature || 0.7,
