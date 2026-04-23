@@ -162,11 +162,14 @@ elif check_base_exists; then
         ${COMPOSE_CMD} build
         docker tag "${LATEST_IMAGE}" "${BASE_IMAGE}"
 
-        # 从刚构建的镜像里提取新 dist，直接复制到运行中容器（不经过宿主机旧目录）
+        # 从镜像提取 dist 到宿主机（先清理避免旧文件残留），再 cp 到运行中容器
         step "从镜像提取新 dist 到运行中容器..."
-        TEMP_CONTAINER=$(docker create "${LATEST_IMAGE}")
-        docker cp "${TEMP_CONTAINER}:/app/frontend/dist/." "${CONTAINER_NAME}:/app/frontend/dist/"
-        docker rm "${TEMP_CONTAINER}"
+        docker run --rm \
+            -v "$(pwd)/frontend/dist:/dist_out" \
+            --entrypoint /bin/sh \
+            "${LATEST_IMAGE}" \
+            -c "cp -r /app/frontend/dist/. /dist_out/ 2>/dev/null || true"
+        docker cp frontend/dist/. "${CONTAINER_NAME}:/app/frontend/dist/"
 
         # 同步后端代码 + 配置文件
         docker cp backend/. "${CONTAINER_NAME}:/app/backend/"
