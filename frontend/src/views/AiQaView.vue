@@ -614,7 +614,6 @@ const parsedResult = computed(() => {
 
 const renderEvidenceScreenshots = async (type = 'node') => {
   const targetFacts = results.value.facts
-  // 保留索引以便匹配 canvas ref
   const validFacts = targetFacts.reduce((acc, f, idx) => {
     if (f.bbox && f.bbox.length === 4 && f.graph_id && f.source) {
       acc.push({ ...f, _renderIdx: idx })
@@ -624,63 +623,49 @@ const renderEvidenceScreenshots = async (type = 'node') => {
 
   if (validFacts.length === 0) return
 
-  // Ensure PDF.js is ready
   if (!pdfjsLib.value) await initPdfJs()
 
-  // Cache for PDF documents
-  const pdfDocCache = {}
-
+  // 按 PDF 分组：不同 PDF 之间并行，同一 PDF 内串行
+  const factsByPdf = new Map()
   for (const fact of validFacts) {
+    const cacheKey = `${fact.graph_id}:${fact.source}`
+    if (!factsByPdf.has(cacheKey)) factsByPdf.set(cacheKey, [])
+    factsByPdf.get(cacheKey).push(fact)
+  }
+
+  // 渲染单条 fact
+  const renderSingleFact = async (fact, pdfDoc) => {
     const renderIdx = fact._renderIdx
     const canvas = evidenceCanvasRefs.value[type][renderIdx]
-    if (!canvas) continue
+    if (!canvas) return
 
     try {
-      const cacheKey = `${fact.graph_id}:${fact.source}`
-      let pdfDoc = pdfDocCache[cacheKey]
-
-      if (!pdfDoc) {
-        const apiUrl = `${window.location.origin}/api/graph/project/${fact.graph_id}/document/${encodeURIComponent(fact.source)}`
-        const response = await fetch(apiUrl)
-        if (!response.ok) continue
-        const blob = await response.blob()
-        const arrayBuffer = await blob.arrayBuffer()
-        pdfDoc = await pdfjsLib.value.getDocument({ data: arrayBuffer }).promise
-        pdfDocCache[cacheKey] = pdfDoc
-      }
-
       const page = await pdfDoc.getPage(fact.page || 1)
       const context = canvas.getContext('2d')
 
-      // 使用 pdf.js 实际解析的页面尺寸作为比例基准（和 PdfViewer 完全一致）
       const unscaledViewport = page.getViewport({ scale: 1 })
       const pageW = unscaledViewport.width
       const pageH = unscaledViewport.height
 
-      // Logic: 横向截取整页宽度，纵向截取 bbox 附近区域
       const bbox = fact.bbox
-      const vPadding = type === 'modal' ? 360 : 180
+      const vPadding = type === 'modal' ? 240 : 180
       const rawCropY = bbox[1] - vPadding
       const rawCropH = (bbox[3] - bbox[1]) + vPadding * 2
 
-      // 横向：完整页面宽度，确保 PDF 左右不截断
       const cropX = 0
       const cropW = pageW
-      // 纵向：限制在页面边界内
       const cropY = Math.max(0, Math.min(rawCropY, pageH - rawCropH))
       const cropH = Math.min(rawCropH, pageH - cropY)
 
-      const scale = type === 'modal' ? 3.0 : 2.0
+      // modal 模式下降低 scale 减少渲染开销（2.5 兼顾清晰度与性能）
+      const scale = type === 'modal' ? 2.5 : 2.0
       const viewport = page.getViewport({ scale })
 
-      // 用 page_width 计算实际比例，处理 pdf.js 解析宽度与 MinerU 报告值不一致的情况
       const xRatio = viewport.width / pageW
       const yRatio = viewport.height / pageH
 
-      const tempCanvas = document.createElement('canvas')
-      tempCanvas.width = viewport.width
-      tempCanvas.height = viewport.height
-      const tempCtx = tempCanvas.getContext('2d')
+      // 复用 tempCanvas，避免频繁创建/销毁
+      const { canvas: tempCanvas, ctx: tempCtx } = _getTempCanvas(viewport.width, viewport.height)
 
       await page.render({ canvasContext: tempCtx, viewport }).promise
 
@@ -689,7 +674,7 @@ const renderEvidenceScreenshots = async (type = 'node') => {
       const sW = cropW * xRatio
       const sH = cropH * yRatio
 
-      const targetWidth = type === 'modal' ? 1100 : 480
+      const targetWidth = type === 'modal' ? 800 : 480
       canvas.width = targetWidth
       canvas.height = (sH / sW) * targetWidth
 
@@ -712,6 +697,34 @@ const renderEvidenceScreenshots = async (type = 'node') => {
       console.error(`Failed to render screenshot for fact ${renderIdx}:`, err)
     }
   }
+
+  // 并行处理不同 PDF，同一 PDF 内串行渲染
+  await Promise.all(
+    Array.from(factsByPdf.entries()).map(async ([cacheKey, facts]) => {
+      let pdfDoc = _pdfDocCache[cacheKey]
+      if (!pdfDoc) {
+        const fact = facts[0]
+        const apiUrl = `${window.location.origin}/api/graph/project/${fact.graph_id}/document/${encodeURIComponent(fact.source)}`
+        try {
+          const response = await fetch(apiUrl)
+          if (!response.ok) {
+            console.warn(`[Evidence] PDF fetch failed: ${response.status} ${cacheKey}`)
+            return
+          }
+          const blob = await response.blob()
+          const arrayBuffer = await blob.arrayBuffer()
+          pdfDoc = await pdfjsLib.value.getDocument({ data: arrayBuffer }).promise
+          _pdfDocCache[cacheKey] = pdfDoc
+        } catch (err) {
+          console.error(`[Evidence] Failed to load PDF ${cacheKey}:`, err)
+          return
+        }
+      }
+      for (const fact of facts) {
+        await renderSingleFact(fact, pdfDoc)
+      }
+    })
+  )
 }
 
 const toggleFullResult = () => {
@@ -726,6 +739,26 @@ const toggleFullResult = () => {
 // Document Viewer State
 const showDocViewer = ref(false)
 const pdfjsLib = ref(null)
+
+// 组件级 PDF 缓存和 tempCanvas 池（跨 node/modal 复用，避免重复下载和创建）
+const _pdfDocCache = {}
+const _tempCanvasPool = {}
+
+function _getTempCanvas(width, height) {
+  const key = `${width}:${height}`
+  let canvas = _tempCanvasPool[key]
+  if (canvas) {
+    // 复用：清除已有内容
+    const ctx = canvas.getContext('2d')
+    ctx.clearRect(0, 0, width, height)
+    return { canvas, ctx }
+  }
+  canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  _tempCanvasPool[key] = canvas
+  return { canvas, ctx: canvas.getContext('2d') }
+}
 
 const currentDoc = ref({
   filename: '',
