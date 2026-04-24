@@ -93,13 +93,22 @@
           <p class="api-note">测试 GraphRAG 检索准确性</p>
           <p class="description">图谱构建已完成。建议通过视觉化的命中测试验证知识库的召回能力和关联结构。</p>
 
-          <button
-            v-if="currentPhase >= 1 && !buildProgress"
-            class="action-btn hit-test-btn"
-            @click="router.push({ name: 'HitTest', params: { projectId: projectData.project_id } })"
-          >
-            进入命中测试面板 🔍
-          </button>
+          <div class="step-actions">
+            <button
+              v-if="currentPhase >= 1 && !buildProgress"
+              class="action-btn hit-test-btn"
+              @click="router.push({ name: 'HitTest', params: { projectId: projectData.project_id } })"
+            >
+              进入命中测试面板 🔍
+            </button>
+            <button
+              v-if="currentPhase >= 1 && !buildProgress"
+              class="action-btn graph-search-btn"
+              @click="router.push({ name: 'GraphSearch', params: { projectId: projectData.project_id } })"
+            >
+              图谱检索测试 🕸️
+            </button>
+          </div>
 
         </div>
       </div>
@@ -380,6 +389,20 @@ watch(() => props.systemLogs.length, () => {
 
 .start-build-btn {
   background: #FF5722;
+}
+
+.step-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.step-actions .action-btn {
+  margin-bottom: 0;
+}
+
+.graph-search-btn {
+  background: #409eff;
 }
 
 .progress-section {

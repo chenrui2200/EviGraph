@@ -1252,6 +1252,156 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             return self._call_with_retry(session.execute_read, _read)
 
+    def search_nodes_by_name(
+        self,
+        graph_id: str,
+        query: str,
+        node_type: str = None,
+        node_types: List[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        按名称模糊搜索节点，支持单类型或多类型过滤。
+        使用 toLower CONTAINS 匹配，不依赖向量索引。
+        """
+        keyword = query.strip().lower()
+        if not keyword:
+            return []
+
+        def _read(tx):
+            # 多类型过滤
+            if node_types and isinstance(node_types, list):
+                safe_types = []
+                for t in node_types:
+                    safe = _safe_label(t, VALID_NODE_LABELS)
+                    if safe:
+                        safe_types.append(safe)
+                if not safe_types:
+                    logger.warning(f"[storage] search_nodes_by_name: all node_types invalid: {node_types}")
+                    return []
+
+                label_conditions = " OR ".join([f"n:{lt}" for lt in safe_types])
+                has_clause = "Clause" in safe_types
+                if has_clause:
+                    cypher = f"""
+                        MATCH (n {{graph_id: $gid}})
+                        WHERE ({label_conditions})
+                          AND (toLower(n.name) CONTAINS $keyword
+                               OR toLower(n.topic) CONTAINS $keyword
+                               OR (n:Clause AND toLower(n.clause_id) CONTAINS $keyword))
+                        RETURN n, labels(n) AS labels
+                        LIMIT $limit
+                    """
+                else:
+                    cypher = f"""
+                        MATCH (n {{graph_id: $gid}})
+                        WHERE ({label_conditions})
+                          AND (toLower(n.name) CONTAINS $keyword
+                               OR toLower(n.topic) CONTAINS $keyword)
+                        RETURN n, labels(n) AS labels
+                        LIMIT $limit
+                    """
+            # 单类型过滤（向后兼容）
+            elif node_type and node_type != "All":
+                safe_label = _safe_label(node_type, VALID_NODE_LABELS)
+                if not safe_label:
+                    logger.warning(f"[storage] search_nodes_by_name: invalid label '{node_type}'")
+                    return []
+                if safe_label == "Clause":
+                    cypher = f"""
+                        MATCH (n:{safe_label} {{graph_id: $gid}})
+                        WHERE toLower(n.name) CONTAINS $keyword
+                           OR toLower(n.topic) CONTAINS $keyword
+                           OR toLower(n.clause_id) CONTAINS $keyword
+                        RETURN n, labels(n) AS labels
+                        LIMIT $limit
+                    """
+                else:
+                    cypher = f"""
+                        MATCH (n:{safe_label} {{graph_id: $gid}})
+                        WHERE toLower(n.name) CONTAINS $keyword
+                           OR toLower(n.topic) CONTAINS $keyword
+                        RETURN n, labels(n) AS labels
+                        LIMIT $limit
+                    """
+            else:
+                cypher = """
+                    MATCH (n {graph_id: $gid})
+                    WHERE (n:Entity OR n:Topic OR n:Clause)
+                      AND (toLower(n.name) CONTAINS $keyword
+                           OR toLower(n.topic) CONTAINS $keyword
+                           OR (n:Clause AND toLower(n.clause_id) CONTAINS $keyword))
+                    RETURN n, labels(n) AS labels
+                    LIMIT $limit
+                """
+            result = tx.run(cypher, gid=graph_id, keyword=keyword, limit=limit)
+            return [self._node_to_dict(record["n"], record["labels"]) for record in result]
+
+        with self._driver.session() as session:
+            return self._call_with_retry(session.execute_read, _read)
+
+    def get_node_neighborhood(
+        self,
+        node_uuid: str,
+        graph_id: str,
+    ) -> Dict[str, Any]:
+        """
+        获取节点的 1 跳邻域：中心节点、双向邻边、邻接节点。
+        返回 {center_node, nodes, edges}
+        """
+        def _read(tx):
+            # 中心节点
+            center_result = tx.run(
+                """
+                MATCH (n)
+                WHERE n.uuid = $uuid AND n.graph_id = $gid
+                RETURN n, labels(n) AS labels
+                LIMIT 1
+                """,
+                uuid=node_uuid, gid=graph_id,
+            )
+            center_record = center_result.single()
+            if not center_record:
+                return None
+            center_node = self._node_to_dict(center_record["n"], center_record["labels"])
+
+            # 双向邻边 + 邻接节点
+            edge_result = tx.run(
+                """
+                MATCH (n)
+                WHERE n.uuid = $uuid AND n.graph_id = $gid
+                OPTIONAL MATCH (n)-[r:RELATION|HAS_TOPIC|MENTIONS|DEFINES]-(m)
+                WHERE r.graph_id = $gid
+                RETURN r, n.uuid AS src_uuid, m.uuid AS tgt_uuid, m, labels(m) AS m_labels
+                LIMIT 50
+                """,
+                uuid=node_uuid, gid=graph_id,
+            )
+
+            neighbor_nodes = {}
+            edges = []
+            for record in edge_result:
+                rel = record.get("r")
+                if not rel:
+                    continue
+                m = record.get("m")
+                if m:
+                    m_uuid = m.get("uuid", "")
+                    if m_uuid and m_uuid != node_uuid and m_uuid not in neighbor_nodes:
+                        neighbor_nodes[m_uuid] = self._node_to_dict(m, record["m_labels"])
+
+                edge_dict = self._edge_to_dict(rel, record["src_uuid"], record["tgt_uuid"])
+                edges.append(edge_dict)
+
+            return {
+                "center_node": center_node,
+                "nodes": list(neighbor_nodes.values()),
+                "edges": edges,
+            }
+
+        with self._driver.session() as session:
+            return self._call_with_retry(session.execute_read, _read)
+
     # ----------------------------------------------------------------
     # Read edges
     # ----------------------------------------------------------------

@@ -172,3 +172,78 @@ def get_graph_data(graph_id: str):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@graph_bp.route('/ops/search-nodes', methods=['POST'])
+@api_handler
+def search_nodes():
+    """
+    按节点名称模糊搜索 + 类型过滤。
+
+    Request:
+        {
+            "graph_id": "proj_xxx",
+            "query": "导体",
+            "node_types": ["Entity", "Term"],  // 可选: 多选类型数组
+            "node_type": "Entity",              // 向后兼容: 单类型字符串
+            "limit": 20
+        }
+    """
+    from .graph import _get_storage
+
+    data = request.get_json() or {}
+    graph_id = data.get('graph_id')
+    query = data.get('query', '').strip()
+    node_types = data.get('node_types')
+    node_type = data.get('node_type', 'All')
+    limit = data.get('limit', 20)
+
+    if not graph_id:
+        return jsonify({"success": False, "error": "graph_id is required"}), 400
+    if not query:
+        return jsonify({"success": False, "error": "query is required"}), 400
+
+    try:
+        storage = _get_storage()
+        if node_types and isinstance(node_types, list):
+            nodes = storage.search_nodes_by_name(graph_id, query, node_type=None, node_types=node_types, limit=limit)
+        else:
+            nodes = storage.search_nodes_by_name(graph_id, query, node_type=node_type, limit=limit)
+        return jsonify({"success": True, "data": {"nodes": nodes}})
+    except Exception as e:
+        logger.error(f"search_nodes error: {e}\n{traceback.format_exc()}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@graph_bp.route('/ops/node-neighborhood', methods=['POST'])
+@api_handler
+def node_neighborhood():
+    """
+    获取节点的 1 跳邻域（中心节点 + 邻接节点 + 邻边）。
+
+    Request:
+        {
+            "graph_id": "proj_xxx",
+            "node_uuid": "uuid"
+        }
+    """
+    from .graph import _get_storage
+
+    data = request.get_json() or {}
+    graph_id = data.get('graph_id')
+    node_uuid = data.get('node_uuid')
+
+    if not graph_id:
+        return jsonify({"success": False, "error": "graph_id is required"}), 400
+    if not node_uuid:
+        return jsonify({"success": False, "error": "node_uuid is required"}), 400
+
+    try:
+        storage = _get_storage()
+        result = storage.get_node_neighborhood(node_uuid, graph_id)
+        if not result:
+            return jsonify({"success": False, "error": "Node not found"}), 404
+        return jsonify({"success": True, "data": result})
+    except Exception as e:
+        logger.error(f"node_neighborhood error: {e}\n{traceback.format_exc()}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+

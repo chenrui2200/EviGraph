@@ -369,3 +369,31 @@ export function reAnnotateMineru(projectId, parseMethod = 'ocr') {
     data: { project_id: projectId, parse_method: parseMethod }
   })
 }
+
+// ============================================================================
+// 图谱检索测试 API
+// ============================================================================
+
+/**
+ * 按名称模糊搜索节点
+ * @param {Object} data - { graph_id, query, node_type, limit }
+ */
+export function searchNodes(data) {
+  return service({
+    url: '/api/graph/ops/search-nodes',
+    method: 'post',
+    data
+  })
+}
+
+/**
+ * 获取节点 1 跳邻域
+ * @param {Object} data - { graph_id, node_uuid }
+ */
+export function getNodeNeighborhood(data) {
+  return service({
+    url: '/api/graph/ops/node-neighborhood',
+    method: 'post',
+    data
+  })
+}

@@ -7,6 +7,7 @@ import PublicChatView from '../views/PublicChatView.vue'
 import ChunkAnalysisView from '../views/ChunkAnalysisView.vue'
 import KbPipelineLaunchView from '../views/KbPipelineLaunchView.vue'
 import KbPipelineTrackView from '../views/KbPipelineTrackView.vue'
+import GraphSearchView from '../views/GraphSearchView.vue'
 
 const routes = [
   {
@@ -53,6 +54,12 @@ const routes = [
     path: '/kb-pipeline/:pipelineId',
     name: 'KbPipelineTrack',
     component: KbPipelineTrackView,
+    props: true
+  },
+  {
+    path: '/graph-search/:projectId',
+    name: 'GraphSearch',
+    component: GraphSearchView,
     props: true
   },
 ]
