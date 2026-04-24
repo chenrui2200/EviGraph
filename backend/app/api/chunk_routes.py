@@ -496,7 +496,12 @@ def get_chunk_analysis(project_id: str):
     sorted_chapters = sorted(chapter_tree.items(), key=_chapter_sort_key)
 
     total_terms = sum(len(c.get('terms', [])) for c in clauses)
-    total_entities = sum(len(c.get('entities', [])) for c in clauses)
+    # 从 topics 数组统计 entities（每 topic 的 entities 独立计数）
+    total_entities = 0
+    for c in clauses:
+        for tp in c.get('topics', []):
+            if isinstance(tp, dict):
+                total_entities += len(tp.get('entities', []))
 
     element_stats = {}
     for element in elements:

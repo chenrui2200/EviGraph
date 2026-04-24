@@ -182,10 +182,8 @@ def clause_to_dict(clause: "ClauseSegment") -> Dict[str, Any]:
             for r in clause.referenced_clauses
         ] if clause.referenced_clauses else [],
         "referenced_standards": clause.referenced_standards or [],
-        # 当前 LLM 实际提取的知识实体
-        "entities": clause.metadata.get("entities", []) if clause.metadata else [],
-        # 条款语义摘要
-        "topic": clause.metadata.get("topic", "") if clause.metadata else "",
+        # 多主题结构化数据（唯一权威来源）
+        "topics": clause.metadata.get("topics", []) if clause.metadata else [],
         # 以下字段当前未启用，预留接口
         "triplets": [],
         "clause_items": [],
@@ -817,33 +815,48 @@ topic：{topic}
 
     # ============================================================
     # 合并提取 Prompt（单阶段替代原来的 Topic + Entities + Terms 三阶段）
+    # 支持多 topic：一条条文可能涉及多个独立技术主题，每个主题下提取关联实体
     # ============================================================
     UNIFIED_SYSTEM_PROMPT = """你是一个工程规范文档的智能分析专家。
 
-你的任务是从单条条文中同时提取以下三类信息：
-1. topic（主题摘要）
-2. entities（知识实体）
-3. terms（术语定义）
+你的任务是从单条条文中同时提取以下信息：
+1. topics（主题摘要列表）- 一条条文可能涉及多个独立技术主题
+2. terms（术语定义）
 
 ## 输出格式要求
 请严格输出 JSON 格式，不要包含任何 markdown 代码块标记：
-{{"topic": "主题摘要（不超过30字）", "entities": ["实体1", "实体2"], "terms": [{{"term_name": "术语名称", "abbreviation": "缩写（可选）", "definition": "定义原文"}}]}}
+{{"topics": [{{"topic": "主题1（不超过30字）", "entities": ["实体1", "实体2"]}}, {{"topic": "主题2（不超过30字）", "entities": ["实体3"]}}], "terms": [{{"term_name": "术语名称", "abbreviation": "缩写（可选）", "definition": "定义原文"}}]}}
 
 ## 各字段要求
-- topic：简短说明条文介绍什么方面的知识，不超过30字
-- entities：只提取技术相关的实体名词（设备、系统、材料、参数、场所等），数量严格控制在 {min_cnt}-{max_cnt} 个，必须与 topic 高度相关
+- topics：数组。如果条文涉及多个独立技术主题，拆分为多个 topic 项；每个 topic 包含：
+  - topic：简短说明该主题介绍什么方面的知识，不超过30字
+  - entities：提取与该 topic 高度相关的技术实体名词（设备、系统、材料、参数、场所、工具等），每个 topic 控制在 3-8 个。**必须包含该 topic 所针对的核心对象（如被测量/被安装/被检验的主体，例如"现浇结构"），不得遗漏。**
+- 所有 topic 的 entities 总数控制在 {min_cnt}-{max_cnt} 个
 - terms：只提取条文中明确给出定义的术语，每条条文最多 1-3 个；没有则不返回
 
-如果没有术语定义，terms 为空列表 []；如果没有实体，entities 为空列表 []。"""
+拆分 topic 的原则：
+- 如果条文同时涉及"导体材料选择"和"绝缘层厚度要求"，应拆分为两个 topic
+- 如果条文只讲一件事，topics 数组长度为 1
+- 每个 topic 的 entities 必须和该 topic 高度相关，不要混放
+- **核心对象不得仅出现在 topic 标题中，必须同时列入 entities**
+
+## 正确与错误示例
+❌ 错误（遗漏核心对象）：
+  {{"topic": "现浇结构尺寸偏差允许值及检验方法", "entities": ["尺寸偏差", "允许值", "检验方法"]}}
+✅ 正确（核心对象必须在 entities 中）：
+  {{"topic": "现浇结构尺寸偏差允许值及检验方法", "entities": ["现浇结构", "尺寸偏差", "允许值", "检验方法"]}}
+
+如果没有术语定义，terms 为空列表 []；如果没有实体，topics 为空列表 []。"""
 
     UNIFIED_USER_PROMPT = """请分析以下工程规范条文：
 
 条文内容：{clause_text}
 
 要求：
-1. 生成 topic
-2. 提取 {min_cnt}-{max_cnt} 个与 topic 高度相关的知识实体
-3. 提取条文中明确给出定义的术语（最多 1-3 个）
+1. 识别条文中涉及的所有独立技术主题，拆分为 topics 数组（每个 topic 不超过30字）
+2. 每个 topic 下提取与该主题高度相关的知识实体（3-8 个）
+3. 所有 topic 的实体总数控制在 {min_cnt}-{max_cnt} 个
+4. 提取条文中明确给出定义的术语（最多 1-3 个）
 
 请严格输出 JSON："""
 
@@ -851,35 +864,49 @@ topic：{topic}
     # 批量提取 Prompt
     # ============================================================
     BATCH_SYSTEM_PROMPT = """你是一个工程规范文档的智能分析专家。
-你的任务是从多条条文中同时提取以下三类信息，对每一条条文逐一分析：
-1. topic（主题摘要）
-2. entities（知识实体）
-3. terms（术语定义）
+你的任务是从多条条文中同时提取以下信息，对每一条条文逐一分析：
+1. topics（主题摘要列表）- 一条条文可能涉及多个独立技术主题
+2. terms（术语定义）
 
 ## 输出格式要求
 请严格输出 JSON 格式，不要包含任何 markdown 代码块标记：
 {{"results": [
-  {{"clause_id": "条文编号1", "topic": "主题摘要（不超过30字）", "entities": ["实体1", "实体2"], "terms": [{{"term_name": "术语名称", "abbreviation": "缩写（可选）", "definition": "定义原文"}}]}},
-  {{"clause_id": "条文编号2", "topic": "主题摘要（不超过30字）", "entities": ["实体1", "实体2"], "terms": []}}
+  {{"clause_id": "条文编号1", "topics": [{{"topic": "主题1", "entities": ["实体1", "实体2"]}}, {{"topic": "主题2", "entities": ["实体3"]}}], "terms": [{{"term_name": "术语名称", "abbreviation": "缩写", "definition": "定义原文"}}]}},
+  {{"clause_id": "条文编号2", "topics": [{{"topic": "主题摘要", "entities": ["实体1", "实体2"]}}], "terms": []}}
 ]}}
 
 ## 各字段要求
-- topic：简短说明条文介绍什么方面的知识，不超过30字
-- entities：只提取技术相关的实体名词（设备、系统、材料、参数、场所等），数量严格控制在 {min_cnt}-{max_cnt} 个，必须与 topic 高度相关
+- topics：数组。如果条文涉及多个独立技术主题，拆分为多个 topic 项：
+  - topic：简短说明该主题介绍什么方面的知识，不超过30字
+  - entities：提取与该 topic 高度相关的技术实体名词（设备、系统、材料、参数、场所、工具等），每个 topic 控制在 3-8 个。**必须包含该 topic 所针对的核心对象（如被测量/被安装/被检验的主体，例如"现浇结构"），不得遗漏。**
+- 所有 topic 的 entities 总数控制在 {min_cnt}-{max_cnt} 个
 - terms：只提取条文中明确给出定义的术语，每条条文最多 1-3 个；没有则不返回
 - 必须保证 results 数组中的 clause_id 与输入完全一致，顺序可以不同，但不能遗漏任何一条
 
-如果没有术语定义，terms 为空列表 []；如果没有实体，entities 为空列表 []。"""
+拆分 topic 的原则：
+- 如果条文同时涉及"导体材料选择"和"绝缘层厚度要求"，应拆分为两个 topic
+- 如果条文只讲一件事，topics 数组长度为 1
+- 每个 topic 的 entities 必须和该 topic 高度相关
+- **核心对象不得仅出现在 topic 标题中，必须同时列入 entities**
+
+## 正确与错误示例
+❌ 错误（遗漏核心对象）：
+  {{"topic": "现浇结构尺寸偏差允许值及检验方法", "entities": ["尺寸偏差", "允许值", "检验方法"]}}
+✅ 正确（核心对象必须在 entities 中）：
+  {{"topic": "现浇结构尺寸偏差允许值及检验方法", "entities": ["现浇结构", "尺寸偏差", "允许值", "检验方法"]}}
+
+如果没有术语定义，terms 为空列表 []。"""
 
     BATCH_USER_PROMPT = """请分析以下 {batch_size} 条工程规范条文：
 
 {clauses_text}
 
 要求：
-1. 对每一条条文生成 topic
-2. 每条条文提取 {min_cnt}-{max_cnt} 个与 topic 高度相关的知识实体
-3. 提取条文中明确给出定义的术语（每条条文最多 1-3 个）
-4. 必须按 clause_id 逐一输出，不能遗漏
+1. 对每一条条文识别所有独立技术主题，拆分为 topics 数组
+2. 每个 topic 下提取与该主题高度相关的知识实体（3-8 个）
+3. 所有 topic 的实体总数控制在 {min_cnt}-{max_cnt} 个
+4. 提取条文中明确给出定义的术语（每条条文最多 1-3 个）
+5. 必须按 clause_id 逐一输出，不能遗漏
 
 请严格输出 JSON："""
 
@@ -1738,6 +1765,7 @@ topic：{topic}
 
         if not clause.content:
             clause.metadata['topic'] = ""
+            clause.metadata['topics'] = []
             clause.metadata['entities'] = []
             clause.metadata['terms'] = []
             clause.metadata['semantics_enriched'] = True
@@ -1748,15 +1776,30 @@ topic：{topic}
         content_hash = self._get_clause_content_hash(clause.content)
         cached = cache.get(content_hash)
         if cached:
-            clause.metadata['topic'] = cached.get('topic', '')
-            clause.metadata['entities'] = cached.get('entities', [])
+            topics = cached.get('topics', [])
+            # 对旧缓存也执行后处理（修复遗漏的核心对象）
+            self._ensure_topic_core_entities(topics)
+            # 重新计算合并 entities
+            all_entities = []
+            seen = set()
+            for t in topics:
+                for e in t.get("entities", []):
+                    if e not in seen:
+                        seen.add(e)
+                        all_entities.append(e)
+            topic = topics[0].get("topic", "") if topics else ""
+            clause.metadata['topics'] = topics
+            clause.metadata['topic'] = topic
+            clause.metadata['entities'] = all_entities
             clause.metadata['terms'] = cached.get('terms', [])
             clause.metadata['semantics_enriched'] = True
-            self.logger.info(f"[LLM 单阶段缓存命中] clause_id={clause.clause_id}, topic={clause.metadata['topic'][:20] if clause.metadata['topic'] else '(无)'}")
+            first_topic = topic[:20] if topic else '(无)'
+            self.logger.info(f"[LLM 单阶段缓存命中] clause_id={clause.clause_id}, topic={first_topic}")
             self._push_clause_progress_log(clause)
             return
 
         min_cnt, max_cnt = entity_count_range
+        topics: List[Dict] = []
         topic = ""
         entities: List[str] = []
         terms: List[Dict] = []
@@ -1790,32 +1833,133 @@ topic：{topic}
             )
 
             if isinstance(response, dict):
-                topic = (response.get("topic") or "").strip()
-                entities = [e for e in (response.get("entities") or []) if isinstance(e, str)]
+                raw_topics = response.get("topics") or []
+                if isinstance(raw_topics, list):
+                    for t in raw_topics:
+                        if isinstance(t, dict):
+                            topic_text = (t.get("topic") or "").strip()
+                            topic_entities = [e for e in (t.get("entities") or []) if isinstance(e, str)]
+                            if topic_text:
+                                topics.append({"topic": topic_text, "entities": topic_entities})
                 terms = [t for t in (response.get("terms") or []) if isinstance(t, dict)]
             elif isinstance(response, list) and response:
                 # 异常返回：尝试把 list 当 entities
                 self.logger.warning(f"[LLM 单阶段提取] 响应为 list，降级为 entities")
                 entities = [e for e in response if isinstance(e, str)]
+                if entities:
+                    topics.append({"topic": "", "entities": entities})
             else:
                 self.logger.warning(f"[LLM 单阶段提取] 响应类型异常: {type(response)}")
         except Exception as e:
             self.logger.warning(f"[LLM 单阶段提取] 失败: {e}")
 
+        # 后处理：补回 topic 标题中的核心对象
+        self._ensure_topic_core_entities(topics)
+
+        # 计算合并后的 entities
+        all_entities = []
+        seen = set()
+        for t in topics:
+            for e in t.get("entities", []):
+                if e not in seen:
+                    seen.add(e)
+                    all_entities.append(e)
+
+        # 保留单 topic 快捷字段（首 topic）
+        topic = topics[0].get("topic", "") if topics else ""
+
+        clause.metadata['topics'] = topics
         clause.metadata['topic'] = topic
-        clause.metadata['entities'] = entities
+        clause.metadata['entities'] = all_entities
         clause.metadata['terms'] = terms
         clause.metadata['semantics_enriched'] = True
 
         # 写入缓存
         if project_id:
-            cache[content_hash] = {"topic": topic, "entities": entities, "terms": terms}
+            cache[content_hash] = {"topics": topics, "topic": topic, "entities": all_entities, "terms": terms}
             self._save_clause_cache(project_id, cache)
 
-        self.logger.info(f"[LLM 单阶段提取] 完成, clause_id={clause.clause_id}, topic={topic[:20] if topic else '(无)'}, entities={len(entities)}, terms={len(terms)}")
+        topic_summary = f"{len(topics)}个主题" if len(topics) > 1 else (topic[:20] if topic else '(无)')
+        self.logger.info(f"[LLM 单阶段提取] 完成, clause_id={clause.clause_id}, {topic_summary}, entities={len(all_entities)}, terms={len(terms)}")
 
         # 通过进度回调推送详细日志到前端
         self._push_clause_progress_log(clause)
+
+    def _ensure_topic_core_entities(self, topics: List[Dict]) -> None:
+        """后处理：确保每个 topic 的 entities 包含其核心对象（从 topic 标题提取）
+
+        LLM 有时会把 topic 标题中的主体名词遗漏在 entities 外，
+        本方法通过去掉常见功能性后缀，自动补回核心对象。
+        """
+        _TOPIC_CORE_SUFFIXES = [
+            "尺寸偏差允许值及检验方法",
+            "允许值及检验方法",
+            "偏差允许值及检验方法",
+            "质量验收规范",
+            "及检验方法",
+            "施工质量验收",
+            "质量验收",
+            "施工质量",
+            "检验方法",
+            "安装要求",
+            "设计要求",
+            "配置要求",
+            "选择要求",
+            "验收要求",
+            "允许值",
+            "尺寸偏差",
+            "偏差值",
+            "的规定",
+            "的要求",
+            "的方法",
+            "的标准",
+            "的检验",
+            "及测量",
+            "及检查",
+            "及验收",
+            "规定",
+            "要求",
+            "方法",
+            "标准",
+            "检验",
+            "验收",
+            "施工",
+            "测量",
+            "检查",
+            "选择",
+            "设计",
+            "安装",
+            "配置",
+            "设置",
+            "偏差",
+            "及",
+        ]
+
+        for t in topics:
+            topic_text = t.get("topic", "")
+            entities = t.get("entities", [])
+            if not topic_text:
+                continue
+
+            # 检查是否已有实体与 topic 标题相关（子串匹配或开头匹配）
+            has_core = any(
+                e in topic_text or topic_text.startswith(e)
+                for e in entities
+            )
+            if has_core:
+                continue
+
+            # 去掉常见后缀，提取核心对象
+            core = None
+            for suffix in _TOPIC_CORE_SUFFIXES:
+                if topic_text.endswith(suffix):
+                    candidate = topic_text[: -len(suffix)].strip()
+                    if len(candidate) >= 2:
+                        core = candidate
+                        break
+
+            if core and core not in entities:
+                entities.append(core)
 
     def _push_clause_progress_log(self, clause: ClauseSegment) -> None:
         """推送单条 clause 的提取结果日志到前端（通过 progress_callback）"""
@@ -1823,11 +1967,25 @@ topic：{topic}
             # 回调未设置时，记录到标准日志作为兜底
             self.logger.debug(f"[Clause Log] clause_id={clause.clause_id}, progress_callback=None，跳过SSE推送")
             return
-        entities = clause.metadata.get('entities', [])
-        topic = clause.metadata.get('topic', '')
+        topics = clause.metadata.get('topics', [])
+        # 从 topics 推导首 topic 和合并 entities
+        topic = topics[0].get('topic', '') if topics else ''
+        entities = []
+        seen = set()
+        for t in topics:
+            for e in t.get('entities', []):
+                if e not in seen:
+                    seen.add(e)
+                    entities.append(e)
         terms = clause.metadata.get('terms', [])
         term_info = f" | 术语: {', '.join([t.get('term_name', '') for t in (terms or [])[:2]])}" if terms else ""
-        if entities:
+
+        if len(topics) > 1:
+            # 多主题：显示主题数和实体数
+            topic_names = ', '.join([t.get('topic', '')[:15] for t in topics[:3]])
+            ellipsis = '...' if len(topics) > 3 else ''
+            log_msg = f"📝 {clause.clause_id}: {len(topics)}个主题[{topic_names}{ellipsis}] | 实体: {len(entities)}个{term_info}"
+        elif entities:
             log_msg = f"📝 {clause.clause_id}: {topic[:20] if topic else '(无)'} | 实体: {', '.join(entities[:10])}{'...' if len(entities) > 10 else ''}{term_info}"
         else:
             # entities 为空时也推送一条日志，避免完全静默
@@ -1860,6 +2018,7 @@ topic：{topic}
                 return
             if not clause.content:
                 clause.metadata['topic'] = ""
+                clause.metadata['topics'] = []
                 clause.metadata['entities'] = []
                 clause.metadata['terms'] = []
                 clause.metadata['semantics_enriched'] = True
@@ -1867,11 +2026,24 @@ topic：{topic}
             content_hash = self._get_clause_content_hash(clause.content)
             cached = cache.get(content_hash)
             if cached:
-                clause.metadata['topic'] = cached.get('topic', '')
-                clause.metadata['entities'] = cached.get('entities', [])
+                topics = cached.get('topics', [])
+                # 对旧缓存也执行后处理（修复遗漏的核心对象）
+                self._ensure_topic_core_entities(topics)
+                all_entities = []
+                seen = set()
+                for t in topics:
+                    for e in t.get("entities", []):
+                        if e not in seen:
+                            seen.add(e)
+                            all_entities.append(e)
+                topic = topics[0].get("topic", "") if topics else ""
+                clause.metadata['topics'] = topics
+                clause.metadata['topic'] = topic
+                clause.metadata['entities'] = all_entities
                 clause.metadata['terms'] = cached.get('terms', [])
                 clause.metadata['semantics_enriched'] = True
-                self.logger.info(f"[LLM Batch 缓存命中] clause_id={clause.clause_id}, topic={clause.metadata['topic'][:20] if clause.metadata['topic'] else '(无)'}")
+                first_topic = topic[:20] if topic else '(无)'
+                self.logger.info(f"[LLM Batch 缓存命中] clause_id={clause.clause_id}, topic={first_topic}")
                 self._push_clause_progress_log(clause)
             else:
                 clauses_to_llm.append(clause)
@@ -1936,19 +2108,47 @@ topic：{topic}
                             matched_clause = c
                             break
                     if matched_clause:
-                        topic = (item.get("topic") or "").strip()
-                        entities = [e for e in (item.get("entities") or []) if isinstance(e, str)]
+                        topics: List[Dict] = []
+                        topic = ""
+                        entities: List[str] = []
                         terms = [t for t in (item.get("terms") or []) if isinstance(t, dict)]
+
+                        # topics 数组
+                        raw_topics = item.get("topics") or []
+                        if isinstance(raw_topics, list):
+                            for t in raw_topics:
+                                if isinstance(t, dict):
+                                    topic_text = (t.get("topic") or "").strip()
+                                    topic_entities = [e for e in (t.get("entities") or []) if isinstance(e, str)]
+                                    if topic_text:
+                                        topics.append({"topic": topic_text, "entities": topic_entities})
+
+                        # 后处理：补回 topic 标题中的核心对象
+                        self._ensure_topic_core_entities(topics)
+
+                        # 合并所有 entities
+                        all_entities = []
+                        seen = set()
+                        for t in topics:
+                            for e in t.get("entities", []):
+                                if e not in seen:
+                                    seen.add(e)
+                                    all_entities.append(e)
+
+                        topic = topics[0].get("topic", "") if topics else ""
+
+                        matched_clause.metadata['topics'] = topics
                         matched_clause.metadata['topic'] = topic
-                        matched_clause.metadata['entities'] = entities
+                        matched_clause.metadata['entities'] = all_entities
                         matched_clause.metadata['terms'] = terms
                         matched_clause.metadata['semantics_enriched'] = True
                         processed_ids.add(clause_id)
 
                         content_hash = self._get_clause_content_hash(matched_clause.content)
-                        cache[content_hash] = {"topic": topic, "entities": entities, "terms": terms}
+                        cache[content_hash] = {"topics": topics, "topic": topic, "entities": all_entities, "terms": terms}
 
-                        self.logger.info(f"[LLM Batch 提取] 完成, clause_id={clause_id}, topic={topic[:20] if topic else '(无)'}, entities={len(entities)}, terms={len(terms)}")
+                        topic_summary = f"{len(topics)}个主题" if len(topics) > 1 else (topic[:20] if topic else '(无)')
+                        self.logger.info(f"[LLM Batch 提取] 完成, clause_id={clause_id}, {topic_summary}, entities={len(all_entities)}, terms={len(terms)}")
                         self._push_clause_progress_log(matched_clause)
             else:
                 self.logger.warning(f"[LLM Batch 提取] 响应格式异常，降级为单条处理: {type(response)}")
@@ -2195,7 +2395,10 @@ topic：{topic}
                     "total_chapters": chapter_count,
                     "completed_chapters": i,
                     "completed_clauses_count": len(all_clauses),
-                    "completed_entities_count": sum(len(c.metadata.get("entities", [])) for c in all_clauses),
+                    "completed_entities_count": sum(
+                        sum(len(tp.get('entities', [])) for tp in c.metadata.get('topics', []) if isinstance(tp, dict))
+                        for c in all_clauses
+                    ),
                     "is_resuming": i > start_index
                 }
             )
@@ -2229,7 +2432,10 @@ topic：{topic}
                 for clause in chapter_clauses:
                     self._append_clause_to_jsonl(project_id, clause)
 
-            chapter_entities_count = sum(len(c.metadata.get("entities", [])) for c in chapter_clauses)
+            chapter_entities_count = sum(
+                sum(len(tp.get('entities', [])) for tp in c.metadata.get('topics', []) if isinstance(tp, dict))
+                for c in chapter_clauses
+            )
             para_time = time.time() - para_start
 
             self._report_progress(
@@ -2320,7 +2526,10 @@ topic：{topic}
         # Step 4: 汇总报告
         # =====================================================================
         self._report_progress(-1, "[LLM分块] Step 4/4: 汇总报告")
-        total_entities = sum(len(c.metadata.get("entities", [])) for c in all_clauses)
+        total_entities = sum(
+            sum(len(tp.get('entities', [])) for tp in c.metadata.get('topics', []) if isinstance(tp, dict))
+            for c in all_clauses
+        )
         total_time = time.time() - start_time
         self._report_progress(
             0.95,

@@ -832,7 +832,7 @@ const workflowData = ref({
   query: '',
   selectedGraphIds: [],
   temperature: 0.7,
-  similarityThreshold: 50,   // 相似度阈值：检索后预过滤，减少 reranking 数量
+  similarityThreshold: 0,    // 相似度阈值：检索后预过滤，减少 reranking 数量（与 hit-test 对齐，默认0不过滤）
   topK: 5,                 // top_k：bge-reranker-v2-m3 精排后保留得分最高的 K 条
   rerankMinScore: 0,        // 重排分数阈值：低于此分数的 facts 会被过滤（默认0）
   rootTypes: ['Entity', 'Term'],  // 根节点类型（与 hit-test 对齐）

@@ -272,7 +272,10 @@ class KbPipelineRunner:
         project.status = ProjectStatus.GRAPH_CHUNKED
         ProjectManager.save_project(project)
 
-        entity_count = sum(len(c.metadata.get("entities", [])) for c in result.clauses)
+        entity_count = sum(
+            sum(len(tp.get('entities', [])) for tp in c.metadata.get('topics', []) if isinstance(tp, dict))
+            for c in result.clauses
+        )
         self.task_manager.update_task(
             task_id,
             status=TaskStatus.COMPLETED,

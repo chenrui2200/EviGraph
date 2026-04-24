@@ -1365,7 +1365,7 @@ class Neo4jStorage(GraphStorage):
                 return None
             center_node = self._node_to_dict(center_record["n"], center_record["labels"])
 
-            # 双向邻边 + 邻接节点
+            # 双向邻边 + 邻接节点 (1 跳)
             edge_result = tx.run(
                 """
                 MATCH (n)
@@ -1378,8 +1378,28 @@ class Neo4jStorage(GraphStorage):
                 uuid=node_uuid, gid=graph_id,
             )
 
+            # 2 跳邻居 (如 Clause-HAS_TOPIC->Topic-MENTIONS->Entity)
+            hop2_result = tx.run(
+                """
+                MATCH (n)
+                WHERE n.uuid = $uuid AND n.graph_id = $gid
+                OPTIONAL MATCH (n)-[r1:HAS_TOPIC|MENTIONS|DEFINES]-(mid)-[r2:RELATION|HAS_TOPIC|MENTIONS|DEFINES]-(m)
+                WHERE r1.graph_id = $gid AND r2.graph_id = $gid AND m <> n
+                RETURN r1, r2,
+                       n.uuid AS src1_uuid, mid.uuid AS tgt1_uuid,
+                       mid.uuid AS src2_uuid, m.uuid AS tgt2_uuid,
+                       mid, labels(mid) AS mid_labels,
+                       m, labels(m) AS m_labels
+                LIMIT 50
+                """,
+                uuid=node_uuid, gid=graph_id,
+            )
+
             neighbor_nodes = {}
             edges = []
+            seen_edge_uuids = set()
+
+            # 处理 1 跳结果
             for record in edge_result:
                 rel = record.get("r")
                 if not rel:
@@ -1391,7 +1411,47 @@ class Neo4jStorage(GraphStorage):
                         neighbor_nodes[m_uuid] = self._node_to_dict(m, record["m_labels"])
 
                 edge_dict = self._edge_to_dict(rel, record["src_uuid"], record["tgt_uuid"])
-                edges.append(edge_dict)
+                e_uuid = edge_dict.get("uuid", "")
+                if e_uuid and e_uuid not in seen_edge_uuids:
+                    seen_edge_uuids.add(e_uuid)
+                    edges.append(edge_dict)
+                elif not e_uuid:
+                    edges.append(edge_dict)
+
+            # 处理 2 跳结果
+            for record in hop2_result:
+                r1 = record.get("r1")
+                r2 = record.get("r2")
+                if not r1 or not r2:
+                    continue
+
+                mid = record.get("mid")
+                if mid:
+                    mid_uuid = mid.get("uuid", "")
+                    if mid_uuid and mid_uuid != node_uuid and mid_uuid not in neighbor_nodes:
+                        neighbor_nodes[mid_uuid] = self._node_to_dict(mid, record["mid_labels"])
+
+                m = record.get("m")
+                if m:
+                    m_uuid = m.get("uuid", "")
+                    if m_uuid and m_uuid != node_uuid and m_uuid not in neighbor_nodes:
+                        neighbor_nodes[m_uuid] = self._node_to_dict(m, record["m_labels"])
+
+                edge1_dict = self._edge_to_dict(r1, record["src1_uuid"], record["tgt1_uuid"])
+                e1_uuid = edge1_dict.get("uuid", "")
+                if e1_uuid and e1_uuid not in seen_edge_uuids:
+                    seen_edge_uuids.add(e1_uuid)
+                    edges.append(edge1_dict)
+                elif not e1_uuid:
+                    edges.append(edge1_dict)
+
+                edge2_dict = self._edge_to_dict(r2, record["src2_uuid"], record["tgt2_uuid"])
+                e2_uuid = edge2_dict.get("uuid", "")
+                if e2_uuid and e2_uuid not in seen_edge_uuids:
+                    seen_edge_uuids.add(e2_uuid)
+                    edges.append(edge2_dict)
+                elif not e2_uuid:
+                    edges.append(edge2_dict)
 
             return {
                 "center_node": center_node,
@@ -1778,6 +1838,54 @@ class Neo4jStorage(GraphStorage):
                     if hasattr(v, "isoformat"):
                         n[k] = v.isoformat()
             return results
+
+    def search_topic_nodes(
+        self,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search Topic nodes by topic name (CONTAINS match).
+
+        Returns list of dicts with node properties + 'score'.
+        """
+        with self._driver.session() as session:
+            results = self._search.search_topic_nodes(
+                session, graph_id, query, limit
+            )
+            for n in results:
+                for k, v in n.items():
+                    if hasattr(v, "isoformat"):
+                        n[k] = v.isoformat()
+            return results
+
+    def get_entities_by_topic_uuids(
+        self,
+        topic_uuids: List[str],
+        graph_id: str,
+    ) -> List[Dict[str, Any]]:
+        """根据 Topic UUID 列表获取其 MENTIONS 的 Entity 节点（去重）。"""
+        if not topic_uuids:
+            return []
+
+        def _read(tx):
+            result = tx.run(
+                """
+                MATCH (t:Topic)-[:MENTIONS]->(e:Entity)
+                WHERE t.uuid IN $uuids AND e.graph_id = $gid AND NOT 'Term' IN labels(e)
+                RETURN DISTINCT e AS n, labels(e) AS node_labels
+                """,
+                uuids=topic_uuids,
+                gid=graph_id,
+            )
+            return [
+                {**self._node_to_dict(record["n"], record["node_labels"]), "_source_topic": True}
+                for record in result
+            ]
+
+        with self._driver.session() as session:
+            return self._call_with_retry(session.execute_read, _read)
 
     # ----------------------------------------------------------------
     # Graph info
@@ -3010,26 +3118,36 @@ class Neo4jStorage(GraphStorage):
                         # 注：不再创建 Episode->Element MENTIONS 边
                         # Element 节点仅保留节点属性，通过 Topic 语义层间接关联
 
-                    # ===== Phase 5: Topic + HAS_TOPIC (clause type with topic) =====
+                    # ===== Phase 5: Topic + HAS_TOPIC =====
                     topic_clause_items = [
                         it for it in batch_clause_items
-                        if it["metadata"].get("topic")
+                        if it["metadata"].get("topics")
                     ]
                     if topic_clause_items:
                         topic_list = []
+                        clause_topic_pairs = []
                         for it in topic_clause_items:
-                            cid = it["metadata"].get("clause_id", "").strip()
-                            topic_text = it["metadata"].get("topic", "")
-                            topic_uuid = str(uuid.UUID(hashlib.md5(
-                                f"{graph_id}:{cid}:topic".encode()).hexdigest()))
-                            topic_list.append({
-                                "uuid": topic_uuid,
-                                "clause_uuid": it["clause_uuid"],
-                                "clause_id": cid,
-                                "topic": topic_text,
-                                "graph_id": graph_id,
-                                "created_at": it["now"],
-                            })
+                            m = it["metadata"]
+                            cid = m.get("clause_id", "").strip()
+                            topics_list = m.get("topics", [])
+                            for tp in topics_list:
+                                topic_text = tp.get("topic", "") if isinstance(tp, dict) else str(tp)
+                                if not topic_text:
+                                    continue
+                                topic_uuid = str(uuid.UUID(hashlib.md5(
+                                    f"{graph_id}:{cid}:{topic_text}:topic".encode()).hexdigest()))
+                                topic_list.append({
+                                    "uuid": topic_uuid,
+                                    "clause_uuid": it["clause_uuid"],
+                                    "clause_id": cid,
+                                    "topic": topic_text,
+                                    "graph_id": graph_id,
+                                    "created_at": it["now"],
+                                })
+                                clause_topic_pairs.append({
+                                    "clause_uuid": it["episode_id"],
+                                    "topic_uuid": topic_uuid,
+                                })
 
                         tx.run(
                             """
@@ -3050,14 +3168,6 @@ class Neo4jStorage(GraphStorage):
                         )
 
                         # Clause -> Topic HAS_TOPIC
-                        # 注意：Clause 节点的 UUID 是 Phase 1 创建的 episode_id，
-                        # Phase 2 MERGE 匹配到已有节点时 ON CREATE SET 不执行，UUID 不变
-                        clause_topic_pairs = [
-                            {"clause_uuid": it["episode_id"],
-                             "topic_uuid": str(uuid.UUID(hashlib.md5(
-                                 f"{graph_id}:{it['metadata'].get('clause_id', '').strip()}:topic".encode()).hexdigest()))}
-                            for it in topic_clause_items
-                        ]
                         tx.run(
                             """
                             UNWIND $pairs AS p
@@ -3069,14 +3179,24 @@ class Neo4jStorage(GraphStorage):
                         )
 
                         # ===== Phase 6: Term 节点 + Topic-MENTIONS (unique per graph_id+term_name) =====
+                        # terms 是 clause 级别的，只关联到第一个 topic 避免重复
                         all_terms = []
-                        term_topic_map = []  # (term_uuid, topic_uuid) pairs
+                        term_topic_map = []
                         term_seen = set()
                         for it in topic_clause_items:
-                            cid = it["metadata"].get("clause_id", "").strip()
-                            topic_uuid = str(uuid.UUID(hashlib.md5(
-                                f"{graph_id}:{cid}:topic".encode()).hexdigest()))
-                            for term_item in it["metadata"].get("terms", []):
+                            m = it["metadata"]
+                            cid = m.get("clause_id", "").strip()
+                            topics_list = m.get("topics", [])
+                            first_topic_uuid = None
+                            for tp in topics_list:
+                                topic_text = tp.get("topic", "") if isinstance(tp, dict) else str(tp)
+                                if topic_text:
+                                    first_topic_uuid = str(uuid.UUID(hashlib.md5(
+                                        f"{graph_id}:{cid}:{topic_text}:topic".encode()).hexdigest()))
+                                    break
+                            if not first_topic_uuid:
+                                continue
+                            for term_item in m.get("terms", []):
                                 t_name = term_item if isinstance(term_item, str) else term_item.get("term_name", "")
                                 if not t_name or t_name in term_seen:
                                     continue
@@ -3093,7 +3213,7 @@ class Neo4jStorage(GraphStorage):
                                     "entity_label": "Term",
                                     "created_at": it["now"],
                                 })
-                                term_topic_map.append({"uuid": t_uuid, "topic_uuid": topic_uuid})
+                                term_topic_map.append({"uuid": t_uuid, "topic_uuid": first_topic_uuid})
 
                         if all_terms:
                             tx.run(
@@ -3130,24 +3250,31 @@ class Neo4jStorage(GraphStorage):
                         entity_topic_map = []
                         ent_seen = set()
                         for it in topic_clause_items:
-                            cid = it["metadata"].get("clause_id", "").strip()
-                            topic_uuid = str(uuid.UUID(hashlib.md5(
-                                f"{graph_id}:{cid}:topic".encode()).hexdigest()))
-                            for ent_item in it["metadata"].get("entities", []):
-                                e_name = ent_item if isinstance(ent_item, str) else ent_item.get("key", ent_item.get("name", ""))
-                                if not e_name or e_name in ent_seen:
+                            m = it["metadata"]
+                            cid = m.get("clause_id", "").strip()
+                            topics_list = m.get("topics", [])
+                            for tp in topics_list:
+                                topic_text = tp.get("topic", "") if isinstance(tp, dict) else str(tp)
+                                if not topic_text:
                                     continue
-                                ent_seen.add(e_name)
-                                e_uuid = str(uuid.UUID(hashlib.md5(
-                                    f"{graph_id}:{e_name}:entity".encode()).hexdigest()))
-                                all_entities.append({
-                                    "uuid": e_uuid,
-                                    "graph_id": graph_id,
-                                    "name": e_name,
-                                    "name_lower": e_name.lower(),
-                                    "created_at": it["now"],
-                                })
-                                entity_topic_map.append({"uuid": e_uuid, "topic_uuid": topic_uuid})
+                                topic_uuid = str(uuid.UUID(hashlib.md5(
+                                    f"{graph_id}:{cid}:{topic_text}:topic".encode()).hexdigest()))
+                                topic_entities = tp.get("entities", []) if isinstance(tp, dict) else []
+                                for ent_item in topic_entities:
+                                    e_name = ent_item if isinstance(ent_item, str) else ent_item.get("key", ent_item.get("name", ""))
+                                    if not e_name or e_name in ent_seen:
+                                        continue
+                                    ent_seen.add(e_name)
+                                    e_uuid = str(uuid.UUID(hashlib.md5(
+                                        f"{graph_id}:{e_name}:entity".encode()).hexdigest()))
+                                    all_entities.append({
+                                        "uuid": e_uuid,
+                                        "graph_id": graph_id,
+                                        "name": e_name,
+                                        "name_lower": e_name.lower(),
+                                        "created_at": it["now"],
+                                    })
+                                    entity_topic_map.append({"uuid": e_uuid, "topic_uuid": topic_uuid})
 
                         if all_entities:
                             tx.run(
@@ -3219,20 +3346,22 @@ class Neo4jStorage(GraphStorage):
         mentions_count = 0
 
         # 预统计 clauses 总数（从 Clause 节点计数）
-        clauses_with_topic = [c for c in clauses_data if c.get('topic')]
+        clauses_with_topic = [c for c in clauses_data if c.get('topics')]
 
         # DEBUG: 记录传入的 clauses_data 信息
         logger.info(f"[add_topic_and_entity_nodes] DEBUG: clauses_data length = {len(clauses_data)}, clauses_with_topic length = {len(clauses_with_topic)}, entities_data length = {len(entities_data)}")
         if clauses_data:
             sample = clauses_data[0]
-            logger.info(f"[add_topic_and_entity_nodes] DEBUG: first clause has topic={sample.get('topic', 'MISSING')}, entities={sample.get('entities', 'MISSING')}, clause_id={sample.get('clause_id', 'MISSING')}")
+            sample_topics = sample.get('topics', [])
+            topic_info = f"topics_count={len(sample_topics)}"
+            logger.info(f"[add_topic_and_entity_nodes] DEBUG: first clause has {topic_info}, entities={sample.get('entities', 'MISSING')}, clause_id={sample.get('clause_id', 'MISSING')}")
 
         with self._driver.session() as session:
             def _create_nodes_and_relations(tx):
                 nonlocal topic_count, entity_count, clause_count, has_topic_count, mentions_count
 
                 # 预统计
-                clauses_with_topic = [c for c in clauses_data if c.get('topic')]
+                clauses_with_topic = [c for c in clauses_data if c.get('topics')]
 
                 # 检查数据库中是否存在 Clause 节点
                 check_episodes = tx.run(
@@ -3272,166 +3401,158 @@ class Neo4jStorage(GraphStorage):
                         entities_by_clause[src].append(e)
 
                 # 批量 MERGE Topic 节点和 HAS_TOPIC 关系
-                # 注意：每个 clause_id 只创建一个 Topic 节点（基于 clause_id 去重）
-                processed_clause_ids = set()  # 用于去重
+                # 支持多 Topic：每个 clause 可以有多个 Topic 节点
                 for clause in clauses_with_topic:
                     clause_id = clause.get('clause_id', '')
-                    topic_text = clause.get('topic', '')
                     if not clause_id:
                         continue
 
-                    # 跳过已处理的 clause_id（同一个 clause 可能有多个条目，保留第一个 topic）
-                    if clause_id in processed_clause_ids:
-                        logger.info(f"[topic_entity] Skipping duplicate clause_id={clause_id}")
-                        continue
-                    processed_clause_ids.add(clause_id)
+                    topics_list = clause.get('topics', [])
 
-                    # Topic UUID 只基于 clause_id 生成（确保每个 clause 只有一个 Topic）
-                    topic_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{clause_id}:topic".encode()).hexdigest()))
-                    tx.run(
-                        """
-                        MERGE (t:Topic {uuid: $uuid})
-                        ON CREATE SET
-                            t.graph_id = $gid,
-                            t.topic = $topic,
-                            t.clause_id = $clause_id,
-                            t.created_at = $created_at,
-                            t.name = $topic
-                        ON MATCH SET
-                            t.topic = $topic,
-                            t.clause_id = $clause_id,
-                            t.name = $topic
-                        """,
-                        uuid=topic_uuid,
-                        gid=graph_id,
-                        topic=topic_text,
-                        clause_id=clause_id,
-                        created_at=now
-                    )
-                    topic_count += 1
-                    logger.info(f"[topic_entity] Topic node: clause={clause_id} topic={topic_text[:30]}")
+                    for tp_idx, tp in enumerate(topics_list):
+                        topic_text = tp.get('topic', '') if isinstance(tp, dict) else str(tp)
+                        if not topic_text:
+                            continue
 
-                    # 找到对应的 Clause 节点并创建 HAS_TOPIC 关系
-                    # 注意：Clause 节点的 graph_id 可能与当前不同（早期重建遗留），
-                    # 因此仅通过 clause_id 匹配（clause_id 在重建间保持稳定）
-                    logger.info(f"[add_topic_and_entity_nodes] DEBUG: clause_id={clause_id}, topic={topic_text[:30] if topic_text else 'EMPTY'}")
-                    check_result = tx.run(
-                        """
-                        MATCH (ep:Clause {clause_id: $clause_id})
-                        RETURN count(ep) as ep_count
-                        """,
-                        clause_id=clause_id
-                    )
-                    check_record = check_result.single()
-                    ep_count = check_record["ep_count"] if check_record else 0
-                    logger.info(f"[add_topic_and_entity_nodes] DEBUG: Found {ep_count} Clause nodes for clause_id={clause_id}")
-
-                    if ep_count > 0:
-                        # 使用独立 MATCH 模式，并通过 USING INDEX 提示加速
+                        # Topic UUID 基于 clause_id + topic_text 生成（确保每个 topic 独立）
+                        topic_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{clause_id}:{topic_text}:topic".encode()).hexdigest()))
                         tx.run(
                             """
-                            MATCH (ep:Clause {clause_id: $clause_id})
-                            MATCH (t:Topic {uuid: $uuid})
-                            MERGE (ep)-[r:HAS_TOPIC]->(t)
-                            SET r.graph_id = $gid, r.created_at = datetime()
+                            MERGE (t:Topic {uuid: $uuid})
+                            ON CREATE SET
+                                t.graph_id = $gid,
+                                t.topic = $topic,
+                                t.clause_id = $clause_id,
+                                t.created_at = $created_at,
+                                t.name = $topic
+                            ON MATCH SET
+                                t.topic = $topic,
+                                t.clause_id = $clause_id,
+                                t.name = $topic
                             """,
-                            clause_id=clause_id,
                             uuid=topic_uuid,
-                            gid=graph_id
+                            gid=graph_id,
+                            topic=topic_text,
+                            clause_id=clause_id,
+                            created_at=now
                         )
-                        has_topic_count += 1
-                    else:
-                        logger.warning(f"[add_topic_and_entity_nodes] WARNING: No Clause found for clause_id={clause_id}, skipping HAS_TOPIC relationship")
+                        topic_count += 1
+                        logger.info(f"[topic_entity] Topic node: clause={clause_id} topic={topic_text[:30]}")
 
-                    # 为该条款的 terms 创建 Entity:Term 节点和 MENTIONS 关系
-                    clause_terms = clause.get('terms', [])
-                    if isinstance(clause_terms, list):
-                        for term_item in clause_terms:
-                            # term_item 可以是字典 {'term_name': ..., 'definition': ...} 或字符串
-                            term_name = term_item if isinstance(term_item, str) else term_item.get('term_name', '')
-                            term_def = term_item.get('definition', '') if isinstance(term_item, dict) else ''
-                            if not term_name:
-                                continue
+                        # 找到对应的 Clause 节点并创建 HAS_TOPIC 关系
+                        logger.info(f"[add_topic_and_entity_nodes] DEBUG: clause_id={clause_id}, topic={topic_text[:30] if topic_text else 'EMPTY'}")
+                        check_result = tx.run(
+                            """
+                            MATCH (ep:Clause {clause_id: $clause_id})
+                            RETURN count(ep) as ep_count
+                            """,
+                            clause_id=clause_id
+                        )
+                        check_record = check_result.single()
+                        ep_count = check_record["ep_count"] if check_record else 0
+                        logger.info(f"[add_topic_and_entity_nodes] DEBUG: Found {ep_count} Clause nodes for clause_id={clause_id}")
 
-                            term_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{term_name}:term".encode()).hexdigest()))
+                        if ep_count > 0:
                             tx.run(
                                 """
-                                MERGE (e:Entity:Term {uuid: $uuid})
-                                ON CREATE SET
-                                    e.graph_id = $gid,
-                                    e.name = $name,
-                                    e.definition = $definition,
-                                    e.entity_label = 'Term',
-                                    e.created_at = $created_at
-                                ON MATCH SET
-                                    e.name = $name,
-                                    e.definition = COALESCE($definition, e.definition)
-                                """,
-                                uuid=term_uuid,
-                                gid=graph_id,
-                                name=term_name,
-                                definition=term_def,
-                                created_at=now
-                            )
-                            entity_count += 1
-                            logger.info(f"[topic_entity]   Entity:Term: {term_name} <- Topic({topic_text[:20]}) MENTIONS")
-
-                            # 创建 Topic --MENTIONS--> Entity:Term 关系
-                            tx.run(
-                                """
-                                MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity:Term {uuid: $entity_uuid})
-                                MERGE (t)-[r:MENTIONS]->(e)
+                                MATCH (ep:Clause {clause_id: $clause_id})
+                                MATCH (t:Topic {uuid: $uuid})
+                                MERGE (ep)-[r:HAS_TOPIC]->(t)
                                 SET r.graph_id = $gid, r.created_at = datetime()
                                 """,
-                                topic_uuid=topic_uuid,
-                                entity_uuid=term_uuid,
+                                clause_id=clause_id,
+                                uuid=topic_uuid,
                                 gid=graph_id
                             )
-                            mentions_count += 1
+                            has_topic_count += 1
+                        else:
+                            logger.warning(f"[add_topic_and_entity_nodes] WARNING: No Clause found for clause_id={clause_id}, skipping HAS_TOPIC relationship")
 
-                    # 为该条款的 entities 创建 Entity 节点和 MENTIONS 关系
-                    clause_entities = clause.get('entities', [])
-                    if isinstance(clause_entities, list):
-                        for ent in clause_entities:
-                            # 兼容字符串实体和字典实体
-                            entity_name = ent if isinstance(ent, str) else ent.get('key', '')
-                            if not entity_name:
-                                continue
+                        # terms 是 clause 级别的，只关联到第一个 topic 避免重复
+                        clause_terms = clause.get('terms', []) if tp_idx == 0 else []
+                        if isinstance(clause_terms, list):
+                            for term_item in clause_terms:
+                                term_name = term_item if isinstance(term_item, str) else term_item.get('term_name', '')
+                                term_def = term_item.get('definition', '') if isinstance(term_item, dict) else ''
+                                if not term_name:
+                                    continue
 
-                            entity_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{entity_name}:entity".encode()).hexdigest()))
+                                term_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{term_name}:term".encode()).hexdigest()))
+                                tx.run(
+                                    """
+                                    MERGE (e:Entity:Term {uuid: $uuid})
+                                    ON CREATE SET
+                                        e.graph_id = $gid,
+                                        e.name = $name,
+                                        e.definition = $definition,
+                                        e.entity_label = 'Term',
+                                        e.created_at = $created_at
+                                    ON MATCH SET
+                                        e.name = $name,
+                                        e.definition = COALESCE($definition, e.definition)
+                                    """,
+                                    uuid=term_uuid,
+                                    gid=graph_id,
+                                    name=term_name,
+                                    definition=term_def,
+                                    created_at=now
+                                )
+                                entity_count += 1
+                                logger.info(f"[topic_entity]   Entity:Term: {term_name} <- Topic({topic_text[:20]}) MENTIONS")
 
-                            # 统一使用 Entity 标签，便于检索
-                            tx.run(
-                                """
-                                MERGE (e:Entity {uuid: $uuid})
-                                ON CREATE SET
-                                    e.graph_id = $gid,
-                                    e.name = $name,
-                                    e.entity_label = 'Entity',
-                                    e.created_at = $created_at
-                                ON MATCH SET
-                                    e.name = $name
-                                """,
-                                uuid=entity_uuid,
-                                gid=graph_id,
-                                name=entity_name,
-                                created_at=now
-                            )
-                            logger.info(f"[topic_entity]   Entity: {entity_name} <- Topic({topic_text[:20]}) MENTIONS")
-                            entity_count += 1
+                                # 创建 Topic --MENTIONS--> Entity:Term 关系
+                                tx.run(
+                                    """
+                                    MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity:Term {uuid: $entity_uuid})
+                                    MERGE (t)-[r:MENTIONS]->(e)
+                                    SET r.graph_id = $gid, r.created_at = datetime()
+                                    """,
+                                    topic_uuid=topic_uuid,
+                                    entity_uuid=term_uuid,
+                                    gid=graph_id
+                                )
+                                mentions_count += 1
 
-                            # 创建 Topic --MENTIONS--> Entity 关系
-                            tx.run(
-                                """
-                                MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity {uuid: $entity_uuid})
-                                MERGE (t)-[r:MENTIONS]->(e)
-                                SET r.graph_id = $gid, r.created_at = datetime()
-                                """,
-                                topic_uuid=topic_uuid,
-                                entity_uuid=entity_uuid,
-                                gid=graph_id
-                            )
-                            mentions_count += 1
+                        # 为该 Topic 的 entities 创建 Entity 节点和 MENTIONS 关系
+                        topic_entities = tp.get('entities', []) if isinstance(tp, dict) else []
+                        if isinstance(topic_entities, list):
+                            for ent in topic_entities:
+                                entity_name = ent if isinstance(ent, str) else ent.get('key', '')
+                                if not entity_name:
+                                    continue
+
+                                entity_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{entity_name}:entity".encode()).hexdigest()))
+                                tx.run(
+                                    """
+                                    MERGE (e:Entity {uuid: $uuid})
+                                    ON CREATE SET
+                                        e.graph_id = $gid,
+                                        e.name = $name,
+                                        e.entity_label = 'Entity',
+                                        e.created_at = $created_at
+                                    ON MATCH SET
+                                        e.name = $name
+                                    """,
+                                    uuid=entity_uuid,
+                                    gid=graph_id,
+                                    name=entity_name,
+                                    created_at=now
+                                )
+                                logger.info(f"[topic_entity]   Entity: {entity_name} <- Topic({topic_text[:20]}) MENTIONS")
+                                entity_count += 1
+
+                                # 创建 Topic --MENTIONS--> Entity 关系
+                                tx.run(
+                                    """
+                                    MATCH (t:Topic {uuid: $topic_uuid}), (e:Entity {uuid: $entity_uuid})
+                                    MERGE (t)-[r:MENTIONS]->(e)
+                                    SET r.graph_id = $gid, r.created_at = datetime()
+                                    """,
+                                    topic_uuid=topic_uuid,
+                                    entity_uuid=entity_uuid,
+                                    gid=graph_id
+                                )
+                                mentions_count += 1
 
                 return {
                     "topics": topic_count,
@@ -3555,13 +3676,16 @@ class Neo4jStorage(GraphStorage):
             return
 
         # ========== Topic 和 Entity 创建（inline，不再拆分到 add_topic_and_entity_nodes） ==========
-        topic_text = metadata.get('topic', '')
+        topics_list = metadata.get('topics', [])
         terms = metadata.get('terms', [])
-        clause_entities = metadata.get('entities', [])
 
-        if topic_text:
-            # 创建 Topic 节点
-            topic_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{clause_id_normalized}:topic".encode()).hexdigest()))
+        for tp_idx, tp in enumerate(topics_list):
+            topic_text = tp.get('topic', '') if isinstance(tp, dict) else str(tp)
+            if not topic_text:
+                continue
+
+            # Topic UUID 基于 clause_id + topic_text 生成（确保每个 topic 独立）
+            topic_uuid = str(uuid.UUID(hashlib.md5(f"{graph_id}:{clause_id_normalized}:{topic_text}:topic".encode()).hexdigest()))
             tx.run(
                 """
                 MERGE (t:Topic {uuid: $uuid})
@@ -3596,9 +3720,10 @@ class Neo4jStorage(GraphStorage):
                 gid=graph_id
             )
 
-            # 创建 terms 的 Entity:Term 节点和 MENTIONS 关系
-            if isinstance(terms, list):
-                for term_item in terms:
+            # terms 是 clause 级别的，只关联到第一个 topic 避免重复
+            clause_terms = terms if tp_idx == 0 else []
+            if isinstance(clause_terms, list):
+                for term_item in clause_terms:
                     term_name = term_item if isinstance(term_item, str) else term_item.get('term_name', '')
                     term_def = term_item.get('definition', '') if isinstance(term_item, dict) else ''
                     if not term_name:
@@ -3635,9 +3760,10 @@ class Neo4jStorage(GraphStorage):
                     )
                     logger.info(f"[hierarchical] Entity:Term: {term_name} <- Topic({topic_text[:20]}) MENTIONS")
 
-            # 创建 entities 的 Entity 节点和 MENTIONS 关系
-            if isinstance(clause_entities, list):
-                for ent in clause_entities:
+            # 为该 Topic 的 entities 创建 Entity 节点和 MENTIONS 关系
+            topic_entities = tp.get('entities', []) if isinstance(tp, dict) else []
+            if isinstance(topic_entities, list):
+                for ent in topic_entities:
                     entity_name = ent if isinstance(ent, str) else ent.get('key', ent.get('name', ''))
                     if not entity_name:
                         continue

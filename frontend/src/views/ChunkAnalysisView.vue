@@ -433,24 +433,47 @@
                       </div>
 
                       <!-- 知识实体 -->
-                      <div class="clause-entities-section" v-if="clause.topic || (clause.entities?.length || clause.related_elements?.length) || clause.images?.length">
-                        <div v-if="clause.topic" class="clause-topic-row">
-                          <span class="topic-label">📝 摘要</span>
-                          <span class="topic-content">{{ clause.topic }}</span>
-                        </div>
-                        <div v-if="clause.entities?.length" class="entity-section-label">📎 知识实体</div>
-                        <div class="entity-item-row" v-for="(elem, ei) in clause.entities" :key="'entity-' + ei">
-                          <template v-if="typeof elem === 'string'">
-                            <span class="entity-type-tag">noun</span>
-                            <span class="entity-key">{{ elem }}</span>
-                          </template>
-                          <template v-else>
-                            <span class="entity-type-tag">{{ elem.element_type || 'noun_entity' }}</span>
-                            <span class="entity-key">{{ elem.key }}</span>
-                            <span v-if="elem.value" class="entity-value">= {{ elem.value }}</span>
-                            <span v-if="elem.unit" class="entity-unit">{{ elem.unit }}</span>
-                          </template>
-                        </div>
+                      <div class="clause-entities-section" v-if="clause.topics?.length || clause.related_elements?.length || clause.images?.length">
+                        <!-- 多主题分组展示 -->
+                        <template v-if="clause.topics?.length > 1">
+                          <div class="entity-section-label">📝 主题分析</div>
+                          <div v-for="(tp, ti) in clause.topics" :key="'topic-' + ti" class="topic-group">
+                            <div class="topic-group-header">
+                              <span class="topic-group-label">主题 {{ ti + 1 }}</span>
+                              <span class="topic-group-title">{{ tp.topic }}</span>
+                            </div>
+                            <div class="topic-group-entities">
+                              <div class="entity-item-row" v-for="(ent, ei) in tp.entities" :key="'t-ent-' + ti + '-' + ei">
+                                <span class="entity-type-tag">noun</span>
+                                <span class="entity-key">{{ ent }}</span>
+                              </div>
+                              <div v-if="!tp.entities?.length" class="topic-empty">（无实体）</div>
+                            </div>
+                          </div>
+                        </template>
+                        <!-- 单主题展示 -->
+                        <template v-else-if="clause.topics?.length === 1">
+                          <div v-if="clause.topics[0].topic" class="clause-topic-row collapsible" @click.stop="toggleEntityExpand(clause.clause_id)">
+                            <span class="topic-toggle-icon">{{ expandedEntityClauseIds.has(clause.clause_id) ? '▼' : '▶' }}</span>
+                            <span class="topic-label">📝 摘要</span>
+                            <span class="topic-content">{{ clause.topics[0].topic }}</span>
+                          </div>
+                          <div v-show="expandedEntityClauseIds.has(clause.clause_id)" class="entity-expand-panel">
+                            <div v-if="clause.topics[0].entities?.length" class="entity-section-label">📎 知识实体</div>
+                            <div class="entity-item-row" v-for="(elem, ei) in clause.topics[0].entities" :key="'entity-' + ei">
+                              <template v-if="typeof elem === 'string'">
+                                <span class="entity-type-tag">noun</span>
+                                <span class="entity-key">{{ elem }}</span>
+                              </template>
+                              <template v-else>
+                                <span class="entity-type-tag">{{ elem.element_type || 'noun_entity' }}</span>
+                                <span class="entity-key">{{ elem.key }}</span>
+                                <span v-if="elem.value" class="entity-value">= {{ elem.value }}</span>
+                                <span v-if="elem.unit" class="entity-unit">{{ elem.unit }}</span>
+                              </template>
+                            </div>
+                          </div>
+                        </template>
                         <!-- 图片及 VLM 分析结果 -->
                         <div v-if="clause.images?.length" class="clause-images-section">
                           <div class="entity-section-label">🖼️ 图片分析</div>
@@ -489,10 +512,17 @@
                               第 {{ getClauseById(chapter, childId)?.page }} 页
                             </span>
                           </div>
-                          <div v-if="getClauseById(chapter, childId)?.entities?.length" class="entity-section-label">📎 知识实体</div>
-                          <div class="entity-item-row" v-for="(elem, ei) in getClauseById(chapter, childId)?.entities" :key="'child-entity-' + ei">
-                            <span class="entity-type-tag">{{ elem.element_type || 'noun' }}</span>
-                            <span class="entity-key">{{ typeof elem === 'string' ? elem : elem.key }}</span>
+                          <div v-if="getClauseById(chapter, childId)?.topics?.[0]?.topic" class="clause-topic-row collapsible child-topic" @click.stop="toggleEntityExpand(childId)">
+                            <span class="topic-toggle-icon">{{ expandedEntityClauseIds.has(childId) ? '▼' : '▶' }}</span>
+                            <span class="topic-label">📝 摘要</span>
+                            <span class="topic-content">{{ getClauseById(chapter, childId)?.topics?.[0]?.topic }}</span>
+                          </div>
+                          <div v-show="expandedEntityClauseIds.has(childId)" class="entity-expand-panel">
+                            <div v-if="getClauseById(chapter, childId)?.topics?.[0]?.entities?.length" class="entity-section-label">📎 知识实体</div>
+                            <div class="entity-item-row" v-for="(elem, ei) in getClauseById(chapter, childId)?.topics?.[0]?.entities" :key="'child-entity-' + ei">
+                              <span class="entity-type-tag">{{ elem.element_type || 'noun' }}</span>
+                              <span class="entity-key">{{ typeof elem === 'string' ? elem : elem.key }}</span>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -717,6 +747,7 @@ const highlightedClauseId = ref(null)
 // UI 状态
 const expandedChapters = ref({})
 const expandedClauseId = ref(null)
+const expandedEntityClauseIds = ref(new Set())  // 控制摘要-知识实体的折叠展开
 const allExpanded = ref(false)
 const logDrawerOpen = ref(true)
 const realtimeLogs = ref([])
@@ -1547,6 +1578,15 @@ function toggleAllChapters() {
   allExpanded.value = !allExpanded.value
 }
 
+function toggleEntityExpand(clauseId) {
+  const s = expandedEntityClauseIds.value
+  if (s.has(clauseId)) {
+    s.delete(clauseId)
+  } else {
+    s.add(clauseId)
+  }
+}
+
 function getClauseById(chapter, clauseId) {
   if (!chapter.clauses) return null
   return chapter.clauses.find(c => c.clause_id === clauseId)
@@ -2110,9 +2150,23 @@ header.ca-header {
 
 .clause-entities-section { margin: 6px 0; }
 .clause-topic-row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 6px; padding: 6px 8px; background: #f0f9ff; border: 1px solid #e0f2fe; border-radius: 6px; }
+.clause-topic-row.collapsible { cursor: pointer; user-select: none; transition: background 0.15s; }
+.clause-topic-row.collapsible:hover { background: #e0f2fe; }
+.clause-topic-row.collapsible .topic-toggle-icon { font-size: 10px; color: #0369a1; flex-shrink: 0; width: 14px; text-align: center; }
 .topic-label { font-size: 11px; font-weight: 600; color: #0369a1; flex-shrink: 0; }
 .topic-content { font-size: 12px; color: #1e40af; line-height: 1.4; }
 .entity-section-label { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
+.entity-expand-panel { padding: 4px 8px 8px 28px; background: #fafafa; border: 1px solid #f0f0f0; border-top: none; border-radius: 0 0 6px 6px; }
+.child-topic { margin-top: 4px; background: #f8fafc; border-color: #e2e8f0; }
+.child-topic:hover { background: #f1f5f9; }
+
+/* 多主题分组 */
+.topic-group { margin-bottom: 8px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fafafa; overflow: hidden; }
+.topic-group-header { display: flex; align-items: center; gap: 6px; padding: 5px 8px; background: #f0f7ff; border-bottom: 1px solid #dbeafe; }
+.topic-group-label { font-size: 10px; font-weight: 600; color: #4f46e5; background: #eef2ff; padding: 1px 6px; border-radius: 4px; }
+.topic-group-title { font-size: 12px; font-weight: 600; color: #1e3a8a; }
+.topic-group-entities { padding: 6px 8px; }
+.topic-empty { font-size: 11px; color: #9ca3af; font-style: italic; padding: 2px 0; }
 .entity-item-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 11px; }
 .entity-type-tag { padding: 1px 6px; border-radius: 4px; font-size: 10px; background: #e5e7eb; color: #6b7280; font-weight: 600; }
 .entity-key { color: #1a1a2e; font-weight: 500; }

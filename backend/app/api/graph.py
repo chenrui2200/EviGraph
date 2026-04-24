@@ -608,20 +608,34 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
             # 保存分块结果（尝试序列化，失败时用检查点兜底）
             save_success = False
             try:
-                # 从 clauses.metadata["entities"] 提取 elements
+                # 从 clauses.metadata["topics"] 提取 elements（新结构：entities 在 topics 数组中）
                 extracted_elements = []
                 for c in result.clauses:
-                    for ent in c.metadata.get("entities", []):
-                        extracted_elements.append({
-                            "element_type": ent.get("entity_type", "unknown"),
-                            "key": ent.get("name", ""),
-                            "value": ent.get("value", ""),
-                            "unit": ent.get("unit", ""),
-                            "abbreviation": ent.get("abbreviation", ""),
-                            "definition": ent.get("definition", ""),
-                            "source_clause_id": ent.get("clause_id", c.clause_id),
-                            "metadata": ent
-                        })
+                    for tp in c.metadata.get("topics", []):
+                        if isinstance(tp, dict):
+                            for ent in tp.get("entities", []):
+                                if isinstance(ent, str):
+                                    extracted_elements.append({
+                                        "element_type": "unknown",
+                                        "key": ent,
+                                        "value": "",
+                                        "unit": "",
+                                        "abbreviation": "",
+                                        "definition": "",
+                                        "source_clause_id": c.clause_id,
+                                        "metadata": {}
+                                    })
+                                elif isinstance(ent, dict):
+                                    extracted_elements.append({
+                                        "element_type": ent.get("entity_type", "unknown"),
+                                        "key": ent.get("name", ""),
+                                        "value": ent.get("value", ""),
+                                        "unit": ent.get("unit", ""),
+                                        "abbreviation": ent.get("abbreviation", ""),
+                                        "definition": ent.get("definition", ""),
+                                        "source_clause_id": ent.get("clause_id", c.clause_id),
+                                        "metadata": ent
+                                    })
                 chunks_result = {
                     "source": "llm",
                     "sections": [
@@ -670,17 +684,19 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
                             "clauses": fallback_checkpoint.completed_clauses or [],
                             "elements": [
                                 {
-                                    "element_type": ent.get("entity_type", "unknown"),
-                                    "key": ent.get("name", ""),
-                                    "value": ent.get("value", ""),
-                                    "unit": ent.get("unit", ""),
-                                    "source_clause_id": ent.get("clause_id", clause.get("clause_id")),
+                                    "element_type": "unknown",
+                                    "key": ent,
+                                    "value": "",
+                                    "unit": "",
+                                    "source_clause_id": clause.get("clause_id"),
                                     "scope_prefix": clause.get("scope_prefix") or clause.get("metadata", {}).get("scope_prefix"),
                                     "chapter": clause.get("chapter") or clause.get("metadata", {}).get("chapter"),
-                                    "metadata": ent
+                                    "metadata": {}
                                 }
                                 for clause in (fallback_checkpoint.completed_clauses or [])
-                                for ent in clause.get("metadata", {}).get("entities", [])
+                                for tp in (clause.get("metadata") or {}).get("topics", [])
+                                for ent in (tp.get("entities") if isinstance(tp, dict) else [])
+                                if isinstance(ent, str)
                             ] if fallback_checkpoint.completed_clauses else [],
                             "edges": [],
                         }
@@ -702,8 +718,11 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
                 project.status = ProjectStatus.GRAPH_CHUNKED
                 ProjectManager.save_project(project)
 
-                # 完成任务（统计从 clauses.metadata["entities"] 提取的实体数量）
-                entity_count = sum(len(c.metadata.get("entities", [])) for c in result.clauses)
+                # 完成任务（统计从 clauses.metadata["topics"] 提取的实体数量）
+                entity_count = sum(
+                    sum(len(tp.get('entities', [])) for tp in c.metadata.get('topics', []) if isinstance(tp, dict))
+                    for c in result.clauses
+                )
                 summary = f"✅ 标注分析完成: {len(result.sections)} 章节, {len(result.clauses)} 条文, {entity_count} 实体"
                 build_logger.info(f"[{recovery_task_id}] {summary}")
 

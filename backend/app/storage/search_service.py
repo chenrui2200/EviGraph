@@ -130,6 +130,16 @@ ORDER BY score DESC
 LIMIT $limit
 """
 
+# Topic node search: direct CONTAINS on topic name (no vector/index needed)
+_CONTAINS_SEARCH_TOPIC_NODES = """
+MATCH (t:Topic {graph_id: $graph_id})
+WHERE toLower(t.topic) CONTAINS toLower($keyword)
+   OR toLower(t.name) CONTAINS toLower($keyword)
+RETURN t, 1.0 AS score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
 # --- Term node search Cypher queries ---
 
 # Cypher for vector similarity search on Term entity nodes
@@ -338,6 +348,7 @@ class SearchService:
         merged = self._merge_results(
             vector_results, keyword_results, key="uuid", limit=limit
         )
+        merged = self._boost_exact_match(merged, query)
         logger.debug(
             f"Object node search '{query}': "
             f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
@@ -459,6 +470,7 @@ class SearchService:
         merged = self._merge_results(
             vector_results, keyword_results, key="uuid", limit=limit
         )
+        merged = self._boost_exact_match(merged, query)
         logger.debug(
             f"Object node search '{query}': "
             f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
@@ -491,7 +503,13 @@ class SearchService:
     def _run_object_node_keyword_search(
         self, session: Neo4jSession, graph_id: str, query: str, limit: int, min_score: float = None
     ) -> List[Dict[str, Any]]:
-        """Run fulltext search on Object entity name + summary with CONTAINS fallback."""
+        """Run fulltext search on Object entity name + summary with CONTAINS fallback.
+
+        修复：不再在任一策略命中后提前返回，而是执行全部策略后合并去重，
+        避免 fulltext 返回少量结果后遗漏 CONTAINS 能命中的节点。
+        """
+        all_results: List[Dict[str, Any]] = []
+
         # Strategy 1: Fulltext index search (primary)
         try:
             safe_query = self._escape_lucene(query)
@@ -508,7 +526,7 @@ class SearchService:
             ]
             if results:
                 logger.debug(f"Object keyword search (fulltext): '{query}' -> {len(results)} results")
-                return results
+                all_results.extend(results)
         except Exception as e:
             logger.debug(f"Object fulltext search failed: {e}")
 
@@ -528,7 +546,7 @@ class SearchService:
             ]
             if results:
                 logger.debug(f"Object keyword search (wildcard): '{query}' -> {len(results)} results")
-                return results
+                all_results.extend(results)
         except Exception as e:
             logger.debug(f"Object wildcard search failed: {e}")
 
@@ -545,12 +563,22 @@ class SearchService:
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
-            logger.debug(f"Object keyword search (contains): '{query}' -> {len(results)} results")
-            return results
+            if results:
+                logger.debug(f"Object keyword search (contains): '{query}' -> {len(results)} results")
+                all_results.extend(results)
         except Exception as e:
             logger.debug(f"Object CONTAINS search failed: {e}")
 
-        return []
+        # 去重：按 uuid 保留第一个（fulltext 分数通常更高，优先保留）
+        seen_uuids = set()
+        unique_results = []
+        for r in all_results:
+            uid = r.get("uuid")
+            if uid and uid not in seen_uuids:
+                seen_uuids.add(uid)
+                unique_results.append(r)
+
+        return unique_results[:limit]
 
     def search_term_nodes(
         self,
@@ -587,12 +615,42 @@ class SearchService:
         merged = self._merge_results(
             vector_results, keyword_results, key="uuid", limit=limit
         )
+        merged = self._boost_exact_match(merged, query)
         logger.debug(
             f"Term node search '{query}': "
             f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
             f"merged={len(merged)}, vector_index={'available' if _index_status.entity_embedding else 'N/A'}"
         )
         return merged
+
+    def search_topic_nodes(
+        self,
+        session: Neo4jSession,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Search Topic nodes by topic name (CONTAINS match).
+
+        当 Entity/Term 搜索无法命中时，作为 fallback 搜索 Topic 节点，
+        用于提高以 topic 核心词搜索时的召回率。
+        """
+        try:
+            result = session.run(
+                _CONTAINS_SEARCH_TOPIC_NODES,
+                graph_id=graph_id,
+                keyword=query.strip(),
+                limit=limit,
+            )
+            results = [
+                {**dict(record["t"]), "uuid": record["t"]["uuid"], "_score": record["score"], "labels": list(record["t"].labels)}
+                for record in result
+            ]
+            logger.debug(f"Topic node search: '{query}' -> {len(results)} results")
+            return results
+        except Exception as e:
+            logger.debug(f"Topic node search failed: {e}")
+            return []
 
     def _run_term_node_vector_search(
         self, session: Neo4jSession, graph_id: str, query_vector: List[float], limit: int, min_score: float = None
@@ -727,6 +785,26 @@ class SearchService:
             for r in results:
                 r["score"] = r["rrf_score"] / max_rrf
 
+        return results
+
+    @staticmethod
+    def _boost_exact_match(
+        results: List[Dict[str, Any]], query: str
+    ) -> List[Dict[str, Any]]:
+        """
+        将 name 与查询精确匹配的节点提升到结果首位。
+        解决无 embedding 节点因仅命中 keyword 搜索而导致 RRF 排名靠后的问题。
+        """
+        if not results or not query:
+            return results
+        query_lower = query.strip().lower()
+        for i, r in enumerate(results):
+            name = (r.get("name") or "").strip().lower()
+            if name == query_lower:
+                matched = results.pop(i)
+                matched["score"] = 1.0
+                results.insert(0, matched)
+                break
         return results
 
     @staticmethod

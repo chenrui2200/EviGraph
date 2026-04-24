@@ -67,7 +67,7 @@
                   <input
                     type="range"
                     v-model.number="similarityThreshold"
-                    min="50"
+                    min="0"
                     max="100"
                     step="5"
                     class="sim-slider"
@@ -385,7 +385,7 @@ const searching = ref(false)
 const searchQuery = ref('')
 const filterGraph = ref(true)
 const rootTypes = ref(['Entity', 'Term']) // 根节点类型多选: Entity 和/或 Term
-const similarityThreshold = ref(50) // 相似度阈值 (50-100)，低于此值的结果被丢弃
+const similarityThreshold = ref(0) // 相似度阈值 (0-100)，低于此值的结果被丢弃
 
 // 相似度阈值颜色：中=橙，高=绿
 const simValueClass = computed(() => {

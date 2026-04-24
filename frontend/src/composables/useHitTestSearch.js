@@ -52,13 +52,16 @@ export async function hitTestSearch({
     })
 
     if (res?.success) {
-      const rows = (res.data.rows || [])
+      const rawRows = res.data.rows || []
+      console.log(`[hitTestSearch] raw=${rawRows.length}, threshold=${similarityThreshold}, scores=${rawRows.map(r => r.relevance_score).join(',')}`)
+      const rows = rawRows
         .filter(r => (r.relevance_score || 0) >= similarityThreshold)
         // 标注 root_type（后端 Term 优先排列，通过 labels 判断）
         .map(r => ({
           ...r,
           root_type: r.object_node?.labels?.includes('Term') ? 'Term' : 'Entity',
         }))
+      console.log(`[hitTestSearch] after filter=${rows.length}, types=${rows.map(r => r.root_type).join(',')}`)
 
       for (const row of rows) {
         const uuid = row.object_node?.uuid

@@ -1777,6 +1777,25 @@ Your response:"""
                 for future in as_completed(futures):
                     all_root_nodes.extend(future.result())
 
+            # Step 1b: fallback 到 Topic 搜索（当 Entity/Term 均未命中时）
+            if not all_root_nodes:
+                topic_nodes = self.storage.search_topic_nodes(
+                    graph_id=graph_id, query=query, limit=limit
+                )
+                if topic_nodes:
+                    topic_uuids = [t.get("uuid") for t in topic_nodes if t.get("uuid")]
+                    # 获取这些 Topic 关联的 Entity 节点作为替代根节点
+                    entity_from_topics = self.storage.get_entities_by_topic_uuids(
+                        topic_uuids, graph_id
+                    )
+                    for ent in entity_from_topics:
+                        ent["_root_type"] = "Entity"
+                        ent["_from_topic"] = True
+                        # 赋予一个默认分数，确保能通过前端阈值过滤
+                        ent["score"] = ent.get("score", 0.75)
+                    all_root_nodes.extend(entity_from_topics)
+                    logger.info(f"Topic fallback: found {len(topic_nodes)} topics, mapped to {len(entity_from_topics)} entities")
+
             if not all_root_nodes:
                 return ObjectFirstSearchResult(query=query, rows=[], total_objects=0, total_facts=0)
 
@@ -1803,8 +1822,10 @@ Your response:"""
                 relevance_score = root_score * 100
 
                 paths = paths_map.get(root_uuid, [])
+                # 防御性修复：即使路径查询返回空（如 graph_id 不匹配导致），
+                # 也不跳过该根节点，而是返回空路径和空 facts，确保节点可见。
                 if not paths:
-                    continue
+                    logger.warning(f"[search_batch] root_node {root_node.get('name')} ({root_uuid}) has no Topic->Clause path, returning empty facts")
 
                 traversal_nodes: List[ObjectPathNode] = []
                 traversal_edges: List[ObjectPathEdge] = []
@@ -1932,6 +1953,15 @@ Your response:"""
             term_rows.sort(key=lambda r: len(r.facts), reverse=True)
             entity_rows.sort(key=lambda r: len(r.facts), reverse=True)
             all_rows = term_rows[:limit] + entity_rows[:limit]
+
+            # 提升 name 精确匹配的节点到首位（无论 Entity/Term）
+            query_lower = query.strip().lower()
+            for i, row in enumerate(all_rows):
+                name = (row.object_node.get("name") or "").strip().lower()
+                if name == query_lower:
+                    matched = all_rows.pop(i)
+                    all_rows.insert(0, matched)
+                    break
 
             logger.info(
                 f"Batch search complete: {len(all_rows)} rows "
