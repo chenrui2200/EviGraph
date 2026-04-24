@@ -428,21 +428,6 @@ def get_chunk_progress(project_id: str):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@graph_bp.route('/chunk/<project_id>', methods=['GET'])
-@api_handler
-def get_intelligent_chunks(project_id: str):
-    """获取项目的 LLM 智能分块结果"""
-    project = ProjectManager.get_project(project_id)
-    if not project:
-        return jsonify({"success": False, "error": f"项目不存在: {project_id}"}), 404
-
-    chunks = ProjectManager.get_intelligent_chunks(project_id)
-    if not chunks:
-        return jsonify({"success": False, "error": "尚未执行 LLM 分块"}), 200
-
-    return jsonify({"success": True, "data": chunks})
-
-
 @graph_bp.route('/chunk/<project_id>/has_intelligent_chunks', methods=['GET'])
 @api_handler
 def check_has_intelligent_chunks(project_id: str):

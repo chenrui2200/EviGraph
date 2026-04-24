@@ -72,16 +72,3 @@ def task_events(task_id: str):
     return Response(event_stream(), mimetype='text/event-stream')
 
 
-@graph_bp.route('/tasks', methods=['GET'])
-@api_handler
-def list_tasks():
-    """
-    List all tasks
-    """
-    tasks = TaskManager().list_tasks()
-
-    return jsonify({
-        "success": True,
-        "data": [t.to_dict() for t in tasks],
-        "count": len(tasks)
-    })

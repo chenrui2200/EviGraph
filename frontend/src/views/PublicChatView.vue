@@ -97,7 +97,8 @@
 import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { getApp } from '../api/ai_app'
-import { getProjectList, searchEntityTopicClause, rerankFacts, llmAnswer } from '../api/graph'
+import { getProjectList, rerankFacts, llmAnswer } from '../api/graph'
+import { hitTestSearch } from '../composables/useHitTestSearch'
 
 const route = useRoute()
 const appId = route.params.id
@@ -384,27 +385,17 @@ const handleSearch = async () => {
   try {
     // ===== Stage 1: 检索 =====
     loadingMessage.value = '正在知识库检索...'
-    const allRows = []
-    for (const graphId of appConfig.value.selectedGraphIds) {
-      for (const rootType of appConfig.value.rootTypes) {
-        const res = await searchEntityTopicClause({
-          graph_id: graphId,
-          query: query,
-          limit: 15,
-          root_type: rootType,
-        })
-        if (res.success && res.data.rows) {
-          allRows.push(...res.data.rows.map(r => ({ ...r, root_type: rootType })))
-        }
-      }
-    }
+    const { rows } = await hitTestSearch({
+      graphId: appConfig.value.selectedGraphIds,
+      query,
+      limit: 15,
+      similarityThreshold: appConfig.value.similarityThreshold,
+      rootTypes: appConfig.value.rootTypes,
+    })
+    results.value.rows = rows
+    results.value.facts = rows.flatMap(r => r.facts || [])
 
-    // 按相似度阈值过滤
-    const filteredRows = allRows.filter(r => (r.relevance_score || 0) >= appConfig.value.similarityThreshold)
-    results.value.rows = filteredRows
-    results.value.facts = filteredRows.flatMap(r => r.facts || [])
-
-    if (filteredRows.length === 0) {
+    if (rows.length === 0) {
       loadingMessage.value = '未检索到结果'
       results.value.searched = true
       loading.value = false
@@ -414,7 +405,7 @@ const handleSearch = async () => {
     // ===== Stage 2: 相关性重排 =====
     loadingMessage.value = '正在重排...'
     const rerankRes = await rerankFacts({
-      rows: filteredRows,
+      rows: rows,
       query: query,
       top_k: appConfig.value.topK,
       rerank_min_score: appConfig.value.rerankMinScore,

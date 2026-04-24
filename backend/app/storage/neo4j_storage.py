@@ -994,69 +994,6 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             return self._call_with_retry(session.execute_read, _read)
 
-    def update_node_labels(
-        self,
-        graph_id: str,
-        node_uuid: str,
-        add_labels: List[str],
-        remove_labels: Optional[List[str]] = None
-    ) -> bool:
-        """
-        更新节点的标签
-
-        Args:
-            graph_id: 图谱ID
-            node_uuid: 节点UUID
-            add_labels: 要添加的标签列表（如 ["Term"] 或 ["Entity"]）
-            remove_labels: 要移除的标签列表（可选）
-
-        Returns:
-            是否成功
-        """
-        if not add_labels and not remove_labels:
-            return True
-
-        try:
-            with self._driver.session() as session:
-                def _update(tx):
-                    # 首先检查节点是否存在
-                    check = tx.run(
-                        "MATCH (n {uuid: $uuid, graph_id: $gid}) RETURN count(n) as cnt",
-                        uuid=node_uuid,
-                        gid=graph_id
-                    ).single()
-                    if not check or check["cnt"] == 0:
-                        return False
-
-                    # 添加标签
-                    if add_labels:
-                        for label in add_labels:
-                            # 标签名只允许特定值，防止注入
-                            if label not in ("Term", "Entity", "Component", "Action", "Condition"):
-                                continue
-                            tx.run(
-                                f"MATCH (n {{uuid: $uuid, graph_id: $gid}}) SET n:`{label}`",
-                                uuid=node_uuid,
-                                gid=graph_id
-                            )
-
-                    # 移除标签
-                    if remove_labels:
-                        for label in remove_labels:
-                            if label not in ("Term", "Entity", "Object", "Component", "Action", "Condition"):
-                                continue
-                            tx.run(
-                                f"MATCH (n {{uuid: $uuid, graph_id: $gid}}) REMOVE n:`{label}`",
-                                uuid=node_uuid,
-                                gid=graph_id
-                            )
-                    return True
-
-                return self._call_with_retry(session.execute_write, _update)
-        except Exception as e:
-            logger.warning(f"[storage] update_node_labels failed: {e}")
-            return False
-
     def get_node_edges(self, node_uuid: str) -> List[Dict[str, Any]]:
         """O(1) Cypher — NOT full scan + filter like the old Zep code."""
         def _read(tx):

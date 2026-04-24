@@ -295,22 +295,3 @@ def llm_answer():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@report_bp.route('/tasks/cleanup', methods=['POST'])
-def cleanup_tasks():
-    """
-    Cleanup old completed/failed tasks.
-
-    POST body (optional):
-        max_age_hours: int (default 168 = 7 days)
-    """
-    data = request.get_json() or {}
-    max_age_hours = int(data.get('max_age_hours', 168))
-
-    try:
-        from ..models.task import TaskManager
-        tm = TaskManager()
-        removed = tm.cleanup_old_tasks(max_age_hours=max_age_hours)
-        return jsonify({"success": True, "removed": removed})
-    except Exception as e:
-        logger.error(f"cleanup_tasks failed: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500

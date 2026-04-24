@@ -43,21 +43,6 @@ export function buildGraph(data) {
 }
 
 /**
- * Reset and re-run intelligent chunk annotation
- * @param {Object} data - Contains project_id, reset (bool)
- * @returns {Promise}
- */
-export function resetIntelligentChunks(data) {
-  return requestWithRetry(() =>
-    service({
-      url: '/api/graph/chunk/intelligent',
-      method: 'post',
-      data
-    })
-  )
-}
-
-/**
  * Query task status
  * @param {String} taskId - Task ID
  * @returns {Promise}
@@ -143,19 +128,6 @@ export function getProjectList(limit = 50) {
 }
 
 /**
- * Search graph (Hit Test) - supports both single and multi-graph search
- * @param {Object} data - Contains graph_id or graph_ids, query, limit
- * @returns {Promise}
- */
-export function searchGraph(data) {
-  return service({
-    url: '/api/report/tools/search',
-    method: 'post',
-    data
-  })
-}
-
-/**
  * Object-first DFS search - results grouped by Object node
  * @param {Object} data - Contains graph_id, query, limit, max_depth, root_type
  * @returns {Promise}
@@ -203,32 +175,6 @@ export function rerankFacts(data) {
 export function llmAnswer(data) {
   return service({
     url: '/api/report/tools/llm-answer',
-    method: 'post',
-    data
-  })
-}
-
-/**
- * AI Q&A - retrieval from multiple graphs + LLM answering
- * @param {Object} data - Contains graph_ids, query
- * @returns {Promise}
- */
-export function aiQa(data) {
-  return service({
-    url: '/api/graph/ai-qa',
-    method: 'post',
-    data
-  })
-}
-
-/**
- * Chat with Report Agent (Advanced retrieval)
- * @param {Object} data - Contains simulation_id, message, chat_history
- * @returns {Promise}
- */
-export function chatWithAgent(data) {
-  return service({
-    url: '/api/report/chat',
     method: 'post',
     data
   })
@@ -397,24 +343,6 @@ export function getKbPipelineEventsURL(pipelineId) {
 // ============================================================================
 // MinerU PDF 解析 API
 // ============================================================================
-
-/**
- * 调用 MinerU API 解析 PDF
- * @param {FormData} formData - 包含 pdf_file 和可选的 project_id, filename
- * @returns {Promise}
- */
-export function mineruParse(formData) {
-  return requestWithRetry(() =>
-    service({
-      url: '/api/graph/pdf/mineru-parse',
-      method: 'post',
-      data: formData,
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
-    })
-  )
-}
 
 /**
  * 获取 MinerU 解析结果

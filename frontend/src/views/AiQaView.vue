@@ -479,7 +479,7 @@
       </div>
     </div>
 
-    <!-- API Publish Details & Mock Test Modal -->
+    <!-- API Publish Details Modal -->
     <div v-if="showApiModal" class="modal-overlay" @click.self="showApiModal = false">
       <div class="api-modal">
         <div class="modal-header">
@@ -502,26 +502,6 @@
               </div>
             </div>
 
-            <div class="api-section">
-              <div class="section-title">方式 2: API 接口调用</div>
-              <div class="api-info-card">
-                <div class="info-row">
-                  <span class="info-label">接口地址:</span>
-                  <code class="info-value">{{ apiBaseUrl }}</code>
-                </div>
-                <div class="info-row">
-                  <span class="info-label">请求方法:</span>
-                  <span class="info-value method-tag">POST</span>
-                </div>
-              </div>
-
-              <div class="code-block-wrapper">
-                <div class="code-header">Curl 调用示例</div>
-                <pre class="code-content">curl -X POST {{ apiBaseUrl }} \
-     -H "Content-Type: application/json" \
-     -d '{"query": "您的问题"}'</pre>
-              </div>
-            </div>
           </div>
         </div>
         <div class="modal-footer">
@@ -537,7 +517,7 @@ import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { getProjectList, updateProject, rerankFacts, llmAnswer } from '../api/graph'
 import { hitTestSearch } from '../composables/useHitTestSearch'
-import { saveApp, getApp, publishApp, executeAppApi } from '../api/ai_app'
+import { saveApp, getApp, publishApp } from '../api/ai_app'
 import PdfViewer from '../components/PdfViewer.vue'
 
 const props = defineProps({
@@ -580,12 +560,6 @@ const handleAppNameBlur = () => {
   }
 }
 
-// API Mock Test State
-const mockQuery = ref('')
-const mockResult = ref(null)
-const mockLoading = ref(false)
-
-const apiBaseUrl = computed(() => `${window.location.origin}/api/ai-app/execute/${appId.value}`)
 const publicChatUrl = computed(() => `${window.location.origin}/chat/${appId.value}`)
 const iframeCode = computed(() => `<iframe src="${publicChatUrl.value}" width="100%" height="600px" frameborder="0"></iframe>`)
 
@@ -1188,24 +1162,6 @@ const handlePublish = async () => {
     alert('发布操作出错')
   } finally {
     publishing.value = false
-  }
-}
-
-const runMockTest = async () => {
-  if (!mockQuery.value.trim()) return
-  mockLoading.value = true
-  mockResult.value = null
-  try {
-    const res = await executeAppApi(appId.value, mockQuery.value)
-    if (res.success) {
-      mockResult.value = res.data
-    } else {
-      mockResult.value = { error: res.error }
-    }
-  } catch (err) {
-    mockResult.value = { error: err.message }
-  } finally {
-    mockLoading.value = false
   }
 }
 
@@ -2300,29 +2256,6 @@ onUnmounted(() => {
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;
-}
-
-.mock-textarea {
-  width: 100%;
-  height: 80px;
-  border: 1px solid #dcdfe6;
-  border-radius: 8px;
-  padding: 12px;
-  font-size: 13px;
-  resize: none;
-  outline: none;
-  transition: border-color 0.2s;
-}
-
-.mock-textarea:focus {
-  border-color: #409eff;
-}
-
-.mock-input-group {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  align-items: flex-end;
 }
 
 .result-pre {
