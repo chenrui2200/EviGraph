@@ -24,7 +24,7 @@
       </div>
 
       <!-- No Results State -->
-      <div v-if="!loading && !results.answer && results.searched" class="no-results-screen">
+      <div v-if="!loading && !results.answer && results.searched" class="qa-result-container no-results">
         <div class="empty-icon">📭</div>
         <h2>未检索到相关结果</h2>
         <p>当前知识库中未找到与"{{ currentQuery }}"相关的内容，请尝试更换关键词或调整检索范围</p>
@@ -693,17 +693,17 @@ onMounted(async () => {
 }
 
 /* ========== Misc ========== */
-.loading-screen, .welcome-screen, .no-results-screen {
+.loading-screen, .welcome-screen, .qa-result-container.no-results {
   text-align: center;
   margin-top: 10vh;
   color: #999;
 }
 
-.no-results-screen h2 {
+.qa-result-container.no-results h2 {
   color: #c0392b;
 }
 
-.no-results-screen p {
+.qa-result-container.no-results p {
   color: #7f8c8d;
   max-width: 500px;
   margin: 0 auto;
