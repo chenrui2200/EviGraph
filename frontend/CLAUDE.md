@@ -1,6 +1,7 @@
 [根目录](../CLAUDE.md) > **frontend**
 
 ## 变更记录 (Changelog)
+- **2026-04-24**: 前端 API 死代码清理：删除 graph.js 中未使用的 searchGraph、aiQa、chatWithAgent、mineruParse、resetIntelligentChunks；Process.vue Hit-Test 检索改为 searchObjectFirst 对齐后端 `/tools/search-object-first`。
 - **2026-04-12**: 新增 API 客户端、Composable 状态管理、Router 路由配置、Store 状态管理。
 - **2026-03-24**: 初始扫描，识别 Vue 3 组件与 API 客户端结构。
 
@@ -35,10 +36,7 @@ frontend/src/
 | :--- | :--- |
 | `index.js` | Axios 基础配置与重试机制 |
 | `graph.js` | 图谱相关 API 调用 |
-| `ai_qa.js` | AI 问答 API 调用 |
-| `chunk.js` | 分块 API 调用 |
-| `project.js` | 项目管理 API 调用 |
-| `ontology.js` | 本体 API 调用 |
+| `ai_app.js` | AI 应用配置 API 调用 |
 
 ## 关键依赖
 - **Vue 3**: 前端框架。

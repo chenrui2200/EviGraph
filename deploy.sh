@@ -180,7 +180,11 @@ elif check_base_exists; then
         docker cp backend/. "${CONTAINER_NAME}:/app/backend/"
         [ -f nginx.conf ]       && docker cp nginx.conf "${CONTAINER_NAME}:/etc/nginx/nginx.conf"
         [ -f supervisord.conf ] && docker cp supervisord.conf "${CONTAINER_NAME}:/etc/supervisor/conf.d/supervisord.conf"
-        [ -f .env ]             && docker cp .env "${CONTAINER_NAME}:/app/.env"
+        # .env 文件可能被运行中的进程占用，先复制到临时文件再 mv 替换
+        if [ -f .env ]; then
+            docker cp .env "${CONTAINER_NAME}:/app/.env.tmp"
+            docker exec "${CONTAINER_NAME}" sh -c "cat /app/.env.tmp > /app/.env && rm -f /app/.env.tmp"
+        fi
 
         step "代码已同步，重启服务..."
         docker restart "${CONTAINER_NAME}"

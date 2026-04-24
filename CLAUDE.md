@@ -1,6 +1,7 @@
 # Knowledge EviGraph 架构文档
 
 ## 变更记录 (Changelog)
+- **2026-04-24**: 清理前后端死代码：移除未使用的后端路由（delete_graph、supplement_knowledge、check_graph_references、reset_project、cleanup_tasks、list_tasks）及 entity_routes.py 整个模块；删除 neo4j_storage.py 中的 update_node_labels 孤儿方法；前端移除 searchGraph/aiQa/chatWithAgent/mineruParse/resetIntelligentChunks 等死代码函数，Process.vue Hit-Test 改用 searchObjectFirst 对齐后端 `/tools/search-object-first`。
 - **2026-04-13**: 新增 MinerU `parse_method` 参数（auto/ocr）、智能分析进度回调与实时日志推送、并发解析 mineru_parsed.jsonl（多线程 append 无锁）。
 - **2026-04-12**: 更新架构文档，反映 QA Pipeline、BGE-reranker、JSONL 解析、智能分块等新功能。
 - **2026-03-24**: 初始化项目架构文档，识别后端 (Python/Flask) 与前端 (Vue 3/Vite) 模块。
@@ -50,15 +51,14 @@ graph TD
 | 路由文件 | 路径 | 职责 |
 | :--- | :--- | :--- |
 | `graph.py` | `/api/graph` | 核心图谱接口、后台 Worker 逻辑 |
-| `graph_ops_routes.py` | `/api/graph/ops` | 图谱操作（实体/关系管理） |
-| `ai_qa_routes.py` | `/api/ai-qa` | AI 问答路由 |
+| `graph_ops_routes.py` | `/api/graph/ops` | 图谱操作（构建、数据查询） |
 | `ai_app.py` | `/api/ai-app` | AI 应用配置与管理 |
 | `chunk_routes.py` | `/api/chunk` | 文档智能分块 |
 | `ontology_routes.py` | `/api/ontology` | 本体生成与管理 |
 | `project_routes.py` | `/api/project` | 项目管理 |
-| `entity_routes.py` | `/api/entity` | 实体管理 |
-| `report.py` | `/api/report` | 报告生成 |
+| `report.py` | `/api/report` | 报告生成（检索、重排、LLM 问答工具） |
 | `task_routes.py` | `/api/task` | 异步任务状态 |
+| `kb_pipeline_routes.py` | `/api/kb-pipeline` | KB Pipeline 管理 |
 
 ### 后端核心服务 (`backend/app/services/`)
 | 服务文件 | 职责 |
@@ -72,7 +72,6 @@ graph TD
 | `oasis_profile_generator.py` | OASIS 规范剖面生成 |
 | `normative_ontology.py` | 规范本体定义 |
 | `semantic_enricher.py` | 语义 enrichment |
-| `llm_doc_parser.py` | LLM 文档解析 |
 | `query_intent_parser.py` | 查询意图解析 |
 
 ### 后端存储层 (`backend/app/storage/`)
@@ -147,7 +146,7 @@ graph TD
 ```
 
 ## AI 使用指引
-- 该项目涉及复杂的图谱构建逻辑 (`backend/app/services/graph_builder.py`) 和多步检索逻辑 (`backend/app/api/graph.py` 中的 `ai_qa`)。
+- 该项目涉及复杂的图谱构建逻辑 (`backend/app/services/graph_builder.py`) 和多步检索逻辑 (`backend/app/api/report.py` 工具接口)。
 - **QA Pipeline**: 统一服务整合了检索、分块、重排功能 (`qa_pipeline.py`)。
 - **智能分块**: 支持 LLM 驱动分块 (`llm_driven_chunker.py`) 和层级分块 (`hierarchical_chunker.py`)。
 - **JSONL 支持**: 条款解析支持直接读取 JSONL 格式。
