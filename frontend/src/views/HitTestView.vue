@@ -694,41 +694,44 @@ const filteredGraphData = computed(() => {
     }
   }
 
-  // 传统模式
-  if (!filterGraph.value || !results.value.facts.length) {
-    return fullGraphData.value
-  }
+  // 传统模式：有搜索结果时按 filterGraph 决定是否过滤
+  if (results.value.facts.length > 0) {
+    if (!filterGraph.value) return fullGraphData.value
 
-  const resultNodeIds = new Set()
-  const resultEdgeIds = new Set()
+    const resultNodeIds = new Set()
+    const resultEdgeIds = new Set()
 
-  results.value.nodes.forEach(n => resultNodeIds.add(n.uuid))
-  results.value.edges.forEach(e => {
-    resultEdgeIds.add(e.uuid)
-    resultNodeIds.add(e.source_node_uuid)
-    resultNodeIds.add(e.target_node_uuid)
-  })
-
-  results.value.facts.forEach(f => {
-    if (f.source_node_uuid) resultNodeIds.add(f.source_node_uuid)
-    if (f.target_node_uuid) resultNodeIds.add(f.target_node_uuid)
-    if (f.uuid) resultNodeIds.add(f.uuid)
-  })
-
-  if (fullGraphData.value.edges) {
-    fullGraphData.value.edges.forEach(e => {
-      if (resultNodeIds.has(e.source_node_uuid) || resultNodeIds.has(e.target_node_uuid)) {
-        resultEdgeIds.add(e.uuid)
-        resultNodeIds.add(e.source_node_uuid)
-        resultNodeIds.add(e.target_node_uuid)
-      }
+    results.value.nodes.forEach(n => resultNodeIds.add(n.uuid))
+    results.value.edges.forEach(e => {
+      resultEdgeIds.add(e.uuid)
+      resultNodeIds.add(e.source_node_uuid)
+      resultNodeIds.add(e.target_node_uuid)
     })
+
+    results.value.facts.forEach(f => {
+      if (f.source_node_uuid) resultNodeIds.add(f.source_node_uuid)
+      if (f.target_node_uuid) resultNodeIds.add(f.target_node_uuid)
+      if (f.uuid) resultNodeIds.add(f.uuid)
+    })
+
+    if (fullGraphData.value.edges) {
+      fullGraphData.value.edges.forEach(e => {
+        if (resultNodeIds.has(e.source_node_uuid) || resultNodeIds.has(e.target_node_uuid)) {
+          resultEdgeIds.add(e.uuid)
+          resultNodeIds.add(e.source_node_uuid)
+          resultNodeIds.add(e.target_node_uuid)
+        }
+      })
+    }
+
+    return {
+      nodes: fullGraphData.value.nodes.filter(n => resultNodeIds.has(n.uuid)),
+      edges: (fullGraphData.value.edges || []).filter(e => resultEdgeIds.has(e.uuid))
+    }
   }
 
-  return {
-    nodes: fullGraphData.value.nodes.filter(n => resultNodeIds.has(n.uuid)),
-    edges: (fullGraphData.value.edges || []).filter(e => resultEdgeIds.has(e.uuid))
-  }
+  // 没有搜索结果：不展示任何图结构
+  return { nodes: [], edges: [] }
 })
 
 // UI Helpers
