@@ -47,10 +47,6 @@
             </div>
 
             <div class="search-options">
-              <label class="checkbox-label">
-                <input type="checkbox" v-model="filterGraph" />
-                <span>自动过滤关联图结构</span>
-              </label>
               <!-- 根节点类型多选 -->
               <span class="depth-label">
                 根节点类型
@@ -656,7 +652,6 @@ const submitSupplement = async () => {
 const filteredGraphData = computed(() => {
   // Object-first 模式：基于 DFS 遍历路径过滤（与显示结果一一对应）
   if (filteredObjectFirstRows.value.length > 0) {
-    if (!filterGraph.value) return fullGraphData.value
     const resultNodeIds = new Set()
     const resultEdgeIds = new Set()
     filteredObjectFirstRows.value.forEach(row => {
@@ -694,10 +689,8 @@ const filteredGraphData = computed(() => {
     }
   }
 
-  // 传统模式：有搜索结果时按 filterGraph 决定是否过滤
+  // 传统模式：有搜索结果时过滤
   if (results.value.facts.length > 0) {
-    if (!filterGraph.value) return fullGraphData.value
-
     const resultNodeIds = new Set()
     const resultEdgeIds = new Set()
 
