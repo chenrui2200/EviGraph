@@ -751,6 +751,8 @@ class SearchService:
         that appear high in both result sets.
         """
         k_rrf = 60  # Standard constant for RRF
+        VECTOR_WEIGHT = 1.0
+        KEYWORD_WEIGHT = 2.0  # 提高文本关键字权重为 vector 的 2 倍
 
         # Map to store combined info and RRF score
         combined_map: Dict[str, Dict[str, Any]] = {}
@@ -761,7 +763,7 @@ class SearchService:
             if uid not in combined_map:
                 combined_map[uid] = {k: v for k, v in res.items() if k != "_score"}
                 combined_map[uid]["rrf_score"] = 0.0
-            combined_map[uid]["rrf_score"] += 1.0 / (k_rrf + rank)
+            combined_map[uid]["rrf_score"] += VECTOR_WEIGHT / (k_rrf + rank)
 
         # Process keyword results
         for rank, res in enumerate(keyword_results, 1):
@@ -769,7 +771,7 @@ class SearchService:
             if uid not in combined_map:
                 combined_map[uid] = {k: v for k, v in res.items() if k != "_score"}
                 combined_map[uid]["rrf_score"] = 0.0
-            combined_map[uid]["rrf_score"] += 1.0 / (k_rrf + rank)
+            combined_map[uid]["rrf_score"] += KEYWORD_WEIGHT / (k_rrf + rank)
 
         # Sort by RRF score descending
         sorted_items = sorted(
