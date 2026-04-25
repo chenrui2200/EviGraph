@@ -6,8 +6,10 @@
         <h1 class="app-title">{{ appName }}</h1>
       </div>
       <div class="header-query" v-if="currentQuery">
-        <span class="query-label">问：</span>
-        <span class="query-text">{{ currentQuery }}</span>
+        <div class="query-bubble">
+          <span class="query-label">问</span>
+          <span class="query-text">{{ currentQuery }}</span>
+        </div>
       </div>
       <div class="header-status" v-if="loading">
         <div class="spinner-sm"></div>
@@ -17,51 +19,60 @@
 
     <main class="report-body" ref="scrollContainer">
       <!-- Welcome State -->
-      <div v-if="!loading && !results.answer && !results.searched" class="welcome-screen">
+      <div v-if="!loading && results.facts.length === 0 && !results.searched" class="welcome-screen">
         <div class="empty-icon">🔎</div>
         <h2>知识库分析助手</h2>
-        <p>请在下方输入您的问题，我将为您检索图谱并生成详细的技术报告</p>
+        <p>请在下方输入您的问题，我将为您检索图谱知识出处</p>
       </div>
 
       <!-- No Results State -->
-      <div v-if="!loading && !results.answer && results.searched" class="qa-result-container no-results">
+      <div v-if="!loading && results.facts.length === 0 && results.searched" class="qa-result-container no-results">
         <div class="empty-icon">📭</div>
         <h2>未检索到相关结果</h2>
         <p>当前知识库中未找到与"{{ currentQuery }}"相关的内容，请尝试更换关键词或调整检索范围</p>
       </div>
 
       <!-- QA Result Report (与 /ai-qa Output 节点一致) -->
-      <div v-if="results.answer" class="qa-result-container">
-        <!-- 1. Knowledge Sources -->
+      <div v-if="results.facts.length > 0" class="qa-result-container">
+        <!-- Knowledge Sources -->
         <div class="result-section">
           <div class="section-header">📚 检索依据原文</div>
-          <div v-if="results.facts.length === 0" class="no-evidence-hint">暂无有效知识出处</div>
-          <div v-else class="source-evidence-list">
-            <div v-for="(fact, idx) in results.facts" :key="idx" class="evidence-item">
-              <div class="evidence-meta">
-                <span class="source-tag">来源 {{ idx + 1 }}: {{ fact.source }} <template v-if="fact.page">(P{{ fact.page }})</template></span>
-                <span v-if="fact.relevance_score" class="evidence-score-badge" :style="{ background: getThresholdColor(fact.relevance_score) }">
-                  {{ fact.relevance_score }}分
-                </span>
+          <div class="source-evidence-list">
+            <div
+              v-for="(group, sourceName) in groupedFacts"
+              :key="sourceName"
+              class="evidence-section"
+            >
+              <div class="evidence-section-header" @click="toggleSection(sourceName)">
+                <span class="section-toggle">{{ isSectionOpen(sourceName) ? '▼' : '▶' }}</span>
+                <span class="section-title">📄 {{ sourceName }} ({{ group.length }}条)</span>
               </div>
-              <div class="evidence-screenshot-box">
-                <canvas :ref="el => setEvidenceRef(el, idx)" class="evidence-canvas"></canvas>
-                <div v-if="!fact.bbox" class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
+              <div v-show="isSectionOpen(sourceName)" class="evidence-section-body">
+                <div
+                  v-for="fact in group"
+                  :key="fact._idx"
+                  class="evidence-item"
+                >
+                  <div class="evidence-text-row">
+                    <span v-if="fact.relevance_score" class="evidence-score-badge-small" :style="{ background: getThresholdColor(fact.relevance_score) }">
+                      {{ fact.relevance_score }}分
+                    </span>
+                    <span class="evidence-text">{{ fact.text }}</span>
+                    <span v-if="fact.page" class="evidence-page">P{{ fact.page }}</span>
+                  </div>
+                  <div class="evidence-pdf-fold">
+                    <button class="fold-btn" @click.stop="togglePdf(fact._idx)">
+                      {{ isPdfOpen(fact._idx) ? '收起PDF位置 ▲' : '查看PDF位置 ▼' }}
+                    </button>
+                    <div v-show="isPdfOpen(fact._idx)" class="evidence-pdf-content">
+                      <canvas :ref="el => setEvidenceRef(el, fact._idx)" class="evidence-canvas"></canvas>
+                      <div v-if="!fact.bbox" class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-
-        <!-- 2. Thinking Process -->
-        <div v-if="parsedResult.thought" class="result-section">
-          <div class="section-header">🧠 推理过程 (Thinking Process)</div>
-          <div class="thought-content">{{ parsedResult.thought }}</div>
-        </div>
-
-        <!-- 3. Final Conclusion -->
-        <div class="result-section">
-          <div class="section-header">✨ 最终结论</div>
-          <div class="conclusion-text">{{ parsedResult.conclusion }}</div>
         </div>
       </div>
 
@@ -97,7 +108,7 @@
 import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { getApp } from '../api/ai_app'
-import { getProjectList, rerankFacts, llmAnswer } from '../api/graph'
+import { getProjectList, rerankFacts } from '../api/graph'
 import { hitTestSearch } from '../composables/useHitTestSearch'
 
 const route = useRoute()
@@ -131,25 +142,44 @@ const results = ref({
   rows: [],
   facts: [],
   rerank_results: [],
-  answer: '',
+  searched: false,
 })
 
 // Evidence canvas refs
 const evidenceCanvasRefs = ref({})
 
-// ============ Computed ============
-const parsedResult = computed(() => {
-  const text = results.value.answer || ''
-  let thought = ''
-  let conclusion = text
+// ============ Fold State ============
+const expandedSections = ref(new Set())
+const expandedPdfs = ref(new Set())
 
-  const thoughtMatch = text.match(/<(thought|think)>([\s\S]*?)<\/\1>/i)
-  if (thoughtMatch) {
-    thought = thoughtMatch[2].trim()
-    conclusion = text.replace(thoughtMatch[0], '').trim()
+const groupedFacts = computed(() => {
+  const groups = {}
+  for (let i = 0; i < results.value.facts.length; i++) {
+    const fact = results.value.facts[i]
+    const key = fact.source || 'Unknown'
+    if (!groups[key]) groups[key] = []
+    groups[key].push({ ...fact, _idx: i })
   }
-  return { thought, conclusion }
+  return groups
 })
+
+const isSectionOpen = (source) => expandedSections.value.has(source)
+const isPdfOpen = (idx) => expandedPdfs.value.has(idx)
+
+const toggleSection = (source) => {
+  const s = expandedSections.value
+  if (s.has(source)) s.delete(source)
+  else s.add(source)
+}
+
+const togglePdf = (idx) => {
+  const s = expandedPdfs.value
+  if (s.has(idx)) s.delete(idx)
+  else {
+    s.add(idx)
+    nextTick(() => renderEvidenceScreenshots())
+  }
+}
 
 // ============ Threshold Colors ============
 const getThresholdColor = (val) => {
@@ -379,8 +409,10 @@ const handleSearch = async () => {
   userInput.value = ''
 
   // Reset results
-  results.value = { rows: [], facts: [], rerank_results: [], answer: '', searched: false }
+  results.value = { rows: [], facts: [], rerank_results: [], searched: false }
   evidenceCanvasRefs.value = {}
+  expandedSections.value = new Set()
+  expandedPdfs.value = new Set()
 
   try {
     // ===== Stage 1: 检索 =====
@@ -413,27 +445,17 @@ const handleSearch = async () => {
 
     if (rerankRes.success && rerankRes.data) {
       results.value.rerank_results = rerankRes.data.scored_facts || []
-      // facts = top_k 截取后的 facts（用于 LLM 推理和证据展示）
       results.value.facts = rerankRes.data.filtered_facts || rerankRes.data.scored_facts || []
       if (rerankRes.data.rows && rerankRes.data.rows.length > 0) {
         results.value.rows = rerankRes.data.rows
       }
     }
 
-    // ===== Stage 3: LLM 生成答案 =====
-    loadingMessage.value = '正在生成答案...'
-    // filtered_facts 已由后端按 top_k 截取，直接使用
-    const llmRes = await llmAnswer({
-      facts: results.value.facts,
-      query: query,
-      temperature: appConfig.value.temperature,
-    })
+    // 默认展开所有 section
+    const sources = new Set(results.value.facts.map(f => f.source || 'Unknown'))
+    sources.forEach(s => expandedSections.value.add(s))
 
-    if (llmRes.success && llmRes.data) {
-      results.value.answer = llmRes.data.answer || ''
-    }
-
-    // 先设置渲染中状态，等 canvas 截图全部绘制完成后再展示最终 report
+    // 渲染截图
     isRenderingEvidence.value = true
     nextTick(async () => {
       await renderEvidenceScreenshots()
@@ -492,18 +514,37 @@ onMounted(async () => {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin: 0 24px;
+  justify-content: center;
+  margin: 0 16px;
   overflow: hidden;
 }
-.query-label { font-size: 13px; color: #909399; font-weight: 600; flex-shrink: 0; }
+.query-bubble {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: #f0f7ff;
+  border: 1px solid #c6e2ff;
+  border-radius: 10px;
+  padding: 8px 14px;
+  max-width: 100%;
+}
+.query-label {
+  font-size: 12px;
+  color: #409eff;
+  font-weight: 800;
+  background: #fff;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid #c6e2ff;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
 .query-text {
-  font-size: 13px;
-  color: #303133;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 14px;
+  color: #1a1a1a;
+  font-weight: 600;
+  line-height: 1.5;
+  word-break: break-all;
 }
 
 .report-body {
@@ -553,40 +594,118 @@ onMounted(async () => {
 .source-evidence-list {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
+}
+
+.evidence-section {
+  border: 1px solid #eee;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.evidence-section-header {
+  padding: 10px 16px;
+  background: #f5f7fa;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s;
+}
+
+.evidence-section-header:hover {
+  background: #e8ecf1;
+}
+
+.evidence-section-header .section-toggle {
+  font-size: 11px;
+  color: #909399;
+}
+
+.evidence-section-header .section-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #333;
+}
+
+.evidence-section-body {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: #fafafa;
 }
 
 .evidence-item {
-  border: 1px solid #eee;
+  border: 1px solid #e8e8e8;
   border-radius: 8px;
-  overflow: hidden;
+  padding: 10px 12px;
+  background: #fff;
 }
 
-.evidence-meta {
-  padding: 8px 12px;
-  background: #f8f9fa;
+.evidence-text-row {
   display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-  font-weight: 600;
-  color: #666;
-  border-bottom: 1px solid #eee;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 8px;
 }
 
-.source-tag { color: #409eff; }
-.evidence-score-badge {
-  color: #fff;
-  padding: 1px 8px;
-  border-radius: 10px;
+.evidence-score-badge-small {
   font-size: 11px;
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 6px;
   font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
-.evidence-screenshot-box {
+.evidence-text {
+  font-size: 14px;
+  color: #333;
+  line-height: 1.7;
+  flex: 1;
+}
+
+.evidence-page {
+  font-size: 11px;
+  color: #909399;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.evidence-pdf-fold {
+  margin-top: 4px;
+}
+
+.fold-btn {
+  background: #f0f2f5;
+  border: 1px solid #dcdfe6;
+  color: #606266;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.fold-btn:hover {
+  background: #e6f7ff;
+  border-color: #409eff;
+  color: #409eff;
+}
+
+.evidence-pdf-content {
+  margin-top: 8px;
+  padding: 6px;
   background: #525659;
-  padding: 10px;
+  border-radius: 6px;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
 }
 
 .evidence-canvas {
@@ -602,24 +721,6 @@ onMounted(async () => {
   font-size: 13px;
   color: #666;
   text-align: left;
-}
-
-.thought-content {
-  background: #fffbea;
-  border-left: 4px solid #f6ad55;
-  padding: 15px;
-  font-size: 14px;
-  line-height: 1.8;
-  color: #5a6371;
-  white-space: pre-wrap;
-}
-
-.conclusion-text {
-  font-size: 16px;
-  line-height: 1.8;
-  color: #2c3e50;
-  font-weight: 500;
-  white-space: pre-wrap;
 }
 
 /* ========== Footer ========== */
