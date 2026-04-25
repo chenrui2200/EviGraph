@@ -1,6 +1,7 @@
 # Knowledge EviGraph 架构文档
 
 ## 变更记录 (Changelog)
+- **2026-04-25**: 清理不存在的关系类型引用：删除 `neo4j_storage.py` 中 `MANDATES/PROHIBITS/RECOMMENDS/HAS_CONDITION/OPERATES_ON/APPLIES_TO/IN_SITUATION` 等孤儿方法（`_create_mandates_relation` 等 10 个）及 `get_graph_data` 查询列表；删除 `graph_tools.py` 死代码 `search_with_dfs_flow` / `search_with_intent_guided_dfs_flow`；删除死模块 `query_intent_parser.py`、`semantic_enricher.py`、`normative_entity.py`；修正 `_expand_object_node_optimized` 注释和 `rel_facts` 映射。更新架构文档明确实际边类型（见"实际图谱结构"）。
 - **2026-04-25**: 新增图谱检索测试页面 (`/graph-search/:projectId`)：支持节点类型多选 + 名称模糊搜索，动态加载 1 跳邻域，节点详情面板展示全部属性，关联节点可展开到图谱并高亮；Topic 节点作为独立召回源（策略 A：复用 clause embedding），后端新增 Topic vector index、Topic hybrid 检索、graph_tools 支持 Topic root type；PublicChatView.vue 修复 canvas 渲染时序（ evidence 完全渲染后再显示 report）；后端新增 `/ops/search-nodes`（支持 node_types 数组）和 `/ops/node-neighborhood` API。
 - **2026-04-24**: 清理前后端死代码：移除未使用的后端路由（delete_graph、supplement_knowledge、check_graph_references、reset_project、cleanup_tasks、list_tasks）及 entity_routes.py 整个模块；删除 neo4j_storage.py 中的 update_node_labels 孤儿方法；前端移除 searchGraph/aiQa/chatWithAgent/mineruParse/resetIntelligentChunks 等死代码函数，Process.vue Hit-Test 改用 searchObjectFirst 对齐后端 `/tools/search-object-first`。
 - **2026-04-13**: 新增 MinerU `parse_method` 参数（auto/ocr）、智能分析进度回调与实时日志推送、并发解析 mineru_parsed.jsonl（多线程 append 无锁）。
@@ -71,9 +72,7 @@ graph TD
 | `hierarchical_chunker.py` | 层级分块服务 |
 | `ontology_generator.py` | 本体生成 |
 | `oasis_profile_generator.py` | OASIS 规范剖面生成 |
-| `normative_ontology.py` | 规范本体定义 |
-| `semantic_enricher.py` | 语义 enrichment |
-| `query_intent_parser.py` | 查询意图解析 |
+| `normative_ontology.py` | 规范本体定义（设计文档，未生成 MANDATES 等边） |
 
 ### 后端存储层 (`backend/app/storage/`)
 | 存储文件 | 职责 |
@@ -125,15 +124,41 @@ graph TD
 - **Requirement**: 强制/推荐/禁止标签。
 - **Parameter**: 表格/公式数值。
 
-### 2. 边类型与情景驱动逻辑
-- **defines**: 术语定义。
-- **has_condition**: 条款的前提条件。
-- **mandates / recommends / prohibits**: 强制/推荐/禁止动作。
-- **in_situation**: 情景直接关联动作。
-- **requires**: 动作满足的具体参数。
-- **核心逻辑**: `Condition` —**under_condition**→ `Clause` —**mandates**→ `Action`
+### 2. 实际图谱结构（Neo4j 中真实创建的边）
 
-### 3. 构建流程
+> ⚠️ **重要区分**：`graph_builder.py` → `batch_add_hierarchical_chunks` 实际写入 Neo4j 的边**只有两种**：
+
+| 边类型 | 方向 | 说明 |
+| :--- | :--- | :--- |
+| `MENTIONS` | Topic → Entity / Topic → Term / Episode → Clause | Topic 关联实体/术语；Episode 提及 Clause |
+| `HAS_TOPIC` | Clause → Topic | 条款关联主题 |
+
+> 清理后仅存的条件触发边（代码保留但当前数据条件不满足，通常不生成）：
+> - `DEFINES`：`sync_term_entities` 仅在用户手动编辑条款术语时创建
+> - `PART_OF`：`build_hierarchical_relations` 仅在条款编号满足层级规则时创建
+> - `CROSS_REFERENCE`：`build_cross_ref_relations` 仅在 metadata 中存在交叉引用时创建
+>
+> 以下边类型已彻底清理（无创建代码）：`RELATION` / `NEXT_EPISODE` / `HAS_DOCUMENT` / `HAS_PAGE` / `HAS_EPISODE` / `MANDATES` / `PROHIBITS` / `HAS_CONDITION` / `OPERATES_ON` / `APPLIES_TO` / `IN_SITUATION`。
+
+### 3. 检索路径（AI-QA 实际使用）
+```
+查询 → clause_id 精确匹配
+      → Entity/Term/Clause 向量并行召回
+      → fallback: Topic hybrid 召回 → Entity 映射
+      → 路径: Entity/Term ←MENTIONS-- Topic ←HAS_TOPIC-- Clause
+      → BGE-reranker 重排 → LLM 回答
+```
+
+### 4. 设计中但未实现的关系类型（仅存在于本体设计 Prompt）
+以下关系类型在 `ontology_generator.py` 的 LLM Prompt 中有定义，但**构建代码不会创建**：
+- `MANDATES` / `RECOMMENDS` / `PROHIBITS`
+- `HAS_CONDITION` / `IN_SITUATION`
+- `OPERATES_ON` / `APPLIES_TO`
+- `REQUIRES`
+
+> 这些类型保留在设计文档中，作为未来扩展方向。
+
+### 5. 构建流程
 - **预处理**: 保留 metadata 溯源。
 - **抽取**: 正则识别章节术语；LLM 识别条件、动作与参数。
 - **关系**: 扫描”在…时”等句式建立条件关联；表格行拆解为参数节点。
@@ -151,7 +176,7 @@ graph TD
 - **QA Pipeline**: 统一服务整合了检索、分块、重排功能 (`qa_pipeline.py`)。
 - **智能分块**: 支持 LLM 驱动分块 (`llm_driven_chunker.py`) 和层级分块 (`hierarchical_chunker.py`)。
 - **JSONL 支持**: 条款解析支持直接读取 JSONL 格式。
-- **核心模型应用**: 必须严格遵循上述 **Normative KG Schema** 进行实体提取和建模，以支持”遇到什么情况应该怎么做”的情景化查询。
+- **核心模型应用**: 实际构建的图谱**只有** `MENTIONS` 和 `HAS_TOPIC` 两种边（见”实际图谱结构”）。检索路径固定为 `Entity/Term ←MENTIONS-- Topic ←HAS_TOPIC-- Clause`。
 
 ## MinerU PDF 解析流程
 

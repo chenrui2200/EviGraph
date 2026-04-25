@@ -33,23 +33,6 @@ class GraphStorage(ABC):
     # --- Add data ---
 
     @abstractmethod
-    def add_text(self, graph_id: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
-        """
-        Process text: NER/RE → create nodes/edges → return episode_id.
-        Optional metadata for traceability.
-        """
-
-    @abstractmethod
-    def add_text_batch(
-        self,
-        graph_id: str,
-        chunks: List[str],
-        batch_size: int = 3,
-        progress_callback: Optional[Callable] = None,
-    ) -> List[str]:
-        """Batch-add text chunks. Returns list of episode_ids."""
-
-    @abstractmethod
     def wait_for_processing(
         self,
         episode_ids: List[str],
@@ -81,10 +64,6 @@ class GraphStorage(ABC):
         """Get nodes filtered by entity type label."""
 
     # --- Read edges ---
-
-    @abstractmethod
-    def get_all_edges(self, graph_id: str) -> List[Dict[str, Any]]:
-        """Get all edges in a graph."""
 
     @abstractmethod
     def get_episodes(self, episode_uuids: List[str]) -> List[Dict[str, Any]]:

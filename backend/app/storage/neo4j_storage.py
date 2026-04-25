@@ -470,60 +470,6 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             self._call_with_retry(session.execute_write, _set)
 
-    def _ensure_document(self, tx, graph_id: str, filename: str) -> str:
-        """Ensure Document node exists and link to Graph."""
-        import hashlib
-        # Use stable UUID based on graph and filename
-        doc_seed = f"{graph_id}:{filename}".encode('utf-8')
-        doc_uuid = str(uuid.UUID(hashlib.md5(doc_seed).hexdigest()))
-
-        tx.run(
-            """
-            MATCH (g:Graph {graph_id: $gid})
-            MERGE (d:Document {uuid: $doc_uuid})
-            ON CREATE SET
-                d.name = $name,
-                d.graph_id = $gid,
-                d.created_at = datetime()
-            ON MATCH SET
-                d.graph_id = $gid
-            MERGE (g)-[r:HAS_DOCUMENT]->(d)
-            ON CREATE SET r.graph_id = $gid
-            ON MATCH SET r.graph_id = $gid
-            """,
-            gid=graph_id,
-            doc_uuid=doc_uuid,
-            name=filename
-        )
-        return doc_uuid
-
-    def _ensure_page(self, tx, graph_id: str, doc_uuid: str, page_num: int) -> str:
-        """Ensure Page node exists and link to Document."""
-        import hashlib
-        page_seed = f"{doc_uuid}:{page_num}".encode('utf-8')
-        page_uuid = str(uuid.UUID(hashlib.md5(page_seed).hexdigest()))
-
-        tx.run(
-            """
-            MATCH (d:Document {uuid: $doc_uuid})
-            MERGE (p:Page {uuid: $page_uuid})
-            ON CREATE SET
-                p.number = $num,
-                p.doc_uuid = $doc_uuid,
-                p.graph_id = $gid,
-                p.created_at = datetime()
-            ON MATCH SET
-                p.graph_id = $gid
-            MERGE (d)-[r:HAS_PAGE]->(p)
-            ON CREATE SET r.graph_id = $gid
-            ON MATCH SET r.graph_id = $gid
-            """,
-            doc_uuid=doc_uuid,
-            page_uuid=page_uuid,
-            num=page_num,
-            gid=graph_id
-        )
-        return page_uuid
 
     def get_ontology(self, graph_id: str) -> Dict[str, Any]:
         with self._driver.session() as session:
@@ -540,411 +486,6 @@ class Neo4jStorage(GraphStorage):
     # Add data (NER → nodes/edges)
     # ----------------------------------------------------------------
 
-    def add_text(self, graph_id: str, text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
-        """Process text: Create skeleton -> NER/RE -> batch embed -> update knowledge."""
-        # Generate stable UUID based on graph_id and content to allow idempotency
-        content_seed = f"{graph_id}:{text}".encode('utf-8')
-        episode_id = str(uuid.UUID(hashlib.md5(content_seed).hexdigest()))
-
-        now = datetime.now(timezone.utc).isoformat()
-        metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
-
-        # 0. Check if already processed
-        with self._driver.session() as session:
-            existing = session.run(
-                "MATCH (ep:Episode {uuid: $uuid}) RETURN ep.processed AS processed",
-                uuid=episode_id
-            ).single()
-            if existing and existing["processed"]:
-                print(f"⏩ [SKIP] Episode {episode_id[:8]} already processed.")
-                logger.info(f"⏩ [SKIP] Episode {episode_id[:8]} already processed. Moving to next.")
-                return episode_id
-
-        logger.info(f"🔨 [START] Processing Episode {episode_id[:8]} (Content Length: {len(text)})")
-
-        # 1. Create episode node and structural skeleton IMMEDIATELY
-        chunk_embedding = []
-        try:
-            logger.info(f"📡 [STEP 1/6] [{episode_id[:8]}] Requesting Embedding...")
-            # Embedding is often the first bottleneck
-            chunk_embedding = self._embedding.embed(text)
-            logger.info(f"✅ [STEP 1/6] [{episode_id[:8]}] Embedding received.")
-        except Exception as e:
-            logger.warning(f"❌ [STEP 1/6] [{episode_id[:8]}] Embedding failed: {e}")
-
-        with self._driver.session() as session:
-            def _create_skeleton(tx):
-                logger.info(f"💾 [STEP 2/6] [{episode_id[:8]}] Creating/Merging Episode node in Neo4j...")
-
-                # Extract indexing properties from metadata for direct storage
-                filename = metadata.get("source") if metadata else None
-                chunk_idx = metadata.get("chunk_index", 0) if metadata else 0
-
-                # Use MERGE instead of CREATE to handle episodes that were created but not fully processed
-                tx.run(
-                    """
-                    MERGE (ep:Episode {uuid: $uuid})
-                    ON CREATE SET
-                        ep.graph_id = $graph_id,
-                        ep.data = $data,
-                        ep.source = $source,
-                        ep.chunk_index = $chunk_index,
-                        ep.metadata_json = $metadata_json,
-                        ep.processed = false,
-                        ep.embedding = $embedding,
-                        ep.created_at = $created_at
-                    ON MATCH SET
-                        ep.graph_id = $graph_id,
-                        ep.data = $data,
-                        ep.source = $source,
-                        ep.chunk_index = $chunk_index,
-                        ep.metadata_json = $metadata_json,
-                        ep.embedding = $embedding
-                    """,
-                    uuid=episode_id,
-                    graph_id=graph_id,
-                    data=text,
-                    source=filename,
-                    chunk_index=chunk_idx,
-                    metadata_json=metadata_json,
-                    embedding=chunk_embedding,
-                    created_at=now,
-                )
-
-                # Apply hierarchy labels to Episode node if present in metadata
-                hierarchy_type = metadata.get("hierarchy_type") if metadata else None
-                if hierarchy_type:
-                    # Convert to PascalCase for Neo4j label (e.g., 'chapter' -> 'Chapter')
-                    # 使用白名单验证，防止 Cypher 注入
-                    safe_label = _safe_label(hierarchy_type.capitalize(), VALID_EPISODE_LABELS)
-                    if safe_label:
-                        tx.run(f"MATCH (ep:Episode {{uuid: $uuid}}) SET ep:`{safe_label}`", uuid=episode_id)
-
-                # Link to Page/Document if metadata is available
-                if metadata:
-                    page_num = metadata.get("page")
-                    if filename:
-                        doc_uuid = self._ensure_document(tx, graph_id, filename)
-
-                        # Sequential linking - Optimized to use indexed properties
-                        if chunk_idx > 0:
-                            tx.run(
-                                """
-                                MATCH (prev:Episode {graph_id: $gid, source: $filename, chunk_index: $prev_idx})
-                                MATCH (curr:Episode {uuid: $curr_uuid})
-                                MERGE (prev)-[r:NEXT_EPISODE]->(curr)
-                                ON CREATE SET r.graph_id = $gid
-                                """,
-                                gid=graph_id,
-                                filename=filename,
-                                prev_idx=chunk_idx - 1,
-                                curr_uuid=episode_id
-                            )
-
-                        if page_num:
-                            page_uuid = self._ensure_page(tx, graph_id, doc_uuid, page_num)
-                            tx.run(
-                                """
-                                MATCH (p:Page {uuid: $p_uuid}), (ep:Episode {uuid: $ep_uuid})
-                                MERGE (p)-[r:HAS_EPISODE]->(ep)
-                                ON CREATE SET r.graph_id = $gid
-                                ON MATCH SET r.graph_id = $gid
-                                """,
-                                p_uuid=page_uuid, ep_uuid=episode_id, gid=graph_id
-                            )
-                        else:
-                            tx.run(
-                                """
-                                MATCH (d:Document {uuid: $d_uuid}), (ep:Episode {uuid: $ep_uuid})
-                                MERGE (d)-[r:HAS_EPISODE]->(ep)
-                                ON CREATE SET r.graph_id = $gid
-                                ON MATCH SET r.graph_id = $gid
-                                """,
-                                d_uuid=doc_uuid, ep_uuid=episode_id, gid=graph_id
-                            )
-
-            self._call_with_retry(session.execute_write, _create_skeleton)
-            logger.info(f"✅ [STEP 2/6] [{episode_id[:8]}] Episode skeleton ready.")
-
-        # 2. Knowledge Extraction (Guided by Ontology)
-        logger.info(f"🔍 [STEP 3/6] [{episode_id[:8]}] Fetching ontology...")
-        ontology = self.get_ontology(graph_id)
-
-        logger.info(f"🤖 [STEP 4/6] [{episode_id[:8]}] Calling LLM for NER extraction (Chat)...")
-        # This is where 'chat' method is called
-        extraction = self._ner.extract(text, ontology)
-        entities = extraction.get("entities", [])
-        relations = extraction.get("relations", [])
-
-        logger.info(f"✅ [STEP 4/6] [{episode_id[:8]}] NER extracted {len(entities)} entities and {len(relations)} relations.")
-
-        # 3. Batch embed all extraction results
-        entity_summaries = []
-        for e in entities:
-            # Prefer LLM-extracted description, fallback to "Name (Type)"
-            desc = e.get("description")
-            if not desc or len(desc) < 3:
-                desc = f"{e['name']} ({e['type']})"
-            entity_summaries.append(desc)
-
-        fact_texts = [r.get("fact", f"{r['source']} {r['type']} {r['target']}") for r in relations]
-        all_texts_to_embed = entity_summaries + fact_texts
-
-        all_embeddings: list = []
-        if all_texts_to_embed:
-            try:
-                logger.info(f"📡 [STEP 5/6] [{episode_id[:8]}] Embedding {len(all_texts_to_embed)} facts/entities...")
-                all_embeddings = self._embedding.embed_batch(all_texts_to_embed)
-                logger.info(f"✅ [STEP 5/6] [{episode_id[:8]}] Knowledge embeddings received.")
-            except Exception as e:
-                logger.warning(f"❌ [STEP 5/6] [{episode_id[:8]}] Knowledge embedding failed: {e}")
-                all_embeddings = [[] for _ in all_texts_to_embed]
-
-        entity_embeddings = all_embeddings[:len(entities)]
-        relation_embeddings = all_embeddings[len(entities):]
-
-        # 4. Write knowledge back to Neo4j
-        logger.info(f"💾 [STEP 6/6] [{episode_id[:8]}] Writing entities and relations to Neo4j...")
-        with self._driver.session() as session:
-            # MERGE entities and link to episode
-            entity_uuid_map: Dict[str, str] = {}
-            for idx, entity in enumerate(entities):
-                ename = entity["name"]
-                etype = entity["type"]
-                attrs = entity.get("attributes", {})
-                summary_text = entity_summaries[idx]
-                embedding = entity_embeddings[idx] if idx < len(entity_embeddings) else []
-
-                def _merge_knowledge(tx, _name=ename, _type=etype, _attrs=attrs,
-                                    _emb=embedding, _summary=summary_text, _ep_id=episode_id):
-                    # 1. First get existing attributes if any
-                    existing = tx.run(
-                        "MATCH (n:Entity {graph_id: $gid, name_lower: $name_lower}) RETURN n.attributes_json AS attrs",
-                        gid=graph_id, name_lower=_name.lower()
-                    ).single()
-
-                    final_attrs = _attrs
-                    if existing and existing["attrs"]:
-                        old_attrs = self._parse_json_safe(existing.get("attrs"), {})
-                        # Merge: new attributes override old ones
-                        final_attrs = {**old_attrs, **_attrs}
-
-                    # 2. Merge Entity
-                    res = tx.run(
-                        """
-                        MERGE (n:Entity {graph_id: $gid, name_lower: $name_lower})
-                        ON CREATE SET
-                            n.uuid = randomUUID(),
-                            n.name = $name,
-                            n.summary = $summary,
-                            n.attributes_json = $attrs_json,
-                            n.embedding = $embedding,
-                            n.created_at = datetime()
-                        ON MATCH SET
-                            n.summary = CASE WHEN n.summary = '' OR n.summary IS NULL THEN $summary ELSE n.summary END,
-                            n.attributes_json = $attrs_json,
-                            n.embedding = $embedding
-                        RETURN n.uuid AS uuid
-                        """,
-                        gid=graph_id, name_lower=_name.lower(), name=_name,
-                        summary=_summary, attrs_json=json.dumps(final_attrs, ensure_ascii=False),
-                        embedding=_emb
-                    )
-                    e_uuid = res.single()["uuid"]
-
-                    # Link Episode -> Entity (for source tracking)
-                    tx.run(
-                        """
-                        MATCH (n:Entity {uuid: $e_uuid}), (ep:Episode {uuid: $ep_id})
-                        MERGE (ep)-[r:MENTIONS]->(n)
-                        ON CREATE SET r.graph_id = $gid
-                        """,
-                        e_uuid=e_uuid, ep_id=_ep_id, gid=graph_id
-                    )
-
-                    # Add label
-                    # 使用白名单验证，防止 Cypher 注入
-                    if _type and _type != "Entity":
-                        safe_label = _safe_label(_type, VALID_NODE_LABELS)
-                        if safe_label:
-                            tx.run(f"MATCH (n:Entity {{uuid: $uuid}}) SET n:`{safe_label}`", uuid=e_uuid)
-
-                    # 3. Auto-Hierarchy for Chapters, Sections, and Clauses
-                    import re
-                    # Match clause like 3.1.1 (links to 3.1)
-                    clause_match = re.match(r'^(\d+\.\d+)\.\d+$', _name)
-                    # Match section like 3.1 (links to Chapter 3)
-                    section_match = re.match(r'^(\d+)\.\d+$', _name)
-
-                    if clause_match:
-                        parent_name = clause_match.group(1)
-                        # Create/Link to parent section automatically
-                        tx.run(
-                            """
-                            MERGE (p:Entity {graph_id: $gid, name_lower: $p_name_lower})
-                            ON CREATE SET
-                                p.uuid = randomUUID(),
-                                p.name = $p_name,
-                                p.created_at = datetime()
-                            WITH p
-                            MATCH (c:Entity {uuid: $c_uuid})
-                            MERGE (c)-[r:PART_OF]->(p)
-                            ON CREATE SET r.graph_id = $gid
-                            """,
-                            gid=graph_id, p_name_lower=parent_name.lower(), p_name=parent_name,
-                            c_uuid=e_uuid
-                        )
-                    elif section_match:
-                        chapter_num = section_match.group(1)
-                        parent_name = f"第{chapter_num}章"
-                        # Create/Link to parent chapter automatically
-                        tx.run(
-                            """
-                            MERGE (p:Entity {graph_id: $gid, name_lower: $p_name_lower})
-                            ON CREATE SET
-                                p.uuid = randomUUID(),
-                                p.name = $p_name,
-                                p.created_at = datetime()
-                            WITH p
-                            MATCH (c:Entity {uuid: $c_uuid})
-                            MERGE (c)-[r:PART_OF]->(p)
-                            ON CREATE SET r.graph_id = $gid
-                            """,
-                            gid=graph_id, p_name_lower=parent_name.lower(), p_name=parent_name,
-                            c_uuid=e_uuid
-                        )
-
-                    return e_uuid
-
-                actual_uuid = self._call_with_retry(session.execute_write, _merge_knowledge)
-                entity_uuid_map[ename.lower()] = actual_uuid
-
-            # Create or Merge relations
-            for idx, relation in enumerate(relations):
-                s_name = relation["source"]
-                t_name = relation["target"]
-                r_type = relation["type"]
-                fact = relation["fact"]
-                s_uuid = entity_uuid_map.get(s_name.lower())
-                t_uuid = entity_uuid_map.get(t_name.lower())
-
-                # Issue 1 Fix: Prevent self-loops (Entity pointing to itself)
-                if s_uuid and t_uuid and s_uuid == t_uuid:
-                    logger.debug(f"[add_text] Skipping self-loop relation: {s_name} --[{r_type}]--> {t_name}")
-                    continue
-
-                if s_uuid and t_uuid:
-                    fact_emb = relation_embeddings[idx] if idx < len(relation_embeddings) else []
-
-                    def _merge_rel(tx, _suid=s_uuid, _tuid=t_uuid, _rt=r_type, _f=fact, _fe=fact_emb, _ep_id=episode_id):
-                        # 1. Check for existing relation to merge episode_ids
-                        existing_rel = tx.run(
-                            """
-                            MATCH (src:Entity {uuid: $suid})-[r:RELATION {graph_id: $gid, name: $name}]->(tgt:Entity {uuid: $tuid})
-                            RETURN r.episode_ids AS ep_ids
-                            """,
-                            suid=_suid, tuid=_tuid, gid=graph_id, name=_rt
-                        ).single()
-
-                        new_ep_ids = [_ep_id]
-                        if existing_rel and existing_rel["ep_ids"]:
-                            old_ep_ids = existing_rel["ep_ids"]
-                            if _ep_id not in old_ep_ids:
-                                new_ep_ids = old_ep_ids + [_ep_id]
-                            else:
-                                new_ep_ids = old_ep_ids
-
-                        # 2. MERGE relationship between entities based on type and graph
-                        tx.run(
-                            """
-                            MATCH (src:Entity {uuid: $suid}), (tgt:Entity {uuid: $tuid})
-                            MERGE (src)-[r:RELATION {graph_id: $gid, name: $name}]->(tgt)
-                            ON CREATE SET
-                                r.uuid = randomUUID(),
-                                r.fact = $fact,
-                                r.fact_embedding = $fact_embedding,
-                                r.episode_ids = $ep_ids,
-                                r.created_at = datetime()
-                            ON MATCH SET
-                                r.episode_ids = $ep_ids,
-                                r.fact = CASE WHEN r.fact = '' OR r.fact IS NULL THEN $fact ELSE r.fact END
-                            """,
-                            suid=_suid, tuid=_tuid, gid=graph_id, name=_rt,
-                            fact=_f, fact_embedding=_fe, ep_ids=new_ep_ids
-                        )
-                    self._call_with_retry(session.execute_write, _merge_rel)
-
-            # CRITICAL: Mark episode as processed ONLY AFTER EVERYTHING IS DONE
-            session.run("MATCH (ep:Episode {uuid: $uuid}) SET ep.processed = true", uuid=episode_id)
-
-        logger.info(f"✅ [DONE] Episode {episode_id[:8]} processed successfully.")
-        return episode_id
-
-    def add_text_batch(
-        self,
-        graph_id: str,
-        chunks: List[Union[str, Any]],
-        batch_size: int = 5,
-        progress_callback: Optional[Callable] = None,
-    ) -> List[str]:
-        """
-        Batch-add text chunks sequentially to ensure stability and clear progress.
-        Leverages the 'already processed' skip logic for fast resumption.
-        """
-        episode_ids = []
-        total = len(chunks)
-        completed = 0
-
-        logger.info(f"🚀 [BATCH START] Processing {total} chunks for graph {graph_id}...")
-
-        # We process sequentially to fulfill the user's request for "one by one"
-        # and to ensure a single hung chunk doesn't block a parallel batch.
-        # Speed is maintained via the fast-skip logic for already processed chunks.
-        for idx, chunk_data in enumerate(chunks):
-            # Normalize chunk data
-            if hasattr(chunk_data, 'text') and hasattr(chunk_data, 'metadata'):
-                text = chunk_data.text
-                metadata = chunk_data.metadata
-            elif isinstance(chunk_data, dict) and "text" in chunk_data:
-                text = chunk_data["text"]
-                metadata = chunk_data.get("metadata")
-            else:
-                text = str(chunk_data)
-                metadata = None
-
-            if not text or not text.strip():
-                completed += 1
-                continue
-
-            log_msg = ""
-            try:
-                # Call add_text (which handles the skip logic internally)
-                episode_id = self.add_text(graph_id, text, metadata=metadata)
-                episode_ids.append(episode_id)
-                log_msg = f"Chunk {idx+1}/{total} handled."
-            except Exception as e:
-                log_msg = f"❌ Error processing chunk {idx+1}: {e}"
-                logger.error(f"{log_msg}\n{traceback.format_exc()}")
-
-            completed += 1
-            if progress_callback:
-                import inspect
-                sig = inspect.signature(progress_callback)
-                if len(sig.parameters) >= 2:
-                    # Report progress to UI
-                    progress_callback(
-                        f"Extracted {completed}/{total} chunks...",
-                        completed / total,
-                        log=log_msg
-                    )
-                else:
-                    progress_callback(completed / total)
-
-            if completed % 10 == 0 or completed == total:
-                logger.info(f"📊 Progress: {completed}/{total} chunks handled.")
-
-        logger.info(f"🏁 [BATCH END] All {total} chunks handled.")
-        return episode_ids
 
     def wait_for_processing(
         self,
@@ -1162,77 +703,6 @@ class Neo4jStorage(GraphStorage):
             with self._driver.session() as session:
                 return self._call_with_retry(session.execute_read, _read)
 
-    def get_term_defines_clauses(
-        self,
-        term_uuids: List[str],
-        graph_id: str,
-        include_clause_data: bool = False,
-    ) -> Union[Dict[str, List[str]], Tuple[Dict[str, List[str]], Dict[str, Dict[str, Any]]]]:
-        """
-        查询 Term -[:DEFINES]-> Clause 直连路径。
-
-        Args:
-            term_uuids: Term 节点 UUID 列表
-            graph_id: 图谱 ID
-            include_clause_data: 是否同时返回 Clause 节点完整数据
-
-        Returns:
-            include_clause_data=False: Dict[term_uuid -> [clause_uuid, ...]]
-            include_clause_data=True:  (defines_map, clause_nodes_map)
-        """
-        if not term_uuids:
-            if include_clause_data:
-                return {}, {}
-            return {}
-
-        if include_clause_data:
-            def _read_with_data(tx):
-                result = tx.run(
-                    """
-                    MATCH (t:Entity:Term)-[:DEFINES]->(c:Clause)
-                    WHERE t.uuid IN $uuids AND t.graph_id = $gid
-                    RETURN t.uuid AS term_uuid, c.uuid AS clause_uuid,
-                           c AS clause_node, labels(c) AS clause_labels
-                    """,
-                    uuids=term_uuids,
-                    gid=graph_id,
-                )
-                defines_map: Dict[str, List[str]] = {uid: [] for uid in term_uuids}
-                clause_nodes_map: Dict[str, Dict[str, Any]] = {}
-                for record in result:
-                    term_uuid = record["term_uuid"]
-                    clause_uuid = record["clause_uuid"]
-                    if term_uuid in defines_map:
-                        defines_map[term_uuid].append(clause_uuid)
-                    if clause_uuid and clause_uuid not in clause_nodes_map:
-                        clause_nodes_map[clause_uuid] = self._node_to_dict(
-                            record["clause_node"], record["clause_labels"]
-                        )
-                return defines_map, clause_nodes_map
-
-            with self._driver.session() as session:
-                return self._call_with_retry(session.execute_read, _read_with_data)
-        else:
-            def _read(tx):
-                result = tx.run(
-                    """
-                    MATCH (t:Entity:Term)-[:DEFINES]->(c)
-                    WHERE t.uuid IN $uuids AND t.graph_id = $gid
-                    RETURN t.uuid AS term_uuid, c.uuid AS clause_uuid
-                    """,
-                    uuids=term_uuids,
-                    gid=graph_id,
-                )
-            defines_map: Dict[str, List[str]] = {uid: [] for uid in term_uuids}
-            for record in result:
-                term_uuid = record["term_uuid"]
-                clause_uuid = record["clause_uuid"]
-                if term_uuid in defines_map:
-                    defines_map[term_uuid].append(clause_uuid)
-            return defines_map
-
-        with self._driver.session() as session:
-            return self._call_with_retry(session.execute_read, _read)
 
     def get_nodes_by_label(self, graph_id: str, label: str) -> List[Dict[str, Any]]:
         # 白名单验证，防止 Cypher 注入
@@ -1370,7 +840,7 @@ class Neo4jStorage(GraphStorage):
                 """
                 MATCH (n)
                 WHERE n.uuid = $uuid AND n.graph_id = $gid
-                OPTIONAL MATCH (n)-[r:RELATION|HAS_TOPIC|MENTIONS|DEFINES]-(m)
+                OPTIONAL MATCH (n)-[r:HAS_TOPIC|MENTIONS]-(m)
                 WHERE r.graph_id = $gid
                 RETURN r, n.uuid AS src_uuid, m.uuid AS tgt_uuid, m, labels(m) AS m_labels
                 LIMIT 50
@@ -1383,7 +853,7 @@ class Neo4jStorage(GraphStorage):
                 """
                 MATCH (n)
                 WHERE n.uuid = $uuid AND n.graph_id = $gid
-                OPTIONAL MATCH (n)-[r1:HAS_TOPIC|MENTIONS|DEFINES]-(mid)-[r2:RELATION|HAS_TOPIC|MENTIONS|DEFINES]-(m)
+                OPTIONAL MATCH (n)-[r1:HAS_TOPIC|MENTIONS]-(mid)-[r2:HAS_TOPIC|MENTIONS]-(m)
                 WHERE r1.graph_id = $gid AND r2.graph_id = $gid AND m <> n
                 RETURN r1, r2,
                        n.uuid AS src1_uuid, mid.uuid AS tgt1_uuid,
@@ -1466,44 +936,16 @@ class Neo4jStorage(GraphStorage):
     # Read edges
     # ----------------------------------------------------------------
 
-    def get_all_edges(self, graph_id: str) -> List[Dict[str, Any]]:
-        def _read(tx):
-            result = tx.run(
-                """
-                MATCH (src:Entity)-[r:RELATION {graph_id: $gid}]->(tgt:Entity)
-                RETURN r, src.uuid AS src_uuid, tgt.uuid AS tgt_uuid
-                ORDER BY r.created_at DESC
-                """,
-                gid=graph_id,
-            )
-            return [
-                self._edge_to_dict(record["r"], record["src_uuid"], record["tgt_uuid"])
-                for record in result
-            ]
-
-        with self._driver.session() as session:
-            return self._call_with_retry(session.execute_read, _read)
-
     def get_episodes(self, episode_uuids: List[str]) -> List[Dict[str, Any]]:
         if not episode_uuids:
             return []
 
         def _read(tx):
-            # Enriched query to get document and page info via relationships
-            # Also get adjacent episodes for context
             result = tx.run(
                 """
                 MATCH (ep:Episode)
                 WHERE ep.uuid IN $uuids
-                OPTIONAL MATCH (p:Page)-[:HAS_EPISODE]->(ep)
-                OPTIONAL MATCH (d:Document)-[:HAS_PAGE]->(p)
-                OPTIONAL MATCH (d2:Document)-[:HAS_EPISODE]->(ep)
-                OPTIONAL MATCH (prev:Episode)-[:NEXT_EPISODE]->(ep)
-                OPTIONAL MATCH (ep)-[:NEXT_EPISODE]->(next:Episode)
-                RETURN ep, p.number AS page_num,
-                       coalesce(d.name, d2.name) AS doc_name,
-                       prev.data AS prev_text,
-                       next.data AS next_text
+                RETURN ep
                 """,
                 uuids=episode_uuids,
             )
@@ -1519,16 +961,6 @@ class Neo4jStorage(GraphStorage):
                 meta_json = props.pop("metadata_json", "{}")
                 metadata = self._parse_json_safe(meta_json)
 
-                # Overlay graph structure info onto metadata if present
-                if record["doc_name"]:
-                    metadata["source"] = record["doc_name"]
-                if record["page_num"]:
-                    metadata["page"] = record["page_num"]
-
-                # Include context in metadata
-                metadata["prev_context"] = record["prev_text"]
-                metadata["next_context"] = record["next_text"]
-
                 episodes.append({
                     "uuid": props.get("uuid"),
                     "text": props.get("data"),
@@ -1542,100 +974,6 @@ class Neo4jStorage(GraphStorage):
         with self._driver.session() as session:
             return self._call_with_retry(session.execute_read, _read)
 
-    def get_term_clause_episodes(self, term_uuid: str, limit: int = 1) -> List[Dict[str, Any]]:
-        """Get episodes for the Clause that a Term DEFINES, for PDF tracing.
-
-        Fallback: If no DEFINES relationship exists (e.g., Term created via add_topic_and_entity_nodes),
-        try to find Episode via Topic path: Term <-MENTIONS- Topic <-HAS_TOPIC- Episode
-        """
-        def _read(tx):
-            # Try the standard DEFINES path first
-            result = tx.run(
-                """
-                MATCH (t:Entity:Term {uuid: $term_uuid})-[:DEFINES]->(c:Entity)
-                OPTIONAL MATCH (c)<-[:MENTIONS]-(ep:Episode)
-                OPTIONAL MATCH (p:Page)-[:HAS_EPISODE]->(ep)
-                OPTIONAL MATCH (d:Document)-[:HAS_PAGE]->(p)
-                OPTIONAL MATCH (d2:Document)-[:HAS_EPISODE]->(ep)
-                RETURN ep, p.number AS page_num,
-                       coalesce(d.name, d2.name) AS doc_name, 0 AS via_topic
-                LIMIT $limit
-                """,
-                term_uuid=term_uuid,
-                limit=limit,
-            )
-            episodes = []
-            for record in result:
-                ep_node = record.get("ep")
-                if ep_node:
-                    props = dict(ep_node)
-                    for k, v in props.items():
-                        if hasattr(v, "isoformat"):
-                            props[k] = v.isoformat()
-                    meta_json = props.pop("metadata_json", "{}")
-                    try:
-                        metadata = json.loads(meta_json) if meta_json else {}
-                    except (json.JSONDecodeError, TypeError):
-                        metadata = {}
-                    if record["doc_name"]:
-                        metadata["source"] = record["doc_name"]
-                    if record["page_num"]:
-                        metadata["page"] = record["page_num"]
-                    episodes.append({
-                        "uuid": props.get("uuid"),
-                        "text": props.get("data"),
-                        "source": props.get("source"),
-                        "page": props.get("page"),
-                        "metadata": metadata,
-                        "created_at": props.get("created_at")
-                    })
-
-            # Fallback: if no episodes found via DEFINES, try via Topic path
-            # Path: Term <-MENTIONS- Topic <-HAS_TOPIC- Episode
-            if not episodes:
-                result = tx.run(
-                    """
-                    MATCH (et:Entity:Term {uuid: $term_uuid})<-[:MENTIONS]-(t:Topic)
-                    MATCH (t)<-[:HAS_TOPIC]-(ep:Episode)
-                    OPTIONAL MATCH (p:Page)-[:HAS_EPISODE]->(ep)
-                    OPTIONAL MATCH (d:Document)-[:HAS_PAGE]->(p)
-                    OPTIONAL MATCH (d2:Document)-[:HAS_EPISODE]->(ep)
-                    RETURN ep, p.number AS page_num,
-                           coalesce(d.name, d2.name) AS doc_name
-                    LIMIT $limit
-                    """,
-                    term_uuid=term_uuid,
-                    limit=limit,
-                )
-                for record in result:
-                    ep_node = record.get("ep")
-                    if ep_node:
-                        props = dict(ep_node)
-                        for k, v in props.items():
-                            if hasattr(v, "isoformat"):
-                                props[k] = v.isoformat()
-                        meta_json = props.pop("metadata_json", "{}")
-                        try:
-                            metadata = json.loads(meta_json) if meta_json else {}
-                        except (json.JSONDecodeError, TypeError):
-                            metadata = {}
-                        if record["doc_name"]:
-                            metadata["source"] = record["doc_name"]
-                        if record["page_num"]:
-                            metadata["page"] = record["page_num"]
-                        episodes.append({
-                            "uuid": props.get("uuid"),
-                            "text": props.get("data"),
-                            "source": props.get("source"),
-                            "page": props.get("page"),
-                            "metadata": metadata,
-                            "created_at": props.get("created_at")
-                        })
-
-            return episodes
-
-        with self._driver.session() as session:
-            return self._call_with_retry(session.execute_read, _read)
 
     def batch_get_node_pdf_info(self, node_uuids: List[str]) -> Dict[str, Dict[str, Any]]:
         """
@@ -1705,11 +1043,7 @@ class Neo4jStorage(GraphStorage):
             result = tx.run(
                 """
                 MATCH (n:Entity {uuid: $uuid})<-[:MENTIONS]-(ep:Episode)
-                OPTIONAL MATCH (p:Page)-[:HAS_EPISODE]->(ep)
-                OPTIONAL MATCH (d:Document)-[:HAS_PAGE]->(p)
-                OPTIONAL MATCH (d2:Document)-[:HAS_EPISODE]->(ep)
-                RETURN ep, p.number AS page_num,
-                       coalesce(d.name, d2.name) AS doc_name
+                RETURN ep
                 LIMIT $limit
                 """,
                 uuid=node_uuid,
@@ -1720,12 +1054,6 @@ class Neo4jStorage(GraphStorage):
                 props = dict(record["ep"])
                 meta_json = props.pop("metadata_json", "{}")
                 metadata = self._parse_json_safe(meta_json)
-
-                if record["doc_name"]:
-                    metadata["source"] = record["doc_name"]
-                if record["page_num"]:
-                    metadata["page"] = record["page_num"]
-
                 episodes.append({
                     "uuid": props.get("uuid"),
                     "text": props.get("data"),
@@ -1950,9 +1278,9 @@ class Neo4jStorage(GraphStorage):
             )
             node_count = node_result.single()["cnt"]
 
-            # Count edges
+            # Count edges (实际图谱中只有 HAS_TOPIC 和 MENTIONS 两种边)
             edge_result = tx.run(
-                "MATCH ()-[r:RELATION {graph_id: $gid}]->() RETURN count(r) AS cnt",
+                "MATCH ()-[r:HAS_TOPIC|MENTIONS {graph_id: $gid}]->() RETURN count(r) AS cnt",
                 gid=graph_id,
             )
             edge_count = edge_result.single()["cnt"]
@@ -2032,13 +1360,12 @@ class Neo4jStorage(GraphStorage):
                 node_map[nd["uuid"]] = nd.get("name") or "Unnamed"
 
             # 2. Get PDF location info for each node by querying its related Episode
-            # This enables "click node to locate document" feature
+            # 实际图谱中 Entity/Clause 与 Episode 通过 MENTIONS 关联
             node_uuids = [n["uuid"] for n in nodes]
             if node_uuids:
-                # Query Episode nodes connected to Entity nodes via HAS_EPISODE
                 episode_result = tx.run(
                     """
-                    MATCH (e:Entity {graph_id: $gid})-[r:HAS_EPISODE]->(ep:Episode)
+                    MATCH (ep:Episode {graph_id: $gid})-[r:MENTIONS]->(e:Entity {graph_id: $gid})
                     WHERE e.uuid IN $uuids
                     RETURN e.uuid AS entity_uuid,
                            ep.uuid AS episode_uuid,
@@ -2077,27 +1404,22 @@ class Neo4jStorage(GraphStorage):
                     node["pdf_info"] = node_pdf_info.get(node["uuid"], {})
 
             # 3. Get semantic relationships between entities
-            # 匹配所有语义关系类型（Entity-Entity + Topic关系）
+            # 实际图谱中只有 HAS_TOPIC (Clause→Topic) 和 MENTIONS (Topic→Entity/Term, Episode→Clause) 两种边
             edge_result = tx.run(
                 """
-                MATCH (src:Entity {graph_id: $gid})-[r]->(tgt:Entity {graph_id: $gid})
-                WHERE type(r) IN ['RELATION', 'MANDATES', 'PROHIBITS', 'RECOMMENDS',
-                                   'HAS_CONDITION', 'OPERATES_ON', 'APPLIES_TO',
-                                   'IN_SITUATION',
-                                   'PART_OF', 'NEXT_EPISODE', 'MENTIONS', 'CROSS_REFERENCE',
-                                   'HAS_DOCUMENT', 'HAS_PAGE', 'HAS_EPISODE']
-                RETURN r, src.uuid AS src_uuid, tgt.uuid AS tgt_uuid,
-                       src.name AS src_name, tgt.name AS tgt_name,
-                       type(r) AS rel_type
-                UNION
-                MATCH (ep:Episode {graph_id: $gid})-[r:HAS_TOPIC]->(t:Topic {graph_id: $gid})
-                RETURN r, ep.uuid AS src_uuid, t.uuid AS tgt_uuid,
-                       ep.data AS src_name, t.name AS tgt_name,
+                MATCH (c:Clause {graph_id: $gid})-[r:HAS_TOPIC]->(t:Topic {graph_id: $gid})
+                RETURN r, c.uuid AS src_uuid, t.uuid AS tgt_uuid,
+                       c.name AS src_name, t.name AS tgt_name,
                        type(r) AS rel_type
                 UNION
                 MATCH (t:Topic {graph_id: $gid})-[r:MENTIONS]->(e:Entity {graph_id: $gid})
                 RETURN r, t.uuid AS src_uuid, e.uuid AS tgt_uuid,
                        t.name AS src_name, e.name AS tgt_name,
+                       type(r) AS rel_type
+                UNION
+                MATCH (ep:Episode {graph_id: $gid})-[r:MENTIONS]->(c:Clause {graph_id: $gid})
+                RETURN r, ep.uuid AS src_uuid, c.uuid AS tgt_uuid,
+                       ep.data AS src_name, c.name AS tgt_name,
                        type(r) AS rel_type
                 """,
                 gid=graph_id,
@@ -2246,7 +1568,7 @@ class Neo4jStorage(GraphStorage):
     def _edge_to_dict(self, rel, source_uuid: str, target_uuid: str) -> Dict[str, Any]:
         """Convert Neo4j relationship to the standard edge dict format."""
         props = dict(rel)
-        # 从 Neo4j relationship type 提取边类型名（如 MANDATES, OPERATES_ON）
+        # 从 Neo4j relationship type 提取边类型名
         rel_type = rel.type if hasattr(rel, 'type') else ''
 
         # Convert Neo4j DateTime to string
@@ -2266,7 +1588,7 @@ class Neo4jStorage(GraphStorage):
 
         return {
             "uuid": props.get("uuid", ""),
-            # 优先用 name 属性（RELATION 边），fallback 到 Neo4j relationship type
+            # 优先用 name 属性，fallback 到 Neo4j relationship type
             "name": props.get("name") or rel_type or "",
             "fact": props.get("fact", ""),
             "source_node_uuid": source_uuid,
@@ -3375,100 +2697,6 @@ class Neo4jStorage(GraphStorage):
             logger.warning(f"[semantic_parse] LLM 调用失败 for clause {clause_id}: {e}")
             return []
 
-    def _create_formula_entity(self, tx, graph_id: str, episode_id: str,
-                               clause_entity_uuid: str, formula_id: str):
-        """创建Formula实体"""
-        formula_name = f"公式{formula_id}"
-
-        entity_seed = f"{graph_id}:Formula:{formula_id}".encode('utf-8')
-        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
-
-        try:
-            tx.run(
-                """
-                MERGE (e:Entity:Formula {graph_id: $gid, name_lower: $name_lower})
-                ON CREATE SET
-                    e.uuid = $uuid,
-                    e.name = $name,
-                    e.created_at = datetime()
-                """,
-                gid=graph_id,
-                name_lower=formula_name.lower(),
-                uuid=entity_uuid,
-                name=formula_name
-            )
-
-            # 链接Clause -> REFERENCES -> Formula
-            tx.run(
-                """
-                MATCH (clause:Entity {uuid: $clause_uuid}), (f:Entity {uuid: $formula_uuid})
-                MERGE (clause)-[r:RELATION {graph_id: $gid, name: 'REFERENCES'}]->(f)
-                ON CREATE SET r.graph_id = $gid
-                """,
-                clause_uuid=clause_entity_uuid,
-                formula_uuid=entity_uuid,
-                gid=graph_id
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create formula entity: {e}")
-
-    def _create_table_parameter_entity(self, tx, graph_id: str, episode_id: str,
-                                      clause_entity_uuid: str, table_ref: str,
-                                      clause_content: str = ""):
-        """
-        创建Table/Parameter实体
-
-        Args:
-            table_ref: 表格编号，如 "表3.2.9"
-            clause_content: 关联的条款内容，用于生成 summary
-        """
-        param_name = f"{table_ref}"
-
-        entity_seed = f"{graph_id}:Parameter:{param_name}".encode('utf-8')
-        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
-
-        # 构建 summary，包含表格编号和条款描述
-        summary_parts = [f"表格编号: {table_ref}"]
-        if clause_content:
-            # 提取条款描述的前100字
-            desc = clause_content[:100].replace('\n', ' ').strip()
-            if desc:
-                summary_parts.append(f"条款描述: {desc}")
-        summary = " | ".join(summary_parts)
-
-        try:
-            tx.run(
-                """
-                MERGE (e:Entity:Parameter {graph_id: $gid, name_lower: $name_lower})
-                ON CREATE SET
-                    e.uuid = $uuid,
-                    e.name = $name,
-                    e.summary = $summary,
-                    e.created_at = datetime()
-                ON MATCH SET
-                    e.summary = COALESCE(e.summary, $summary)
-                """,
-                gid=graph_id,
-                name_lower=param_name.lower(),
-                uuid=entity_uuid,
-                name=param_name,
-                summary=summary
-            )
-
-            # 链接Clause -> HAS_VALUE -> Parameter
-            tx.run(
-                """
-                MATCH (clause:Entity {uuid: $clause_uuid}), (p:Entity {uuid: $param_uuid})
-                MERGE (clause)-[r:RELATION {graph_id: $gid, name: 'HAS_VALUE'}]->(p)
-                ON CREATE SET r.graph_id = $gid
-                """,
-                clause_uuid=clause_entity_uuid,
-                param_uuid=entity_uuid,
-                gid=graph_id
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create parameter entity: {e}")
-
     def _create_term_entity(self, tx, graph_id: str, clause_uuid: str,
                            term_name: str, definition: str, source_id: str = "",
                            pdf_source: str = None, pdf_page: int = None,
@@ -3567,232 +2795,6 @@ class Neo4jStorage(GraphStorage):
 
         with self._driver.session() as session:
             session.execute_write(_do_sync)
-
-    def _create_condition_entity(self, tx, graph_id: str, clause_uuid: str, condition_name: str):
-        """创建 Condition（前提条件）实体"""
-        entity_seed = f"{graph_id}:Condition:{condition_name}".encode('utf-8')
-        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
-
-        try:
-            tx.run(
-                """
-                MERGE (e:Entity:Condition {graph_id: $gid, name_lower: $name_lower})
-                ON CREATE SET
-                    e.uuid = $uuid,
-                    e.name = $name,
-                    e.summary = $summary,
-                    e.created_at = datetime()
-                """,
-                gid=graph_id,
-                name_lower=condition_name.lower(),
-                uuid=entity_uuid,
-                name=condition_name,
-                summary=f"前提条件: {condition_name}"
-            )
-
-            # 链接Clause -> HAS_CONDITION -> Condition
-            tx.run(
-                """
-                MATCH (c:Entity {uuid: $clause_uuid}), (cond:Entity {uuid: $cond_uuid})
-                MERGE (c)-[r:HAS_CONDITION]->(cond)
-                ON CREATE SET r.graph_id = $gid
-                """,
-                clause_uuid=clause_uuid,
-                cond_uuid=entity_uuid,
-                gid=graph_id
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create condition entity: {e}")
-
-        return entity_uuid
-
-    def _create_applies_to_relation(self, tx, clause_uuid: str, component_uuid: str):
-        """创建 Clause --applies_to--> Component 关系（路径2）"""
-        try:
-            tx.run(
-                """
-                MATCH (c:Entity {uuid: $clause_uuid}), (comp:Entity {uuid: $comp_uuid})
-                MERGE (c)-[r:APPLIES_TO]->(comp)
-                ON CREATE SET r.graph_id = 'default'
-                """,
-                clause_uuid=clause_uuid,
-                comp_uuid=component_uuid
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create APPLIES_TO relation: {e}")
-
-    def _create_in_situation_relation(self, tx, condition_uuid: str, action_uuid: str):
-        """创建 Condition --in_situation--> Action 关系（路径4）"""
-        try:
-            tx.run(
-                """
-                MATCH (cond:Entity {uuid: $cond_uuid}), (a:Entity {uuid: $action_uuid})
-                MERGE (cond)-[r:IN_SITUATION]->(a)
-                ON CREATE SET r.graph_id = 'default'
-                """,
-                cond_uuid=condition_uuid,
-                action_uuid=action_uuid
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create IN_SITUATION relation: {e}")
-
-    def _create_action_entity(self, tx, graph_id: str, clause_uuid: str, action_name: str) -> str:
-        """创建 Action（规定动作）实体"""
-        entity_seed = f"{graph_id}:Action:{action_name}".encode('utf-8')
-        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
-
-        try:
-            tx.run(
-                """
-                MERGE (e:Entity:Action {graph_id: $gid, name_lower: $name_lower})
-                ON CREATE SET
-                    e.uuid = $uuid,
-                    e.name = $name,
-                    e.summary = $summary,
-                    e.created_at = datetime()
-                """,
-                gid=graph_id,
-                name_lower=action_name.lower(),
-                uuid=entity_uuid,
-                name=action_name,
-                summary=f"规定动作: {action_name}"
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create action entity: {e}")
-
-        return entity_uuid
-
-    def _create_component_entity(self, tx, graph_id: str, episode_id: str, component_name: str):
-        """创建 Component（设备/系统/材料）实体"""
-        entity_seed = f"{graph_id}:Component:{component_name}".encode('utf-8')
-        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
-
-        try:
-            tx.run(
-                """
-                MERGE (e:Entity:Component {graph_id: $gid, name_lower: $name_lower})
-                ON CREATE SET
-                    e.uuid = $uuid,
-                    e.name = $name,
-                    e.summary = $summary,
-                    e.created_at = datetime()
-                """,
-                gid=graph_id,
-                name_lower=component_name.lower(),
-                uuid=entity_uuid,
-                name=component_name,
-                summary=f"设备/系统/材料: {component_name}"
-            )
-
-            # 链接Episode -> MENTIONS -> Component
-            tx.run(
-                """
-                MATCH (ep:Episode {uuid: $ep_uuid}), (c:Entity {uuid: $c_uuid})
-                MERGE (ep)-[r:MENTIONS]->(c)
-                ON CREATE SET r.graph_id = $gid
-                """,
-                ep_uuid=episode_id,
-                c_uuid=entity_uuid,
-                gid=graph_id
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create component entity: {e}")
-
-    def _create_object_entity(self, tx, graph_id: str, episode_id: str, object_name: str):
-        """创建 Entity（操作对象）实体"""
-        entity_seed = f"{graph_id}:Entity:{object_name}".encode('utf-8')
-        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
-
-        try:
-            tx.run(
-                """
-                MERGE (e:Entity {graph_id: $gid, name_lower: $name_lower})
-                ON CREATE SET
-                    e.uuid = $uuid,
-                    e.name = $name,
-                    e.summary = $summary,
-                    e.created_at = datetime()
-                """,
-                gid=graph_id,
-                name_lower=object_name.lower(),
-                uuid=entity_uuid,
-                name=object_name,
-                summary=f"操作对象: {object_name}"
-            )
-
-            # 链接Episode -> MENTIONS -> Entity
-            tx.run(
-                """
-                MATCH (ep:Episode {uuid: $ep_uuid}), (o:Entity {uuid: $o_uuid})
-                MERGE (ep)-[r:MENTIONS]->(o)
-                ON CREATE SET r.graph_id = $gid
-                """,
-                ep_uuid=episode_id,
-                o_uuid=entity_uuid,
-                gid=graph_id
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create object entity: {e}")
-
-    def _create_mandates_relation(self, tx, clause_uuid: str, action_uuid: str):
-        """创建 Clause -MANDATES-> Action 关系"""
-        try:
-            tx.run(
-                """
-                MATCH (c:Entity {uuid: $clause_uuid}), (a:Entity {uuid: $action_uuid})
-                MERGE (c)-[r:MANDATES]->(a)
-                ON CREATE SET r.graph_id = 'default'
-                """,
-                clause_uuid=clause_uuid,
-                action_uuid=action_uuid
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create MANDATES relation: {e}")
-
-    def _create_recommends_relation(self, tx, clause_uuid: str, action_uuid: str):
-        """创建 Clause -RECOMMENDS-> Action 关系"""
-        try:
-            tx.run(
-                """
-                MATCH (c:Entity {uuid: $clause_uuid}), (a:Entity {uuid: $action_uuid})
-                MERGE (c)-[r:RECOMMENDS]->(a)
-                ON CREATE SET r.graph_id = 'default'
-                """,
-                clause_uuid=clause_uuid,
-                action_uuid=action_uuid
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create RECOMMENDS relation: {e}")
-
-    def _create_prohibits_relation(self, tx, clause_uuid: str, action_uuid: str):
-        """创建 Clause -PROHIBITS-> Action 关系"""
-        try:
-            tx.run(
-                """
-                MATCH (c:Entity {uuid: $clause_uuid}), (a:Entity {uuid: $action_uuid})
-                MERGE (c)-[r:PROHIBITS]->(a)
-                ON CREATE SET r.graph_id = 'default'
-                """,
-                clause_uuid=clause_uuid,
-                action_uuid=action_uuid
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create PROHIBITS relation: {e}")
-
-    def _create_operates_on_relation(self, tx, action_uuid: str, object_uuid: str):
-        """创建 Action -OPERATES_ON-> Entity 关系"""
-        try:
-            tx.run(
-                """
-                MATCH (a:Entity {uuid: $action_uuid}), (o:Entity {uuid: $object_uuid})
-                MERGE (a)-[r:OPERATES_ON]->(o)
-                ON CREATE SET r.graph_id = 'default'
-                """,
-                action_uuid=action_uuid,
-                object_uuid=object_uuid
-            )
-        except Exception as e:
-            logger.debug(f"Failed to create OPERATES_ON relation: {e}")
 
     def _find_entity_uuid(self, tx, graph_id: str, entity_type: str, entity_name: str) -> Optional[str]:
         """根据实体类型和名称查找实体UUID"""
