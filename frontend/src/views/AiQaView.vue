@@ -187,7 +187,7 @@
                       <div class="fact-meta">
                         <span class="source-tag">
                           📄 {{ fact.source || 'Unknown' }}
-                          <span v-if="fact.page">(P{{ fact.page }})</span>
+                          <span v-if="getFactPageBboxes(fact).length">({{ formatPageRange(getFactPageBboxes(fact)) }})</span>
                         </span>
                         <span class="depth-tag" v-if="fact.traversal_depth !== undefined">深度{{ fact.traversal_depth }}</span>
                         <button
@@ -598,13 +598,13 @@ const apiResponseExample = computed(() => JSON.stringify({
         text: "条款具体内容...",
         source: "GB50054.pdf",
         page: 12,
-        pdf_bboxes: [[12, 100, 200, 300, 400]],
+        pdf_bboxes: [[12, 100, 200, 300, 400], [13, 50, 150, 250, 350]],
         bbox: [100, 200, 300, 400],
         page_width: 595,
         page_height: 842,
         relevance_score: 85,
         pdf_url: `${window.location.origin}/api/graph/project/xxx/document/GB50054.pdf?page=12`,
-        source_link: `${window.location.origin}/chat/${appId.value}?source=GB50054.pdf&page=12&bbox=100,200,300,400`
+        source_link: `${window.location.origin}/preview/${appId.value}?source=GB50054.pdf&page=12&pdf_bboxes=${encodeURIComponent(JSON.stringify([[12,100,200,300,400],[13,50,150,250,350]]))}&graph_id=xxx`
       }
     ]
   }
@@ -632,6 +632,26 @@ const getFactPageBboxes = (fact) => {
     return [{ page: fact.page, bbox: fact.bbox }]
   }
   return []
+}
+
+const formatPageRange = (pageBboxes) => {
+  if (!pageBboxes || pageBboxes.length === 0) return ''
+  const pages = pageBboxes.map(pb => pb.page).sort((a, b) => a - b)
+  if (pages.length === 1) return `P${pages[0]}`
+  // 合并连续页码
+  const ranges = []
+  let start = pages[0]
+  let end = pages[0]
+  for (let i = 1; i < pages.length; i++) {
+    if (pages[i] === end + 1) {
+      end = pages[i]
+    } else {
+      ranges.push(start === end ? `P${start}` : `P${start}~P${end}`)
+      start = end = pages[i]
+    }
+  }
+  ranges.push(start === end ? `P${start}` : `P${start}~P${end}`)
+  return ranges.join(', ')
 }
 
 const renderEvidenceScreenshots = async (type = 'node') => {

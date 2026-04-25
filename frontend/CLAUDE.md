@@ -1,6 +1,7 @@
 [根目录](../CLAUDE.md) > **frontend**
 
 ## 变更记录 (Changelog)
+- **2026-04-25**: 新增图谱检索测试页面 `GraphSearchView.vue`（路由 `/graph-search/:projectId`）：节点类型多选 checkbox + 名称模糊搜索，1 跳邻域动态展开，节点详情面板展示全部属性，关联节点点击高亮；`GraphBuild.vue` 新增跳转按钮；`api/graph.js` 新增 `searchNodes`、`getNodeNeighborhood`；各检索视图（AiQaView/HitTestView/PublicChatView）新增 Topic root type 支持；PublicChatView.vue 修复 canvas 渲染时序（evidence 完全渲染后再显示 report）。
 - **2026-04-24**: 前端 API 死代码清理：删除 graph.js 中未使用的 searchGraph、aiQa、chatWithAgent、mineruParse、resetIntelligentChunks；Process.vue Hit-Test 检索改为 searchObjectFirst 对齐后端 `/tools/search-object-first`。
 - **2026-04-12**: 新增 API 客户端、Composable 状态管理、Router 路由配置、Store 状态管理。
 - **2026-03-24**: 初始扫描，识别 Vue 3 组件与 API 客户端结构。

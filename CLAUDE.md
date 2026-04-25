@@ -1,6 +1,7 @@
 # Knowledge EviGraph 架构文档
 
 ## 变更记录 (Changelog)
+- **2026-04-25**: 新增图谱检索测试页面 (`/graph-search/:projectId`)：支持节点类型多选 + 名称模糊搜索，动态加载 1 跳邻域，节点详情面板展示全部属性，关联节点可展开到图谱并高亮；Topic 节点作为独立召回源（策略 A：复用 clause embedding），后端新增 Topic vector index、Topic hybrid 检索、graph_tools 支持 Topic root type；PublicChatView.vue 修复 canvas 渲染时序（ evidence 完全渲染后再显示 report）；后端新增 `/ops/search-nodes`（支持 node_types 数组）和 `/ops/node-neighborhood` API。
 - **2026-04-24**: 清理前后端死代码：移除未使用的后端路由（delete_graph、supplement_knowledge、check_graph_references、reset_project、cleanup_tasks、list_tasks）及 entity_routes.py 整个模块；删除 neo4j_storage.py 中的 update_node_labels 孤儿方法；前端移除 searchGraph/aiQa/chatWithAgent/mineruParse/resetIntelligentChunks 等死代码函数，Process.vue Hit-Test 改用 searchObjectFirst 对齐后端 `/tools/search-object-first`。
 - **2026-04-13**: 新增 MinerU `parse_method` 参数（auto/ocr）、智能分析进度回调与实时日志推送、并发解析 mineru_parsed.jsonl（多线程 append 无锁）。
 - **2026-04-12**: 更新架构文档，反映 QA Pipeline、BGE-reranker、JSONL 解析、智能分块等新功能。

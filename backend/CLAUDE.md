@@ -1,6 +1,7 @@
 [根目录](../CLAUDE.md) > **backend**
 
 ## 变更记录 (Changelog)
+- **2026-04-25**: neo4j_schema.py 新增 Topic vector index；neo4j_storage.py 新增 `search_topic_nodes`（Topic hybrid 向量+关键字检索）、`search_nodes_by_name`（支持 node_types 多类型过滤）、`get_node_neighborhood`（1 跳邻域查询）；search_service.py 新增 Topic 检索 Cypher 模板与 `search_topic_nodes`；graph_tools.py `search_term_entity_to_clause_batch` 扩展支持 Topic root type（复用 clause embedding）；graph_ops_routes.py 新增 `POST /ops/search-nodes`（node_types 数组参数）和 `POST /ops/node-neighborhood`。
 - **2026-04-24**: 清理未使用路由：删除 entity_routes.py 模块、ai_qa_routes.py（已废弃）、reset_project、delete_graph、supplement_knowledge、check_graph_references、cleanup_tasks、list_tasks、get_intelligent_chunks；移除 neo4j_storage.py 中无引用的 update_node_labels 方法；删除无引用的 llm_doc_parser.py；检索工具统一收敛到 report.py。
 - **2026-04-12**: 新增 QA Pipeline、JSONL 解析支持、智能分块服务、BGE-reranker 重排集成。
 - **2026-03-24**: 初始扫描，识别 API、服务与存储结构。

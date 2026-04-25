@@ -58,7 +58,7 @@
                       {{ fact.relevance_score }}分
                     </span>
                     <span class="evidence-text">{{ fact.text }}</span>
-                    <span v-if="fact.page" class="evidence-page">P{{ fact.page }}</span>
+                    <span v-if="getFactPageBboxes(fact).length" class="evidence-page">{{ formatPageRange(getFactPageBboxes(fact)) }}</span>
                   </div>
                   <div class="evidence-pdf-fold">
                     <button class="fold-btn" @click.stop="togglePdf(fact._idx)">
@@ -256,6 +256,26 @@ const getFactPageBboxes = (fact) => {
     return [{ page: fact.page, bbox: fact.bbox }]
   }
   return []
+}
+
+const formatPageRange = (pageBboxes) => {
+  if (!pageBboxes || pageBboxes.length === 0) return ''
+  const pages = pageBboxes.map(pb => pb.page).sort((a, b) => a - b)
+  if (pages.length === 1) return `P${pages[0]}`
+  // 合并连续页码
+  const ranges = []
+  let start = pages[0]
+  let end = pages[0]
+  for (let i = 1; i < pages.length; i++) {
+    if (pages[i] === end + 1) {
+      end = pages[i]
+    } else {
+      ranges.push(start === end ? `P${start}` : `P${start}~P${end}`)
+      start = end = pages[i]
+    }
+  }
+  ranges.push(start === end ? `P${start}` : `P${start}~P${end}`)
+  return ranges.join(', ')
 }
 
 const renderEvidenceScreenshots = async () => {
