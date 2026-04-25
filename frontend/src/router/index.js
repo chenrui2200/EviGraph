@@ -8,6 +8,7 @@ import ChunkAnalysisView from '../views/ChunkAnalysisView.vue'
 import KbPipelineLaunchView from '../views/KbPipelineLaunchView.vue'
 import KbPipelineTrackView from '../views/KbPipelineTrackView.vue'
 import GraphSearchView from '../views/GraphSearchView.vue'
+import ApiPlaygroundView from '../views/ApiPlaygroundView.vue'
 
 const routes = [
   {
@@ -60,6 +61,12 @@ const routes = [
     path: '/graph-search/:projectId',
     name: 'GraphSearch',
     component: GraphSearchView,
+    props: true
+  },
+  {
+    path: '/playground/:app_id',
+    name: 'ApiPlayground',
+    component: ApiPlaygroundView,
     props: true
   },
 ]

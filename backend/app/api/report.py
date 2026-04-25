@@ -295,3 +295,196 @@ def llm_answer():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@report_bp.route('/public-query', methods=['POST'])
+def public_query():
+    """
+    公共查询接口：无需认证，通过 app_id 获取应用配置并执行检索。
+
+    POST body:
+        app_id: str - 应用ID
+        query: str - 查询问题
+
+    返回格式：
+        {
+            "success": true,
+            "data": {
+                "query": "...",
+                "results": [
+                    {
+                        "text": "条款内容",
+                        "source": "GB50054.pdf",
+                        "page": 12,
+                        "pdf_bboxes": [[12, 100, 200, 300, 400]],
+                        "bbox": [100, 200, 300, 400],
+                        "page_width": 595,
+                        "page_height": 842,
+                        "relevance_score": 85,
+                        "pdf_url": "http://.../api/graph/project/xxx/document/GB50054.pdf?page=12",
+                        "source_link": "http://.../chat/app_xxx?source=GB50054.pdf&page=12&bbox=100,200,300,400"
+                    }
+                ]
+            }
+        }
+    """
+    data = request.get_json() or {}
+    app_id = data.get('app_id', '')
+    query = data.get('query', '')
+
+    if not app_id:
+        return jsonify({"success": False, "error": "app_id is required"}), 400
+    if not query:
+        return jsonify({"success": False, "error": "query is required"}), 400
+
+    from ..models.ai_app import AiAppManager
+    app = AiAppManager.get_app(app_id)
+    if not app:
+        return jsonify({"success": False, "error": "Application not found"}), 404
+    if not app.is_published:
+        return jsonify({"success": False, "error": "Application is not published"}), 403
+
+    from flask import current_app
+    storage = current_app.extensions.get('neo4j_storage')
+    if not storage:
+        return jsonify({"success": False, "error": "Storage not available"}), 503
+
+    try:
+        wf = app.workflow_data or {}
+        saved_project_ids = wf.get('selectedProjectIds', [])
+
+        # Resolve graph_ids from project_ids
+        if saved_project_ids:
+            from ..models.project import ProjectManager
+            graph_ids = []
+            for pid in saved_project_ids:
+                proj = ProjectManager.get_project(pid)
+                if proj and getattr(proj, 'graph_id', None):
+                    graph_ids.append(proj.graph_id)
+        else:
+            graph_ids = wf.get('selectedGraphIds', [])
+
+        if not graph_ids:
+            return jsonify({"success": False, "error": "No knowledge base configured"}), 400
+
+        root_types = wf.get('rootTypes', ['Entity', 'Term'])
+        similarity_threshold = float(wf.get('similarityThreshold', 0))
+        top_k = int(wf.get('topK', 5))
+        rerank_min_score = int(wf.get('rerankMinScore', 0))
+
+        tools = GraphToolsService(storage=storage)
+        base_url = request.host_url.rstrip('/')
+
+        # 前端地址：用于生成 /chat/ 等客户端路由链接
+        from flask import current_app
+        frontend_url = current_app.config.get('FRONTEND_URL')
+        frontend_base_url = frontend_url.rstrip('/') if frontend_url else base_url
+
+        # Stage 1: Search across all graph_ids
+        all_rows = []
+        seen_uuids = set()
+        for gid in graph_ids:
+            result = tools.search_term_entity_to_clause_batch(
+                graph_id=gid,
+                query=query,
+                limit=15,
+                root_types=root_types,
+                similarity_threshold=similarity_threshold,
+            )
+            for row in result.rows:
+                root_uuid = row.object_node.get('uuid', '')
+                if root_uuid and root_uuid not in seen_uuids:
+                    seen_uuids.add(root_uuid)
+                    all_rows.append(row)
+
+        if not all_rows:
+            return jsonify({
+                "success": True,
+                "data": {"query": query, "results": []}
+            })
+
+        # Stage 2: Rerank
+        try:
+            from ..services.graph_tools import ObjectFirstRow, ObjectPathNode, ObjectPathEdge
+            final_rows = []
+            for r in all_rows:
+                paths = [
+                    ObjectPathNode(
+                        uuid=p.get('uuid', ''),
+                        name=p.get('name', ''),
+                        labels=p.get('labels', []),
+                        summary=p.get('summary', ''),
+                        depth=p.get('depth', 0),
+                    )
+                    for p in r.traversal_paths
+                ]
+                edges = [
+                    ObjectPathEdge(
+                        uuid=e.get('uuid', ''),
+                        name=e.get('name', ''),
+                        fact=e.get('fact', ''),
+                        source_node_uuid=e.get('source_node_uuid', ''),
+                        target_node_uuid=e.get('target_node_uuid', ''),
+                        depth=e.get('depth', 0),
+                    )
+                    for e in r.traversal_edges
+                ]
+                final_rows.append(ObjectFirstRow(
+                    object_node=r.object_node,
+                    traversal_paths=paths,
+                    traversal_edges=edges,
+                    facts=r.facts,
+                    relevance_score=r.relevance_score,
+                ))
+
+            rerank_result = tools.run_retrieval_flow(
+                final_rows=final_rows,
+                query=query,
+                similarity_threshold=0,
+                top_k=top_k,
+                rerank_min_score=rerank_min_score,
+            )
+            facts = rerank_result.filtered_facts or rerank_result.scored_facts or []
+        except Exception as e:
+            logger.warning(f"Rerank failed in public-query, fallback to raw facts: {e}")
+            facts = []
+            for row in all_rows:
+                facts.extend(row.facts or [])
+
+        # Build results array
+        results = []
+        for f in facts:
+            item = {
+                "text": f.get('original_text', '').strip() or f.get('text', '').strip(),
+                "source": f.get('source', ''),
+                "page": f.get('page'),
+                "pdf_bboxes": f.get('pdf_bboxes', []),
+                "bbox": f.get('bbox'),
+                "page_width": f.get('page_width'),
+                "page_height": f.get('page_height'),
+                "relevance_score": f.get('relevance_score'),
+                "graph_id": f.get('graph_id'),
+            }
+            # PDF download URL
+            if f.get('source') and f.get('graph_id'):
+                page = f.get('page', 1)
+                item['pdf_url'] = f"{base_url}/api/graph/project/{f['graph_id']}/document/{f['source']}?page={page}"
+            # Source link: click to open chat page with PDF location
+            bbox = f.get('bbox')
+            if f.get('source') and bbox and len(bbox) >= 4:
+                bbox_str = ','.join(str(int(v)) for v in bbox[:4])
+                item['source_link'] = f"{frontend_base_url}/chat/{app_id}?source={f['source']}&page={f.get('page', 1)}&bbox={bbox_str}"
+            results.append(item)
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "query": query,
+                "results": results,
+            }
+        })
+    except Exception as e:
+        logger.error(f"public_query failed: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 500
+
+

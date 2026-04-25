@@ -468,6 +468,41 @@
               </div>
             </div>
 
+            <div class="api-section">
+              <div class="section-title">方式 2: API 调用</div>
+              <div class="api-info-card">
+                <div class="info-row">
+                  <span class="info-label">Endpoint:</span>
+                  <span class="info-value"><span class="method-tag">POST</span> {{ publicApiEndpoint }}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">Content-Type:</span>
+                  <span class="info-value">application/json</span>
+                </div>
+              </div>
+              <div class="api-info-card playground-card" @click="openPlayground">
+                <div class="playground-link">
+                  <span class="playground-icon">⚡</span>
+                  <div class="playground-text">
+                    <div class="playground-title">在线调试 API</div>
+                    <div class="playground-sub">跳转到 Swagger 风格调试页面，填写参数即可直接发送请求</div>
+                  </div>
+                  <span class="playground-arrow">→</span>
+                </div>
+              </div>
+              <div class="code-block-wrapper">
+                <div class="code-header">请求体 (Request Body)</div>
+                <pre class="code-content">{{ apiRequestExample }}</pre>
+              </div>
+              <div class="code-block-wrapper">
+                <div class="code-header">响应示例 (Response)</div>
+                <pre class="code-content">{{ apiResponseExample }}</pre>
+              </div>
+              <div class="code-block-wrapper">
+                <div class="code-header">cURL 命令</div>
+                <pre class="code-content">{{ apiCurlCommand }}</pre>
+              </div>
+            </div>
           </div>
         </div>
         <div class="modal-footer">
@@ -527,6 +562,46 @@ const handleAppNameBlur = () => {
 
 const publicChatUrl = computed(() => `${window.location.origin}/chat/${appId.value}`)
 const iframeCode = computed(() => `<iframe src="${publicChatUrl.value}" width="100%" height="600px" frameborder="0"></iframe>`)
+
+const publicApiEndpoint = computed(() => `${window.location.origin}/api/report/public-query`)
+const playgroundUrl = computed(() => `${window.location.origin}/playground/${appId.value}`)
+
+const apiRequestExample = computed(() => JSON.stringify({
+  app_id: appId.value,
+  query: "输入您的问题"
+}, null, 2))
+
+const apiResponseExample = computed(() => JSON.stringify({
+  success: true,
+  data: {
+    query: "输入您的问题",
+    results: [
+      {
+        text: "条款具体内容...",
+        source: "GB50054.pdf",
+        page: 12,
+        pdf_bboxes: [[12, 100, 200, 300, 400]],
+        bbox: [100, 200, 300, 400],
+        page_width: 595,
+        page_height: 842,
+        relevance_score: 85,
+        pdf_url: `${window.location.origin}/api/graph/project/xxx/document/GB50054.pdf?page=12`,
+        source_link: `${window.location.origin}/chat/${appId.value}?source=GB50054.pdf&page=12&bbox=100,200,300,400`
+      }
+    ]
+  }
+}, null, 2))
+
+const apiCurlCommand = computed(() => {
+  const payload = JSON.stringify({ app_id: appId.value, query: "输入您的问题" })
+  return `curl -X POST "${publicApiEndpoint.value}" \\
+  -H "Content-Type: application/json" \\
+  -d '${payload}'`
+})
+
+const openPlayground = () => {
+  window.open(playgroundUrl.value, '_blank')
+}
 
 const renderEvidenceScreenshots = async (type = 'node') => {
   const targetFacts = results.value.facts
@@ -2337,6 +2412,52 @@ onUnmounted(() => {
   color: #409eff;
   padding: 2px 8px;
   border-radius: 4px;
+  font-weight: 700;
+}
+
+.playground-card {
+  cursor: pointer;
+  transition: all 0.2s;
+  border-color: #409eff;
+  background: #fff;
+}
+
+.playground-card:hover {
+  background: #f0f7ff;
+  box-shadow: 0 2px 8px rgba(64, 158, 255, 0.15);
+}
+
+.playground-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.playground-icon {
+  font-size: 22px;
+}
+
+.playground-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.playground-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #409eff;
+}
+
+.playground-sub {
+  font-size: 12px;
+  color: #909399;
+}
+
+.playground-arrow {
+  font-size: 18px;
+  color: #409eff;
   font-weight: 700;
 }
 

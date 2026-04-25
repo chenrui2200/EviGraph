@@ -145,6 +145,9 @@ const results = ref({
   searched: false,
 })
 
+// Pending URL params for auto-open evidence
+const pendingUrlParams = ref(null)
+
 // Evidence canvas refs
 const evidenceCanvasRefs = ref({})
 
@@ -461,6 +464,8 @@ const handleSearch = async () => {
       await renderEvidenceScreenshots()
       isRenderingEvidence.value = false
       scrollToTop()
+      // URL 参数自动定位
+      autoOpenEvidence()
     })
   } catch (err) {
     console.error('Report generation error:', err)
@@ -477,8 +482,46 @@ const scrollToTop = () => {
   }
 }
 
+const autoOpenEvidence = () => {
+  if (!pendingUrlParams.value) return
+  const { source, page, bbox } = pendingUrlParams.value
+  const facts = results.value.facts
+  for (let i = 0; i < facts.length; i++) {
+    const f = facts[i]
+    const matchSource = f.source === source
+    const matchPage = !page || (f.page === page)
+    if (matchSource && matchPage) {
+      expandedSections.value.add(source)
+      expandedPdfs.value.add(i)
+      nextTick(() => {
+        renderEvidenceScreenshots()
+        const canvas = evidenceCanvasRefs.value[i]
+        const el = canvas?.closest?.('.evidence-item')
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        }
+      })
+      pendingUrlParams.value = null
+      return
+    }
+  }
+  // 未匹配到，清除标记避免影响后续搜索
+  pendingUrlParams.value = null
+}
+
 onMounted(async () => {
   await loadApp()
+
+  // 解析 URL 参数用于自动定位 PDF
+  const { source, page, bbox } = route.query
+  if (source) {
+    pendingUrlParams.value = {
+      source,
+      page: page ? parseInt(page, 10) : null,
+      bbox: bbox ? String(bbox).split(',').map(Number) : null,
+    }
+  }
+
   const presetQuestion = route.query.question
   if (presetQuestion && typeof presetQuestion === 'string' && presetQuestion.trim()) {
     userInput.value = presetQuestion.trim()
