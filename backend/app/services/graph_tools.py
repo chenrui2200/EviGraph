@@ -11,6 +11,7 @@ Core Retrieval Tools (Optimized):
 """
 
 import json
+import re
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1777,9 +1778,20 @@ Your response:"""
             # Step 0: 预计算 embedding，供所有 root_type 搜索共享，避免重复 HTTP 请求
             query_vector = self.storage._search.embedding.embed(query)
 
-            # Step 1: 搜索根节点
+            # --- Step 0b: clause_id 精确匹配 ---
+            # 检测查询中的条款编号格式（如 3.2.1, 5.1）
+            clause_id_pattern = re.compile(r'\b(\d+(?:\.\d+)+)\b')
+            clause_id_matches = clause_id_pattern.findall(query)
+            exact_clause_nodes: List[Dict[str, Any]] = []
+            if clause_id_matches:
+                exact_clause_nodes = self.storage.search_clauses_by_id(graph_id, clause_id_matches)
+                if exact_clause_nodes:
+                    logger.info(f"Exact clause_id match: {len(exact_clause_nodes)} clauses from ids={clause_id_matches}")
+
+            # Step 1: 搜索根节点（Entity/Term/Clause 并行）
             all_root_nodes: List[Dict[str, Any]] = []
-            # 并行搜索所有根节点类型
+            clause_root_nodes: List[Dict[str, Any]] = []
+
             def _search_type(root_type: str) -> List[Dict[str, Any]]:
                 if root_type == "Term":
                     nodes = self.storage.search_term_nodes(
@@ -1795,15 +1807,38 @@ Your response:"""
                     n["_root_type"] = root_type
                 return nodes
 
-            with ThreadPoolExecutor(max_workers=len(valid_types)) as executor:
-                futures = {executor.submit(_search_type, rt): rt for rt in valid_types}
+            def _search_clause() -> List[Dict[str, Any]]:
+                nodes = self.storage.search_clause_nodes(
+                    graph_id=graph_id, query=query, limit=limit,
+                    query_vector=query_vector, min_score=min_score,
+                )
+                for n in nodes:
+                    n["_root_type"] = "Clause"
+                return nodes
+
+            search_tasks = {rt: (_search_type, rt) for rt in valid_types}
+            search_tasks["Clause"] = (_search_clause,)
+
+            with ThreadPoolExecutor(max_workers=len(search_tasks)) as executor:
+                futures = {}
+                for key, task in search_tasks.items():
+                    if key == "Clause":
+                        futures[executor.submit(task[0])] = key
+                    else:
+                        futures[executor.submit(task[0], task[1])] = key
                 for future in as_completed(futures):
-                    all_root_nodes.extend(future.result())
+                    task_key = futures[future]
+                    result_nodes = future.result()
+                    if task_key == "Clause":
+                        clause_root_nodes = result_nodes
+                    else:
+                        all_root_nodes.extend(result_nodes)
 
             # Step 1b: fallback 到 Topic 搜索（当 Entity/Term 均未命中时）
-            if not all_root_nodes:
+            if not all_root_nodes and not clause_root_nodes and not exact_clause_nodes:
                 topic_nodes = self.storage.search_topic_nodes(
-                    graph_id=graph_id, query=query, limit=limit
+                    graph_id=graph_id, query=query, limit=limit,
+                    query_vector=query_vector, min_score=min_score,
                 )
                 if topic_nodes:
                     topic_uuids = [t.get("uuid") for t in topic_nodes if t.get("uuid")]
@@ -1819,22 +1854,38 @@ Your response:"""
                     all_root_nodes.extend(entity_from_topics)
                     logger.info(f"Topic fallback: found {len(topic_nodes)} topics, mapped to {len(entity_from_topics)} entities")
 
-            if not all_root_nodes:
+            if not all_root_nodes and not clause_root_nodes and not exact_clause_nodes:
                 return ObjectFirstSearchResult(query=query, rows=[], total_objects=0, total_facts=0)
 
-            root_uuids = [n.get("uuid") for n in all_root_nodes if n.get("uuid")]
-            logger.info(f"Batch search found {len(root_uuids)} root nodes ({valid_types})")
+            # Step 2: Entity/Term 路径查询（Clause 根节点不走此路径）
+            entity_term_uuids = [n.get("uuid") for n in all_root_nodes if n.get("_root_type") in ("Entity", "Term") and n.get("uuid")]
+            paths_map: Dict[str, List[Dict[str, Any]]] = {}
+            clause_nodes_map: Dict[str, Dict[str, Any]] = {}
+            if entity_term_uuids:
+                paths_map, clause_nodes_map = self.storage.get_entity_topic_clause_paths(
+                    entity_term_uuids, graph_id, include_clause_data=True,
+                )
+                logger.info(f"Batch search found {len(entity_term_uuids)} entity/term root nodes, paths_map keys={len(paths_map)}")
 
-            # Step 2: 单次查询路径 + Clause 节点完整数据（含 PDF 信息）
-            paths_map, clause_nodes_map = self.storage.get_entity_topic_clause_paths(
-                root_uuids, graph_id, include_clause_data=True,
-            )
+            # Step 2b: Clause 根节点直接收集 Clause 数据
+            for cr in clause_root_nodes:
+                c_uuid = cr.get("uuid")
+                if c_uuid and c_uuid not in clause_nodes_map:
+                    clause_nodes_map[c_uuid] = cr
+
+            # Step 2c: 精确匹配的 Clause 节点也加入
+            for ec in exact_clause_nodes:
+                c_uuid = ec.get("uuid")
+                if c_uuid and c_uuid not in clause_nodes_map:
+                    clause_nodes_map[c_uuid] = ec
 
             # Step 3: 构建 ObjectFirstRow
             term_rows = []
             entity_rows = []
+            clause_rows = []
             seen_fact_texts: set = set()
 
+            # 处理 Entity/Term 根节点
             for root_node in all_root_nodes:
                 root_uuid = root_node.get("uuid", "")
                 root_type = root_node.get("_root_type", "Entity")
@@ -1845,8 +1896,6 @@ Your response:"""
                 relevance_score = root_score * 100
 
                 paths = paths_map.get(root_uuid, [])
-                # 防御性修复：即使路径查询返回空（如 graph_id 不匹配导致），
-                # 也不跳过该根节点，而是返回空路径和空 facts，确保节点可见。
                 if not paths:
                     logger.warning(f"[search_batch] root_node {root_node.get('name')} ({root_uuid}) has no Topic->Clause path, returning empty facts")
 
@@ -1972,12 +2021,115 @@ Your response:"""
                 else:
                     entity_rows.append(row)
 
+            # 处理 Clause 根节点（直接搜索命中）
+            for cr in clause_root_nodes:
+                c_uuid = cr.get("uuid", "")
+                c_score = cr.get("score", 0.0)
+                if not c_uuid:
+                    continue
+                clause_data = clause_nodes_map.get(c_uuid, {})
+                if not clause_data:
+                    continue
+                clause_name = clause_data.get("name", "") or f"Clause-{c_uuid[:8]}"
+                clause_summary = clause_data.get("summary", "") or clause_data.get("data", "")
+                pdf_info = self._extract_clause_pdf_info(clause_data)
+                fact_text = f"条款: {clause_name}\n{clause_summary}" if clause_summary else f"条款: {clause_name}"
+                norm = self.normalize_text(fact_text)
+                facts = []
+                if norm and norm not in seen_fact_texts:
+                    seen_fact_texts.add(norm)
+                    facts.append({
+                        "uuid": c_uuid,
+                        "text": fact_text,
+                        "original_text": clause_summary,
+                        "source": pdf_info.get("source") or "Graph",
+                        "page": pdf_info.get("page"),
+                        "bbox": pdf_info.get("bbox"),
+                        "page_width": pdf_info.get("page_width"),
+                        "page_height": pdf_info.get("page_height"),
+                        "graph_id": graph_id,
+                        "source_node_uuid": c_uuid,
+                        "target_node_uuid": c_uuid,
+                        "relation_name": "DIRECT",
+                        "traversal_depth": 0,
+                        "similarity_score": c_score,
+                        **({"pdf_bboxes": pdf_info["pdf_bboxes"]} if pdf_info.get("pdf_bboxes") else {}),
+                    })
+                if facts:
+                    clause_rows.append(ObjectFirstRow(
+                        object_node={
+                            "uuid": c_uuid,
+                            "name": clause_name,
+                            "labels": ["Clause"],
+                            "summary": clause_summary,
+                            "pdf_info": {},
+                            "graph_id": graph_id,
+                        },
+                        traversal_paths=[ObjectPathNode(
+                            uuid=c_uuid, name=clause_name, labels=["Clause"],
+                            summary=clause_summary, depth=0,
+                        )],
+                        traversal_edges=[],
+                        facts=facts,
+                        relevance_score=c_score * 100,
+                    ))
+
+            # 处理精确匹配的 Clause 节点（clause_id 命中）
+            for ec in exact_clause_nodes:
+                c_uuid = ec.get("uuid", "")
+                if not c_uuid:
+                    continue
+                clause_name = ec.get("name", "") or f"Clause-{c_uuid[:8]}"
+                clause_summary = ec.get("summary", "") or ec.get("data", "")
+                pdf_info = self._extract_clause_pdf_info(ec)
+                fact_text = f"条款: {clause_name}\n{clause_summary}" if clause_summary else f"条款: {clause_name}"
+                norm = self.normalize_text(fact_text)
+                facts = []
+                if norm and norm not in seen_fact_texts:
+                    seen_fact_texts.add(norm)
+                    facts.append({
+                        "uuid": c_uuid,
+                        "text": fact_text,
+                        "original_text": clause_summary,
+                        "source": pdf_info.get("source") or "Graph",
+                        "page": pdf_info.get("page"),
+                        "bbox": pdf_info.get("bbox"),
+                        "page_width": pdf_info.get("page_width"),
+                        "page_height": pdf_info.get("page_height"),
+                        "graph_id": graph_id,
+                        "source_node_uuid": c_uuid,
+                        "target_node_uuid": c_uuid,
+                        "relation_name": "EXACT_MATCH",
+                        "traversal_depth": 0,
+                        "similarity_score": 1.0,
+                        **({"pdf_bboxes": pdf_info["pdf_bboxes"]} if pdf_info.get("pdf_bboxes") else {}),
+                    })
+                if facts:
+                    clause_rows.append(ObjectFirstRow(
+                        object_node={
+                            "uuid": c_uuid,
+                            "name": clause_name,
+                            "labels": ["Clause"],
+                            "summary": clause_summary,
+                            "pdf_info": {},
+                            "graph_id": graph_id,
+                        },
+                        traversal_paths=[ObjectPathNode(
+                            uuid=c_uuid, name=clause_name, labels=["Clause"],
+                            summary=clause_summary, depth=0,
+                        )],
+                        traversal_edges=[],
+                        facts=facts,
+                        relevance_score=100.0,
+                    ))
+
             # Term 优先，按 facts 数量排序
             term_rows.sort(key=lambda r: len(r.facts), reverse=True)
             entity_rows.sort(key=lambda r: len(r.facts), reverse=True)
-            all_rows = term_rows[:limit] + entity_rows[:limit]
+            clause_rows.sort(key=lambda r: len(r.facts), reverse=True)
+            all_rows = term_rows[:limit] + entity_rows[:limit] + clause_rows[:limit]
 
-            # 提升 name 精确匹配的节点到首位（无论 Entity/Term）
+            # 提升 name 精确匹配的节点到首位（无论 Entity/Term/Clause）
             query_lower = query.strip().lower()
             for i, row in enumerate(all_rows):
                 name = (row.object_node.get("name") or "").strip().lower()
@@ -1988,7 +2140,8 @@ Your response:"""
 
             logger.info(
                 f"Batch search complete: {len(all_rows)} rows "
-                f"(Term={len(term_rows[:limit])}, Entity={len(entity_rows[:limit])}), "
+                f"(Term={len(term_rows[:limit])}, Entity={len(entity_rows[:limit])}, "
+                f"Clause={len(clause_rows[:limit])}, Exact={len(exact_clause_nodes)}), "
                 f"total facts={sum(len(r.facts) for r in all_rows)}"
             )
 

@@ -1844,21 +1844,71 @@ class Neo4jStorage(GraphStorage):
         graph_id: str,
         query: str,
         limit: int = 10,
+        query_vector: List[float] = None,
+        min_score: float = None,
     ) -> List[Dict[str, Any]]:
         """
-        Search Topic nodes by topic name (CONTAINS match).
+        Search Topic nodes using hybrid scoring (vector + keyword).
 
         Returns list of dicts with node properties + 'score'.
         """
         with self._driver.session() as session:
             results = self._search.search_topic_nodes(
-                session, graph_id, query, limit
+                session, graph_id, query, limit,
+                query_vector=query_vector, min_score=min_score,
             )
             for n in results:
                 for k, v in n.items():
                     if hasattr(v, "isoformat"):
                         n[k] = v.isoformat()
             return results
+
+    def search_clause_nodes(
+        self,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+        query_vector: List[float] = None,
+        min_score: float = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search Clause nodes using hybrid scoring (vector + keyword).
+
+        Returns list of dicts with node properties + 'score'.
+        """
+        with self._driver.session() as session:
+            results = self._search.search_clause_nodes(
+                session, graph_id, query, limit,
+                query_vector=query_vector, min_score=min_score,
+            )
+            for n in results:
+                for k, v in n.items():
+                    if hasattr(v, "isoformat"):
+                        n[k] = v.isoformat()
+            return results
+
+    def search_clauses_by_id(
+        self,
+        graph_id: str,
+        clause_ids: List[str],
+    ) -> List[Dict[str, Any]]:
+        """根据 clause_id 列表精确匹配 Clause 节点。"""
+        if not clause_ids:
+            return []
+        with self._driver.session() as session:
+            result = session.run(
+                """
+                MATCH (c:Clause {graph_id: $gid})
+                WHERE c.clause_id IN $clause_ids
+                RETURN c AS n, labels(c) AS node_labels
+                """,
+                gid=graph_id,
+                clause_ids=[cid.strip() for cid in clause_ids if cid and cid.strip()],
+            )
+            return [
+                self._node_to_dict(record["n"], record["node_labels"])
+                for record in result
+            ]
 
     def get_entities_by_topic_uuids(
         self,
@@ -2659,6 +2709,7 @@ class Neo4jStorage(GraphStorage):
                                     "topic": topic_text,
                                     "graph_id": graph_id,
                                     "created_at": it["now"],
+                                    "embedding": it["embedding"],
                                 })
                                 clause_topic_pairs.append({
                                     "clause_uuid": it["episode_id"],
@@ -2674,11 +2725,13 @@ class Neo4jStorage(GraphStorage):
                                 tp.topic = t.topic,
                                 tp.clause_id = t.clause_id,
                                 tp.created_at = t.created_at,
-                                tp.name = t.topic
+                                tp.name = t.topic,
+                                tp.embedding = t.embedding
                             ON MATCH SET
                                 tp.topic = t.topic,
                                 tp.clause_id = t.clause_id,
-                                tp.name = t.topic
+                                tp.name = t.topic,
+                                tp.embedding = t.embedding
                             """,
                             topic_list=topic_list
                         )

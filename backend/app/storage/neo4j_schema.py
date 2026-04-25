@@ -92,6 +92,26 @@ OPTIONS {{indexConfig: {{
 }}}}
 """
 
+def get_topic_vector_index_query(dimension: int = 768) -> str:
+    return f"""
+CREATE VECTOR INDEX topic_embedding IF NOT EXISTS
+FOR (t:Topic) ON (t.embedding)
+OPTIONS {{indexConfig: {{
+    `vector.dimensions`: {dimension},
+    `vector.similarity_function`: 'cosine'
+}}}}
+"""
+
+def get_clause_vector_index_query(dimension: int = 768) -> str:
+    return f"""
+CREATE VECTOR INDEX clause_embedding IF NOT EXISTS
+FOR (c:Clause) ON (c.embedding)
+OPTIONS {{indexConfig: {{
+    `vector.dimensions`: {dimension},
+    `vector.similarity_function`: 'cosine'
+}}}}
+"""
+
 # Fulltext indexes (for BM25 keyword search)
 CREATE_ENTITY_FULLTEXT_INDEX = """
 CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS
@@ -106,6 +126,16 @@ FOR ()-[r:RELATION]-() ON EACH [r.fact, r.name]
 CREATE_EPISODE_FULLTEXT_INDEX = """
 CREATE FULLTEXT INDEX episode_fulltext IF NOT EXISTS
 FOR (e:Episode) ON EACH [e.data]
+"""
+
+CREATE_TOPIC_FULLTEXT_INDEX = """
+CREATE FULLTEXT INDEX topic_fulltext IF NOT EXISTS
+FOR (t:Topic) ON EACH [t.topic, t.name]
+"""
+
+CREATE_CLAUSE_FULLTEXT_INDEX = """
+CREATE FULLTEXT INDEX clause_fulltext IF NOT EXISTS
+FOR (c:Clause) ON EACH [c.name, c.summary]
 """
 
 CREATE_ENTITY_NAME_LOWER_INDEX = """
@@ -169,9 +199,13 @@ def get_all_schema_queries(dimension: int = 768) -> list:
         get_entity_vector_index_query(dimension),
         get_relation_vector_index_query(dimension),
         get_episode_vector_index_query(dimension),
+        get_topic_vector_index_query(dimension),
+        get_clause_vector_index_query(dimension),
         CREATE_ENTITY_FULLTEXT_INDEX,
         CREATE_FACT_FULLTEXT_INDEX,
         CREATE_EPISODE_FULLTEXT_INDEX,
+        CREATE_TOPIC_FULLTEXT_INDEX,
+        CREATE_CLAUSE_FULLTEXT_INDEX,
     ]
 
 # Keep this for backward compatibility if needed, but the storage class should call the function
