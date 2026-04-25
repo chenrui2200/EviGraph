@@ -9,6 +9,7 @@ import KbPipelineLaunchView from '../views/KbPipelineLaunchView.vue'
 import KbPipelineTrackView from '../views/KbPipelineTrackView.vue'
 import GraphSearchView from '../views/GraphSearchView.vue'
 import ApiPlaygroundView from '../views/ApiPlaygroundView.vue'
+import PdfPreviewView from '../views/PdfPreviewView.vue'
 
 const routes = [
   {
@@ -67,6 +68,12 @@ const routes = [
     path: '/playground/:app_id',
     name: 'ApiPlayground',
     component: ApiPlaygroundView,
+    props: true
+  },
+  {
+    path: '/preview/:app_id',
+    name: 'PdfPreview',
+    component: PdfPreviewView,
     props: true
   },
 ]

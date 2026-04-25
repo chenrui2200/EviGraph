@@ -408,22 +408,22 @@ def public_query():
             for r in all_rows:
                 paths = [
                     ObjectPathNode(
-                        uuid=p.get('uuid', ''),
-                        name=p.get('name', ''),
-                        labels=p.get('labels', []),
-                        summary=p.get('summary', ''),
-                        depth=p.get('depth', 0),
+                        uuid=p.uuid,
+                        name=p.name,
+                        labels=p.labels,
+                        summary=p.summary,
+                        depth=p.depth,
                     )
                     for p in r.traversal_paths
                 ]
                 edges = [
                     ObjectPathEdge(
-                        uuid=e.get('uuid', ''),
-                        name=e.get('name', ''),
-                        fact=e.get('fact', ''),
-                        source_node_uuid=e.get('source_node_uuid', ''),
-                        target_node_uuid=e.get('target_node_uuid', ''),
-                        depth=e.get('depth', 0),
+                        uuid=e.uuid,
+                        name=e.name,
+                        fact=e.fact,
+                        source_node_uuid=e.source_node_uuid,
+                        target_node_uuid=e.target_node_uuid,
+                        depth=e.depth,
                     )
                     for e in r.traversal_edges
                 ]
@@ -447,7 +447,11 @@ def public_query():
             logger.warning(f"Rerank failed in public-query, fallback to raw facts: {e}")
             facts = []
             for row in all_rows:
-                facts.extend(row.facts or [])
+                for fact in (row.facts or []):
+                    fact_copy = dict(fact)
+                    if fact_copy.get('relevance_score') is None:
+                        fact_copy['relevance_score'] = 0.0
+                    facts.append(fact_copy)
 
         # Build results array
         results = []
@@ -460,18 +464,20 @@ def public_query():
                 "bbox": f.get('bbox'),
                 "page_width": f.get('page_width'),
                 "page_height": f.get('page_height'),
-                "relevance_score": f.get('relevance_score'),
+                "relevance_score": f.get('relevance_score') if f.get('relevance_score') is not None else 0,
                 "graph_id": f.get('graph_id'),
             }
             # PDF download URL
             if f.get('source') and f.get('graph_id'):
                 page = f.get('page', 1)
                 item['pdf_url'] = f"{base_url}/api/graph/project/{f['graph_id']}/document/{f['source']}?page={page}"
-            # Source link: click to open chat page with PDF location
-            bbox = f.get('bbox')
-            if f.get('source') and bbox and len(bbox) >= 4:
-                bbox_str = ','.join(str(int(v)) for v in bbox[:4])
-                item['source_link'] = f"{frontend_base_url}/chat/{app_id}?source={f['source']}&page={f.get('page', 1)}&bbox={bbox_str}"
+            # Source link: click to open PDF preview page with bbox highlight
+            # 传递完整 pdf_bboxes，支持多段高亮（同一 clause 跨页或多区域）
+            pdf_bboxes = f.get('pdf_bboxes')
+            if f.get('source') and pdf_bboxes and len(pdf_bboxes) > 0:
+                import urllib.parse
+                bboxes_str = urllib.parse.quote(json.dumps(pdf_bboxes))
+                item['source_link'] = f"{frontend_base_url}/preview/{app_id}?source={f['source']}&page={f.get('page', 1)}&pdf_bboxes={bboxes_str}&graph_id={f['graph_id']}"
             results.append(item)
 
         return jsonify({

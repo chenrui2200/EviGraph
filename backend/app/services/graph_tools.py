@@ -613,11 +613,30 @@ class GraphToolsService:
             resp.raise_for_status()
             result = resp.json()
 
-            logger.info(f"[Rerank] SiliconFlow response: {json.dumps(result, ensure_ascii=False)[:500]}")
+            # 检查 API 错误响应
+            if result.get('error') or result.get('code', 200) != 200:
+                raise ValueError(f"SiliconFlow API error: {json.dumps(result, ensure_ascii=False)[:500]}")
+
+            logger.info(f"[Rerank] SiliconFlow response: {json.dumps(result, ensure_ascii=False)[:800]}")
 
             # SiliconFlow 返回: {"results": [{"index": 0, "relevance_score": 0.95}, ...]}
-            results_list = result.get('results', [])
-            score_map = {item['index']: item['relevance_score'] for item in results_list}
+            # 兼容不同字段名：relevance_score / score
+            results_list = result.get('results', []) or []
+            score_map = {}
+            for item in results_list:
+                idx = item.get('index')
+                raw_score = item.get('relevance_score') if item.get('relevance_score') is not None else item.get('score', 0.0)
+                try:
+                    score = float(raw_score)
+                except (TypeError, ValueError):
+                    score = 0.0
+                # 兼容 index 为字符串的情况
+                if isinstance(idx, int):
+                    score_map[idx] = score
+                elif isinstance(idx, str) and idx.isdigit():
+                    score_map[int(idx)] = score
+
+            logger.info(f"[Rerank] Parsed score_map keys: {list(score_map.keys())}, values: {list(score_map.values())[:5]}")
 
             scored_facts = []
             for idx, fact in enumerate(facts_to_process):
@@ -630,10 +649,14 @@ class GraphToolsService:
 
             # 按分数降序排列
             scored_facts.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
-            logger.info(f"[Rerank] Scored {len(scored_facts)} facts")
+            logger.info(f"[Rerank] Scored {len(scored_facts)} facts, top_score={scored_facts[0].get('relevance_score') if scored_facts else 'N/A'}")
             return scored_facts
         except Exception as e:
             logger.error(f"[Rerank] bge-reranker API failed: {str(e)}, returning original facts")
+            # 给原始 facts 添加默认 relevance_score，避免下游出现 null
+            for f in facts:
+                if f.get('relevance_score') is None:
+                    f['relevance_score'] = 0.0
             return facts
 
     def search_with_agentic_flow(

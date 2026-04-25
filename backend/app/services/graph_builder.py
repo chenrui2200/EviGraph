@@ -73,83 +73,6 @@ class GraphBuilderService:
             if project_id in self._active_workers:
                 self._active_workers[project_id] = False
 
-    def _build_graph_worker(
-        self,
-        task_id: str,
-        text: str,
-        ontology: Dict[str, Any],
-        graph_name: str,
-        chunk_size: int,
-        chunk_overlap: int,
-        batch_size: int
-    ):
-        """Graph build worker thread"""
-        try:
-            self.task_manager.update_task(
-                task_id,
-                status=TaskStatus.PROCESSING,
-                progress=5,
-                message="Starting graph building..."
-            )
-
-            # 1. Create graph
-            graph_id = self.create_graph(graph_name)
-            self.task_manager.update_task(
-                task_id,
-                progress=10,
-                message=f"Graph created: {graph_id}"
-            )
-
-            # 2. Set ontology
-            self.set_ontology(graph_id, ontology)
-            self.task_manager.update_task(
-                task_id,
-                progress=15,
-                message="Ontology set"
-            )
-
-            # 3. Text chunking
-            chunks = TextProcessor.split_text(text, chunk_size, chunk_overlap)
-            total_chunks = len(chunks)
-            self.task_manager.update_task(
-                task_id,
-                progress=20,
-                message=f"Text split into {total_chunks} chunks"
-            )
-
-            # 4. Send data in batches (NER + embedding + Neo4j insert — synchronous)
-            episode_uuids = self.add_text_batches(
-                graph_id, chunks, batch_size,
-                lambda msg, prog: self.task_manager.update_task(
-                    task_id,
-                    progress=20 + int(prog * 0.6),  # 20-80%
-                    message=msg
-                )
-            )
-
-            # 5. Wait for processing (no-op for Neo4j — already synchronous)
-            self.storage.wait_for_processing(episode_uuids)
-
-            self.task_manager.update_task(
-                task_id,
-                progress=85,
-                message="Data processing completed, getting graph information..."
-            )
-
-            # 6. Get graph information
-            graph_info = self._get_graph_info(graph_id)
-
-            # Completed
-            self.task_manager.complete_task(task_id, {
-                "graph_id": graph_id,
-                "graph_info": graph_info.to_dict(),
-                "chunks_processed": total_chunks,
-            })
-
-        except Exception as e:
-            import traceback
-            error_msg = f"{str(e)}\n{traceback.format_exc()}"
-            self.task_manager.fail_task(task_id, error_msg)
 
     def create_graph(self, name: str) -> str:
         """Create graph"""
@@ -168,29 +91,6 @@ class GraphBuilderService:
         """
         self.storage.set_ontology(graph_id, ontology)
 
-    def add_text_batches(
-        self,
-        graph_id: str,
-        chunks: List[Any],
-        batch_size: int = 5,
-        progress_callback: Optional[Callable] = None,
-    ) -> List[str]:
-        """
-        Add text chunks to the graph.
-        Now leverages the concurrent batch processing in Neo4jStorage.
-        """
-        logger.info(f"[graph_build] Delegating processing of {len(chunks)} chunks to Neo4jStorage (batch_size={batch_size})")
-
-        # Directly call the storage-level batch processor which we optimized for concurrency
-        episode_uuids = self.storage.add_text_batch(
-            graph_id,
-            chunks,
-            batch_size=batch_size,
-            progress_callback=progress_callback
-        )
-
-        logger.info(f"[graph_build] All {len(chunks)} chunks processed successfully")
-        return episode_uuids
 
     def _get_graph_info(self, graph_id: str) -> GraphInfo:
         """Get graph information"""

@@ -307,8 +307,17 @@
                               {{ isPdfOpen(fact._idx) ? '收起PDF位置 ▲' : '查看PDF位置 ▼' }}
                             </button>
                             <div v-show="isPdfOpen(fact._idx)" class="evidence-pdf-content">
-                              <canvas :ref="el => setEvidenceRef(el, fact._idx, 'node')" class="evidence-canvas"></canvas>
-                              <div v-if="!fact.bbox" class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
+                              <template v-if="getFactPageBboxes(fact).length">
+                                <div
+                                  v-for="(pb, pi) in getFactPageBboxes(fact)"
+                                  :key="pi"
+                                  class="page-screenshot"
+                                >
+                                  <div class="page-label">第 {{ pb.page }} 页</div>
+                                  <canvas :ref="el => setEvidenceRef(el, fact._idx + '-' + pi, 'node')" class="evidence-canvas"></canvas>
+                                </div>
+                              </template>
+                              <div v-else class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
                             </div>
                           </div>
                         </div>
@@ -431,8 +440,17 @@
                       {{ isPdfOpen(fact._idx) ? '收起PDF位置 ▲' : '查看PDF位置 ▼' }}
                     </button>
                     <div v-show="isPdfOpen(fact._idx)" class="evidence-pdf-content">
-                      <canvas :ref="el => setEvidenceRef(el, fact._idx, 'modal')" class="full-evidence-canvas"></canvas>
-                      <div v-if="!fact.bbox" class="full-no-bbox">
+                      <template v-if="getFactPageBboxes(fact).length">
+                        <div
+                          v-for="(pb, pi) in getFactPageBboxes(fact)"
+                          :key="pi"
+                          class="page-screenshot"
+                        >
+                          <div class="page-label">第 {{ pb.page }} 页</div>
+                          <canvas :ref="el => setEvidenceRef(el, fact._idx + '-' + pi, 'modal')" class="full-evidence-canvas"></canvas>
+                        </div>
+                      </template>
+                      <div v-else class="full-no-bbox">
                         <p class="fact-text-fallback">{{ fact.text }}</p>
                       </div>
                     </div>
@@ -603,11 +621,25 @@ const openPlayground = () => {
   window.open(playgroundUrl.value, '_blank')
 }
 
+// 将 fact 的 pdf_bboxes / bbox 统一为 [{ page, bbox }, ...]
+const getFactPageBboxes = (fact) => {
+  if (fact.pdf_bboxes && Array.isArray(fact.pdf_bboxes) && fact.pdf_bboxes.length > 0) {
+    return fact.pdf_bboxes
+      .filter(b => b && b.length >= 5)
+      .map(b => ({ page: b[0], bbox: b.slice(1, 5) }))
+  }
+  if (fact.bbox && fact.bbox.length === 4 && fact.page) {
+    return [{ page: fact.page, bbox: fact.bbox }]
+  }
+  return []
+}
+
 const renderEvidenceScreenshots = async (type = 'node') => {
   const targetFacts = results.value.facts
   const validFacts = targetFacts.reduce((acc, f, idx) => {
-    if (f.bbox && f.bbox.length === 4 && f.graph_id && f.source) {
-      acc.push({ ...f, _renderIdx: idx })
+    const pageBboxes = getFactPageBboxes(f)
+    if (pageBboxes.length > 0 && f.graph_id && f.source) {
+      acc.push({ ...f, _renderIdx: idx, _pageBboxes: pageBboxes })
     }
     return acc
   }, [])
@@ -624,21 +656,19 @@ const renderEvidenceScreenshots = async (type = 'node') => {
     factsByPdf.get(cacheKey).push(fact)
   }
 
-  // 渲染单条 fact
-  const renderSingleFact = async (fact, pdfDoc) => {
-    const renderIdx = fact._renderIdx
-    const canvas = evidenceCanvasRefs.value[type][renderIdx]
+  // 渲染单条 fact 的某一页截图
+  const renderSinglePage = async (fact, pageNum, bbox, refKey, pdfDoc) => {
+    const canvas = evidenceCanvasRefs.value[type][refKey]
     if (!canvas) return
 
     try {
-      const page = await pdfDoc.getPage(fact.page || 1)
+      const page = await pdfDoc.getPage(pageNum)
       const context = canvas.getContext('2d')
 
       const unscaledViewport = page.getViewport({ scale: 1 })
       const pageW = unscaledViewport.width
       const pageH = unscaledViewport.height
 
-      const bbox = fact.bbox
       const vPadding = type === 'modal' ? 240 : 180
       const rawCropY = bbox[1] - vPadding
       const rawCropH = (bbox[3] - bbox[1]) + vPadding * 2
@@ -648,16 +678,13 @@ const renderEvidenceScreenshots = async (type = 'node') => {
       const cropY = Math.max(0, Math.min(rawCropY, pageH - rawCropH))
       const cropH = Math.min(rawCropH, pageH - cropY)
 
-      // modal 模式下降低 scale 减少渲染开销（2.5 兼顾清晰度与性能）
       const scale = type === 'modal' ? 2.5 : 2.0
       const viewport = page.getViewport({ scale })
 
       const xRatio = viewport.width / pageW
       const yRatio = viewport.height / pageH
 
-      // 复用 tempCanvas，避免频繁创建/销毁
       const { canvas: tempCanvas, ctx: tempCtx } = _getTempCanvas(viewport.width, viewport.height)
-
       await page.render({ canvasContext: tempCtx, viewport }).promise
 
       const sX = cropX * xRatio
@@ -685,7 +712,7 @@ const renderEvidenceScreenshots = async (type = 'node') => {
       context.strokeRect(hX, hY, hW, hH)
 
     } catch (err) {
-      console.error(`Failed to render screenshot for fact ${renderIdx}:`, err)
+      console.error(`Failed to render screenshot for ${refKey}:`, err)
     }
   }
 
@@ -712,7 +739,11 @@ const renderEvidenceScreenshots = async (type = 'node') => {
         }
       }
       for (const fact of facts) {
-        await renderSingleFact(fact, pdfDoc)
+        for (let pi = 0; pi < fact._pageBboxes.length; pi++) {
+          const { page: pageNum, bbox } = fact._pageBboxes[pi]
+          const refKey = `${fact._renderIdx}-${pi}`
+          await renderSinglePage(fact, pageNum, bbox, refKey, pdfDoc)
+        }
       }
     })
   )
@@ -2019,6 +2050,23 @@ onUnmounted(() => {
   max-width: 100%;
   box-shadow: 0 2px 8px rgba(0,0,0,0.2);
   background: #fff;
+}
+
+.page-screenshot {
+  margin-bottom: 12px;
+}
+
+.page-screenshot:last-child {
+  margin-bottom: 0;
+}
+
+.page-label {
+  font-size: 12px;
+  color: #666;
+  padding: 4px 8px;
+  background: #f0f0f0;
+  border-radius: 4px 4px 0 0;
+  display: inline-block;
 }
 
 .no-bbox-hint {

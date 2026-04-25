@@ -65,8 +65,17 @@
                       {{ isPdfOpen(fact._idx) ? '收起PDF位置 ▲' : '查看PDF位置 ▼' }}
                     </button>
                     <div v-show="isPdfOpen(fact._idx)" class="evidence-pdf-content">
-                      <canvas :ref="el => setEvidenceRef(el, fact._idx)" class="evidence-canvas"></canvas>
-                      <div v-if="!fact.bbox" class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
+                      <template v-if="getFactPageBboxes(fact).length">
+                        <div
+                          v-for="(pb, pi) in getFactPageBboxes(fact)"
+                          :key="pi"
+                          class="page-screenshot"
+                        >
+                          <div class="page-label">第 {{ pb.page }} 页</div>
+                          <canvas :ref="el => setEvidenceRef(el, fact._idx + '-' + pi)" class="evidence-canvas"></canvas>
+                        </div>
+                      </template>
+                      <div v-else class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
                     </div>
                   </div>
                 </div>
@@ -236,11 +245,24 @@ const initPdfJs = async () => {
   })
 }
 
+// 将 fact 的 pdf_bboxes / bbox 统一为 [{ page, bbox }, ...]
+const getFactPageBboxes = (fact) => {
+  if (fact.pdf_bboxes && Array.isArray(fact.pdf_bboxes) && fact.pdf_bboxes.length > 0) {
+    return fact.pdf_bboxes
+      .filter(b => b && b.length >= 5)
+      .map(b => ({ page: b[0], bbox: b.slice(1, 5) }))
+  }
+  if (fact.bbox && fact.bbox.length === 4 && fact.page) {
+    return [{ page: fact.page, bbox: fact.bbox }]
+  }
+  return []
+}
+
 const renderEvidenceScreenshots = async () => {
   if (!pdfjsLibInstance) await initPdfJs()
 
   const facts = results.value.facts
-  const validFacts = facts.filter(f => f.bbox && f.graph_id && f.source)
+  const validFacts = facts.filter(f => getFactPageBboxes(f).length > 0 && f.graph_id && f.source)
   if (validFacts.length === 0) return
 
   // 按 PDF 分组：不同 PDF 之间并行，同一 PDF 内串行
@@ -251,20 +273,19 @@ const renderEvidenceScreenshots = async () => {
     factsByPdf.get(cacheKey).push(fact)
   }
 
-  // 渲染单条 fact
-  const renderSingleFact = async (fact, pdfDoc, i) => {
-    const canvas = evidenceCanvasRefs.value[i]
+  // 渲染单条 fact 的某一页截图
+  const renderSinglePage = async (pageNum, bbox, refKey, pdfDoc) => {
+    const canvas = evidenceCanvasRefs.value[refKey]
     if (!canvas) return
 
     try {
-      const page = await pdfDoc.getPage(fact.page || 1)
+      const page = await pdfDoc.getPage(pageNum)
       const context = canvas.getContext('2d')
 
       const unscaledViewport = page.getViewport({ scale: 1 })
       const pageW = unscaledViewport.width
       const pageH = unscaledViewport.height
 
-      const bbox = fact.bbox
       const vPadding = 240
       const rawCropY = bbox[1] - vPadding
       const rawCropH = (bbox[3] - bbox[1]) + vPadding * 2
@@ -328,10 +349,14 @@ const renderEvidenceScreenshots = async () => {
           return
         }
       }
-      for (let j = 0; j < facts.length; j++) {
-        // 恢复原始索引以匹配 canvas ref
-        const originalIdx = results.value.facts.indexOf(facts[j])
-        await renderSingleFact(facts[j], pdfDoc, originalIdx)
+      for (const fact of facts) {
+        const pageBboxes = getFactPageBboxes(fact)
+        const baseIdx = results.value.facts.indexOf(fact)
+        for (let pi = 0; pi < pageBboxes.length; pi++) {
+          const { page: pageNum, bbox } = pageBboxes[pi]
+          const refKey = `${baseIdx}-${pi}`
+          await renderSinglePage(pageNum, bbox, refKey, pdfDoc)
+        }
       }
     })
   )
@@ -755,6 +780,23 @@ onMounted(async () => {
   max-width: 100%;
   box-shadow: 0 4px 12px rgba(0,0,0,0.2);
   background: #fff;
+}
+
+.page-screenshot {
+  margin-bottom: 12px;
+}
+
+.page-screenshot:last-child {
+  margin-bottom: 0;
+}
+
+.page-label {
+  font-size: 12px;
+  color: #666;
+  padding: 4px 8px;
+  background: #f0f0f0;
+  border-radius: 4px 4px 0 0;
+  display: inline-block;
 }
 
 .no-bbox-hint {
