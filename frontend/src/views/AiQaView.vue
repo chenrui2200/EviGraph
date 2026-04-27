@@ -129,6 +129,7 @@
                   <span v-if="results.rows.length > 0">
                     （Term: {{ results.rows.filter(r => r.object_node?.labels?.includes('Term')).length }},
                     Entity: {{ results.rows.filter(r => r.object_node?.labels?.includes('Entity') && !r.object_node?.labels?.includes('Term')).length }}），
+                    涉及 <strong>{{ new Set(results.rows.flatMap(r => r.traversal_paths?.filter(p => p.labels?.includes('Topic')).map(p => p.uuid))).size }}</strong> 个 Topic，
                     共 <strong>{{ results.rows.reduce((s, r) => s + (r.facts?.length || 0), 0) }}</strong> 条关联事实。
                   </span>
                   <template v-if="results.searchTimings.object_s || results.searchTimings.term_s">
@@ -155,6 +156,19 @@
                     <div class="object-score">
                       <span class="score-tag">{{ (row.relevance_score || 0).toFixed(1) }}</span>
                     </div>
+                  </div>
+
+                  <!-- 关联 Topic 标签 -->
+                  <div v-if="row.traversal_paths?.some(p => p.labels?.includes('Topic'))" class="object-topics">
+                    <span class="topics-label">关联 Topic:</span>
+                    <span
+                      v-for="(topicNode, tIdx) in row.traversal_paths.filter(p => p.labels?.includes('Topic'))"
+                      :key="tIdx"
+                      class="topic-tag"
+                      :title="topicNode.summary || ''"
+                    >
+                      {{ topicNode.name || topicNode.uuid?.slice(0, 8) }}
+                    </span>
                   </div>
 
                   <!-- Object 摘要 -->
@@ -2918,6 +2932,37 @@ onUnmounted(() => {
   border-radius: 4px;
   font-size: 11px;
   font-weight: 700;
+}
+
+.object-topics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding-left: 4px;
+}
+
+.topics-label {
+  font-size: 10px;
+  color: #909399;
+  font-weight: 600;
+  margin-right: 2px;
+}
+
+.topic-tag {
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #f6ffed;
+  color: #389e0d;
+  border: 1px solid #b7eb8f;
+  cursor: default;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .object-summary {
