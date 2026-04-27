@@ -187,11 +187,34 @@ def rerank_facts():
 
         logger.info(f"Rerank complete: scored={len(rerank_result.scored_facts)}, filtered={len(rerank_result.filtered_facts)} (top_k={top_k}, min_score={rerank_min_score})")
 
+        # 构建 fact_key -> topics 映射，用于为结果附加关联 Topic
+        topic_map = {}
+        for row in (getattr(rerank_result, 'rows_with_scored_facts', []) or []):
+            topics = [p.name for p in (row.traversal_paths or []) if 'Topic' in (p.labels or [])]
+            for fact in (row.facts or []):
+                ft = fact.get('text', '') if isinstance(fact, dict) else getattr(fact, 'text', '')
+                fs = fact.get('source', '') if isinstance(fact, dict) else getattr(fact, 'source', '')
+                topic_map[(ft, fs)] = topics
+
+        scored_facts = []
+        for f in (rerank_result.scored_facts or []):
+            fc = dict(f) if not isinstance(f, dict) else dict(f)
+            key = (fc.get('text', ''), fc.get('source', ''))
+            fc['topics'] = topic_map.get(key, [])
+            scored_facts.append(fc)
+
+        filtered_facts = []
+        for f in (rerank_result.filtered_facts or []):
+            fc = dict(f) if not isinstance(f, dict) else dict(f)
+            key = (fc.get('text', ''), fc.get('source', ''))
+            fc['topics'] = topic_map.get(key, [])
+            filtered_facts.append(fc)
+
         return jsonify({
             "success": True,
             "data": {
-                "scored_facts": rerank_result.scored_facts,
-                "filtered_facts": rerank_result.filtered_facts,
+                "scored_facts": scored_facts,
+                "filtered_facts": filtered_facts,
                 "rows": [r.to_dict() for r in rerank_result.rows_with_scored_facts],
             }
         })
@@ -442,15 +465,33 @@ def public_query():
                 top_k=top_k,
                 rerank_min_score=rerank_min_score,
             )
-            facts = rerank_result.filtered_facts or rerank_result.scored_facts or []
+
+            # 构建 fact_key -> topics 映射，用于为结果附加关联 Topic
+            topic_map = {}
+            for row in (getattr(rerank_result, 'rows_with_scored_facts', []) or []):
+                topics = [p.name for p in (row.traversal_paths or []) if 'Topic' in (p.labels or [])]
+                for fact in (row.facts or []):
+                    ft = fact.get('text', '') if isinstance(fact, dict) else getattr(fact, 'text', '')
+                    fs = fact.get('source', '') if isinstance(fact, dict) else getattr(fact, 'source', '')
+                    topic_map[(ft, fs)] = topics
+
+            raw_facts = rerank_result.filtered_facts or rerank_result.scored_facts or []
+            facts = []
+            for f in raw_facts:
+                fc = dict(f) if not isinstance(f, dict) else f
+                key = (fc.get('text', ''), fc.get('source', ''))
+                fc['topics'] = topic_map.get(key, [])
+                facts.append(fc)
         except Exception as e:
             logger.warning(f"Rerank failed in public-query, fallback to raw facts: {e}")
             facts = []
             for row in all_rows:
+                topics = [p.name for p in (row.traversal_paths or []) if 'Topic' in (p.labels or [])]
                 for fact in (row.facts or []):
-                    fact_copy = dict(fact)
+                    fact_copy = dict(fact) if not isinstance(fact, dict) else dict(fact)
                     if fact_copy.get('relevance_score') is None:
                         fact_copy['relevance_score'] = 0.0
+                    fact_copy['topics'] = topics
                     facts.append(fact_copy)
 
         # Build results array
@@ -466,6 +507,7 @@ def public_query():
                 "page_height": f.get('page_height'),
                 "relevance_score": f.get('relevance_score') if f.get('relevance_score') is not None else 0,
                 "graph_id": f.get('graph_id'),
+                "topics": f.get('topics', []),
             }
             # PDF download URL
             if f.get('source') and f.get('graph_id'):

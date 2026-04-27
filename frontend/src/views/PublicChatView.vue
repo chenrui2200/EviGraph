@@ -60,6 +60,10 @@
                     <span class="evidence-text">{{ fact.text }}</span>
                     <span v-if="getFactPageBboxes(fact).length" class="evidence-page">{{ formatPageRange(getFactPageBboxes(fact)) }}</span>
                   </div>
+                  <div v-if="fact.topics?.length" class="evidence-topics">
+                    <span class="topics-label">关联 Topic:</span>
+                    <span v-for="(topic, tIdx) in fact.topics" :key="tIdx" class="topic-tag">{{ topic }}</span>
+                  </div>
                   <div class="evidence-pdf-fold">
                     <button class="fold-btn" @click.stop="togglePdf(fact._idx)">
                       {{ isPdfOpen(fact._idx) ? '收起PDF位置 ▲' : '查看PDF位置 ▼' }}
@@ -763,6 +767,36 @@ onMounted(async () => {
   color: #909399;
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+.evidence-topics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding-left: 2px;
+}
+
+.evidence-topics .topics-label {
+  font-size: 10px;
+  color: #909399;
+  font-weight: 600;
+  margin-right: 2px;
+}
+
+.evidence-topics .topic-tag {
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #f6ffed;
+  color: #389e0d;
+  border: 1px solid #b7eb8f;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .evidence-pdf-fold {
