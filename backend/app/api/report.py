@@ -187,39 +187,41 @@ def rerank_facts():
 
         logger.info(f"Rerank complete: scored={len(rerank_result.scored_facts)}, filtered={len(rerank_result.filtered_facts)} (top_k={top_k}, min_score={rerank_min_score})")
 
-        # 构建 fact_key -> topics 映射，用于为结果附加关联 Topic
-        # 优先从 row.facts 中聚合所有 Topic 名称（比 traversal_paths 更完整）
+        # 构建 fact_key -> topic 映射，用于为结果附加关联 Topic（单数字符串）
         topic_map = {}
         for row in (getattr(rerank_result, 'rows_with_scored_facts', []) or []):
-            all_topics = set()
+            # 优先从 row.facts 中提取 topic（单数字符串）
+            row_topic = ""
             for fact in (row.facts or []):
-                fact_topics = fact.get('topics', []) if isinstance(fact, dict) else getattr(fact, 'topics', [])
-                all_topics.update(fact_topics)
+                t = fact.get('topic', '') if isinstance(fact, dict) else getattr(fact, 'topic', '')
+                if t:
+                    row_topic = t
+                    break
             # fallback：从 traversal_paths 中提取 Topic 名称
-            if not all_topics:
+            if not row_topic:
                 for p in (row.traversal_paths or []):
                     if 'Topic' in (p.labels or []):
-                        all_topics.add(p.name)
-            topic_list = sorted(all_topics)
+                        row_topic = p.name
+                        break
             for fact in (row.facts or []):
                 ft = fact.get('text', '') if isinstance(fact, dict) else getattr(fact, 'text', '')
                 fs = fact.get('source', '') if isinstance(fact, dict) else getattr(fact, 'source', '')
-                topic_map[(ft, fs)] = topic_list
+                topic_map[(ft, fs)] = row_topic
 
         scored_facts = []
         for f in (rerank_result.scored_facts or []):
             fc = dict(f) if not isinstance(f, dict) else dict(f)
-            if not fc.get('topics'):
+            if not fc.get('topic'):
                 key = (fc.get('text', ''), fc.get('source', ''))
-                fc['topics'] = topic_map.get(key, [])
+                fc['topic'] = topic_map.get(key, '')
             scored_facts.append(fc)
 
         filtered_facts = []
         for f in (rerank_result.filtered_facts or []):
             fc = dict(f) if not isinstance(f, dict) else dict(f)
-            if not fc.get('topics'):
+            if not fc.get('topic'):
                 key = (fc.get('text', ''), fc.get('source', ''))
-                fc['topics'] = topic_map.get(key, [])
+                fc['topic'] = topic_map.get(key, '')
             filtered_facts.append(fc)
 
         return jsonify({
@@ -478,43 +480,47 @@ def public_query():
                 rerank_min_score=rerank_min_score,
             )
 
-            # 构建 fact_key -> topics 映射，用于为结果附加关联 Topic
-            # 优先从 row.facts 中聚合所有 Topic 名称（比 traversal_paths 更完整）
+            # 构建 fact_key -> topic 映射，用于为结果附加关联 Topic（单数字符串）
             topic_map = {}
             for row in (getattr(rerank_result, 'rows_with_scored_facts', []) or []):
-                all_topics = set()
+                row_topic = ""
                 for fact in (row.facts or []):
-                    fact_topics = fact.get('topics', []) if isinstance(fact, dict) else getattr(fact, 'topics', [])
-                    all_topics.update(fact_topics)
-                # fallback：从 traversal_paths 中提取 Topic 名称
-                if not all_topics:
+                    t = fact.get('topic', '') if isinstance(fact, dict) else getattr(fact, 'topic', '')
+                    if t:
+                        row_topic = t
+                        break
+                if not row_topic:
                     for p in (row.traversal_paths or []):
                         if 'Topic' in (p.labels or []):
-                            all_topics.add(p.name)
-                topic_list = sorted(all_topics)
+                            row_topic = p.name
+                            break
                 for fact in (row.facts or []):
                     ft = fact.get('text', '') if isinstance(fact, dict) else getattr(fact, 'text', '')
                     fs = fact.get('source', '') if isinstance(fact, dict) else getattr(fact, 'source', '')
-                    topic_map[(ft, fs)] = topic_list
+                    topic_map[(ft, fs)] = row_topic
 
             raw_facts = rerank_result.filtered_facts or rerank_result.scored_facts or []
             facts = []
             for f in raw_facts:
                 fc = dict(f) if not isinstance(f, dict) else f
-                if not fc.get('topics'):
+                if not fc.get('topic'):
                     key = (fc.get('text', ''), fc.get('source', ''))
-                    fc['topics'] = topic_map.get(key, [])
+                    fc['topic'] = topic_map.get(key, '')
                 facts.append(fc)
         except Exception as e:
             logger.warning(f"Rerank failed in public-query, fallback to raw facts: {e}")
             facts = []
             for row in all_rows:
-                topics = [p.name for p in (row.traversal_paths or []) if 'Topic' in (p.labels or [])]
+                row_topic = ""
+                for p in (row.traversal_paths or []):
+                    if 'Topic' in (p.labels or []):
+                        row_topic = p.name
+                        break
                 for fact in (row.facts or []):
                     fact_copy = dict(fact) if not isinstance(fact, dict) else dict(fact)
                     if fact_copy.get('relevance_score') is None:
                         fact_copy['relevance_score'] = 0.0
-                    fact_copy['topics'] = topics
+                    fact_copy['topic'] = row_topic
                     facts.append(fact_copy)
 
         # Build results array
@@ -530,7 +536,7 @@ def public_query():
                 "page_height": f.get('page_height'),
                 "relevance_score": f.get('relevance_score') if f.get('relevance_score') is not None else 0,
                 "graph_id": f.get('graph_id'),
-                "topics": f.get('topics', []),
+                "topic": f.get('topic', ''),
             }
             # PDF download URL
             if f.get('source') and f.get('graph_id'):

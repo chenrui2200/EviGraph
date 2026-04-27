@@ -60,9 +60,9 @@
                     <span class="evidence-text">{{ fact.text }}</span>
                     <span v-if="getFactPageBboxes(fact).length" class="evidence-page">{{ formatPageRange(getFactPageBboxes(fact)) }}</span>
                   </div>
-                  <div v-if="fact.topics?.length" class="evidence-topics">
+                  <div v-if="fact.topic" class="evidence-topics">
                     <span class="topics-label">关联 Topic:</span>
-                    <span v-for="(topic, tIdx) in fact.topics" :key="tIdx" class="topic-tag">{{ topic }}</span>
+                    <span class="topic-tag">{{ fact.topic }}</span>
                   </div>
                   <div class="evidence-pdf-fold">
                     <button class="fold-btn" @click.stop="togglePdf(fact._idx)">
@@ -786,16 +786,13 @@ onMounted(async () => {
 }
 
 .evidence-topics .topic-tag {
-  padding: 1px 6px;
+  padding: 1px 8px;
   border-radius: 10px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   background: #f6ffed;
   color: #389e0d;
   border: 1px solid #b7eb8f;
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

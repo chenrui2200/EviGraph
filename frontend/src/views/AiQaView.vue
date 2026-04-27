@@ -314,9 +314,9 @@
                             <span class="evidence-text">{{ fact.text }}</span>
                             <span v-if="fact.page" class="evidence-page">P{{ fact.page }}</span>
                           </div>
-                          <div v-if="fact.topics?.length" class="evidence-topics">
+                          <div v-if="fact.topic" class="evidence-topics">
                             <span class="topics-label">关联 Topic:</span>
-                            <span v-for="(topic, tIdx) in fact.topics" :key="tIdx" class="topic-tag">{{ topic }}</span>
+                            <span class="topic-tag">{{ fact.topic }}</span>
                           </div>
                           <!-- PDF 位置折叠 -->
                           <div class="evidence-pdf-fold">
@@ -452,9 +452,9 @@
                     <span v-if="fact.page" class="full-evidence-page">P{{ fact.page }}</span>
                     <p class="fact-text-fallback">{{ fact.text }}</p>
                   </div>
-                  <div v-if="fact.topics?.length" class="evidence-topics">
+                  <div v-if="fact.topic" class="evidence-topics">
                     <span class="topics-label">关联 Topic:</span>
-                    <span v-for="(topic, tIdx) in fact.topics" :key="tIdx" class="topic-tag">{{ topic }}</span>
+                    <span class="topic-tag">{{ fact.topic }}</span>
                   </div>
                   <div class="full-evidence-item-pdf">
                     <button class="fold-btn" @click.stop="togglePdf(fact._idx)">
@@ -2988,17 +2988,14 @@ onUnmounted(() => {
 }
 
 .topic-tag {
-  padding: 1px 6px;
+  padding: 1px 8px;
   border-radius: 10px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   background: #f6ffed;
   color: #389e0d;
   border: 1px solid #b7eb8f;
   cursor: default;
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

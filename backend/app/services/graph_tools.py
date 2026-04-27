@@ -1131,7 +1131,7 @@ class GraphToolsService:
                                 "relation_name": "HAS_TOPIC",
                                 "traversal_depth": 2,
                                 "similarity_score": 0.0,
-                                "topics": [topic_name],
+                                "topic": topic_name,
                             }
                             if pdf_info.get("pdf_bboxes"):
                                 fact_entry["pdf_bboxes"] = pdf_info["pdf_bboxes"]
