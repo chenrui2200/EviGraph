@@ -968,10 +968,10 @@ const setEvidenceRef = (el, factIndex, type = 'node') => {
 
 // Node Positions and Config
 const nodes = ref([
-  { id: 'n1', type: 'input', title: '用户输入 (Input)', icon: '📝', x: 50, y: 150, status: 'pending' },
-  { id: 'n2', type: 'retrieval', title: '知识库检索 (Retrieval)', icon: '🔍', x: 380, y: 150, status: 'pending' },
-  { id: 'n_rerank', type: 'rerank', title: 'bge-reranker-v2-m3 精排', icon: '🃏', x: 710, y: 150, status: 'pending' },
-  { id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 1040, y: 150, status: 'pending' }
+  { id: 'n1', type: 'input', title: '用户输入 (Input)', icon: '📝', x: 60, y: 180, status: 'pending' },
+  { id: 'n2', type: 'retrieval', title: '知识库检索 (Retrieval)', icon: '🔍', x: 460, y: 180, status: 'pending' },
+  { id: 'n_rerank', type: 'rerank', title: 'bge-reranker-v2-m3 精排', icon: '🃏', x: 860, y: 180, status: 'pending' },
+  { id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 1260, y: 180, status: 'pending' }
 ])
 
 const connections = [
@@ -1065,6 +1065,30 @@ const resetWorkflow = () => {
   nodes.value.forEach(n => {
     n.status = 'pending'
     n.duration = null
+  })
+}
+
+const initNodeLayout = () => {
+  nextTick(() => {
+    const canvasEl = canvas.value
+    if (!canvasEl) return
+    const cw = canvasEl.clientWidth
+    const ch = canvasEl.clientHeight
+    const nodeW = 280
+    const gap = 120
+    const totalW = nodeW * 4 + gap * 3
+    const startX = Math.max(40, (cw - totalW) / 2)
+    const startY = Math.max(60, (ch - 200) / 2)
+    const layout = [
+      { id: 'n1', x: startX, y: startY },
+      { id: 'n2', x: startX + nodeW + gap, y: startY },
+      { id: 'n_rerank', x: startX + (nodeW + gap) * 2, y: startY },
+      { id: 'n4', x: startX + (nodeW + gap) * 3, y: startY }
+    ]
+    layout.forEach(pos => {
+      const node = nodes.value.find(n => n.id === pos.id)
+      if (node) { node.x = pos.x; node.y = pos.y }
+    })
   })
 }
 
@@ -1254,7 +1278,7 @@ const loadAppConfig = async (id) => {
         const hasOutput = migratedNodes.some(n => n.type === 'output')
         const hasRerank = migratedNodes.some(n => n.type === 'rerank')
         if (!hasOutput && hasRerank) {
-          migratedNodes.push({ id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 1040, y: 150, status: 'pending' })
+          migratedNodes.push({ id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 1260, y: 180, status: 'pending' })
         }
         nodes.value = migratedNodes
       }
@@ -1298,6 +1322,8 @@ onMounted(async () => {
   await loadProjects()
   if (appId.value) {
     await loadAppConfig(appId.value)
+  } else {
+    initNodeLayout()
   }
 })
 
