@@ -1029,7 +1029,7 @@ const getConnectionPath = (conn) => {
 
   if (!fromNode || !toNode) return ''
 
-  const x1 = fromNode.x + 280
+  const x1 = fromNode.x + 400
   const y1 = fromNode.y + 40
   const x2 = toNode.x
   const y2 = toNode.y + 40
@@ -1095,7 +1095,7 @@ const initNodeLayout = () => {
     if (!canvasEl) return
     const cw = canvasEl.clientWidth
     const ch = canvasEl.clientHeight
-    const nodeW = 280
+    const nodeW = 400
     const gap = 120
     const totalW = nodeW * 4 + gap * 3
     const startX = Math.max(40, (cw - totalW) / 2)
@@ -1616,7 +1616,7 @@ onUnmounted(() => {
 
 .flow-node {
   position: absolute;
-  width: 280px;
+  width: 400px;
   background: #fff;
   border-radius: 10px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.1);
