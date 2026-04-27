@@ -969,9 +969,9 @@ const setEvidenceRef = (el, factIndex, type = 'node') => {
 // Node Positions and Config
 const nodes = ref([
   { id: 'n1', type: 'input', title: '用户输入 (Input)', icon: '📝', x: 50, y: 150, status: 'pending' },
-  { id: 'n2', type: 'retrieval', title: '知识库检索 (Retrieval)', icon: '🔍', x: 270, y: 150, status: 'pending' },
-  { id: 'n_rerank', type: 'rerank', title: 'bge-reranker-v2-m3 精排', icon: '🃏', x: 490, y: 150, status: 'pending' },
-  { id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 710, y: 150, status: 'pending' }
+  { id: 'n2', type: 'retrieval', title: '知识库检索 (Retrieval)', icon: '🔍', x: 380, y: 150, status: 'pending' },
+  { id: 'n_rerank', type: 'rerank', title: 'bge-reranker-v2-m3 精排', icon: '🃏', x: 710, y: 150, status: 'pending' },
+  { id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 1040, y: 150, status: 'pending' }
 ])
 
 const connections = [
@@ -1254,7 +1254,7 @@ const loadAppConfig = async (id) => {
         const hasOutput = migratedNodes.some(n => n.type === 'output')
         const hasRerank = migratedNodes.some(n => n.type === 'rerank')
         if (!hasOutput && hasRerank) {
-          migratedNodes.push({ id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 710, y: 150, status: 'pending' })
+          migratedNodes.push({ id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 1040, y: 150, status: 'pending' })
         }
         nodes.value = migratedNodes
       }
@@ -2447,32 +2447,36 @@ onUnmounted(() => {
 }
 
 .api-info-card {
-  background: #f8f9fa;
-  border: 1px solid #e9ecef;
-  border-radius: 8px;
-  padding: 15px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  padding: 16px 24px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
 }
 
 .info-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .info-label {
-  color: #6c757d;
-  font-weight: 600;
-  width: 100px;
+  color: #1a1a1a;
+  font-weight: 700;
+  font-size: 14px;
+  white-space: nowrap;
 }
 
 .info-value {
-  font-family: monospace;
+  font-family: 'Consolas', 'Monaco', monospace;
   color: #333;
   word-break: break-all;
+  font-size: 13px;
 }
 
 .method-tag {

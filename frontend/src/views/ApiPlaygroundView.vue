@@ -116,8 +116,14 @@
 
         <div v-else class="code-block-wrapper">
           <div class="code-header">
-            Response Body
-            <span class="content-type">application/json</span>
+            <span>Response Body</span>
+            <div class="header-right-actions">
+              <span class="content-type">application/json</span>
+              <button class="copy-btn" @click="copyResponse" title="复制 Response Body">
+                <span v-if="copied">已复制</span>
+                <span v-else>复制</span>
+              </button>
+            </div>
           </div>
           <pre class="code-content" v-html="highlightedJson"></pre>
         </div>
@@ -146,6 +152,7 @@ const statusCode = ref(0)
 const responseTime = ref(0)
 const responseData = ref(null)
 const errorMsg = ref('')
+const copied = ref(false)
 
 const statusClass = computed(() => {
   if (statusCode.value >= 200 && statusCode.value < 300) return 'success'
@@ -210,6 +217,19 @@ const clearResponse = () => {
   responseData.value = null
   errorMsg.value = ''
   statusCode.value = 0
+}
+
+const copyResponse = async () => {
+  if (!formattedJson.value) return
+  try {
+    await navigator.clipboard.writeText(formattedJson.value)
+    copied.value = true
+    setTimeout(() => {
+      copied.value = false
+    }, 2000)
+  } catch (err) {
+    console.error('Copy failed:', err)
+  }
 }
 </script>
 
@@ -587,10 +607,37 @@ const clearResponse = () => {
   align-items: center;
 }
 
+.header-right-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .content-type {
   font-size: 10px;
   color: #aaa;
   font-weight: 400;
+}
+
+.copy-btn {
+  background: #444;
+  color: #fff;
+  border: 1px solid #555;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-weight: 600;
+}
+
+.copy-btn:hover {
+  background: #555;
+  border-color: #666;
+}
+
+.copy-btn:active {
+  background: #333;
 }
 
 .code-content {
