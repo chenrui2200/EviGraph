@@ -651,7 +651,7 @@ class Neo4jStorage(GraphStorage):
                       AND e.graph_id = $gid
                       AND t.graph_id = $gid
                       AND c.graph_id = $gid
-                    RETURN e.uuid AS entity_uuid, t.uuid AS topic_uuid,
+                    RETURN e.uuid AS entity_uuid, t.uuid AS topic_uuid, t.name AS topic_name,
                            c.uuid AS clause_uuid, c AS clause_node, labels(c) AS clause_labels
                     """,
                     uuids=entity_uuids,
@@ -665,6 +665,7 @@ class Neo4jStorage(GraphStorage):
                     if entity_uuid in paths_map:
                         paths_map[entity_uuid].append({
                             "topic_uuid": record["topic_uuid"],
+                            "topic_name": record.get("topic_name", ""),
                             "clause_uuid": clause_uuid,
                         })
                     # 收集 Clause 节点数据（去重）
@@ -685,7 +686,7 @@ class Neo4jStorage(GraphStorage):
                       AND e.graph_id = $gid
                       AND t.graph_id = $gid
                       AND c.graph_id = $gid
-                    RETURN e.uuid AS entity_uuid, t.uuid AS topic_uuid, c.uuid AS clause_uuid
+                    RETURN e.uuid AS entity_uuid, t.uuid AS topic_uuid, t.name AS topic_name, c.uuid AS clause_uuid
                     """,
                     uuids=entity_uuids,
                     gid=graph_id,
@@ -696,6 +697,7 @@ class Neo4jStorage(GraphStorage):
                     if entity_uuid in paths_map:
                         paths_map[entity_uuid].append({
                             "topic_uuid": record["topic_uuid"],
+                            "topic_name": record.get("topic_name", ""),
                             "clause_uuid": record["clause_uuid"],
                         })
                 return paths_map

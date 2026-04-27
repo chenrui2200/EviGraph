@@ -1063,22 +1063,26 @@ class GraphToolsService:
                 ))
 
                 # 按 topic 分组，收集所有 Topic → Clause 路径
-                topic_groups: Dict[str, Tuple[str, List[str]]] = {}
+                topic_groups: Dict[str, Tuple[str, List[str]]] = {}  # topic_uuid -> (topic_name, [clause_uuids])
                 for path in paths:
                     topic_uuid = path.get("topic_uuid")
+                    topic_name = path.get("topic_name") or "Topic"
                     clause_uuid = path.get("clause_uuid")
                     if clause_uuid and topic_uuid:
                         if topic_uuid not in topic_groups:
-                            topic_groups[topic_uuid] = (topic_uuid, [])
+                            topic_groups[topic_uuid] = (topic_name, [])
                         topic_groups[topic_uuid][1].append(clause_uuid)
+
+                all_topic_names = [name for name, _ in topic_groups.values()]
 
                 # 遍历路径固定 2 跳：root → Topic → Clause
                 first_topic_added = False
-                for group_key, (topic_uuid, clause_list) in topic_groups.items():
+                for group_key, (topic_name, clause_list) in topic_groups.items():
+                    topic_uuid = group_key
                     # 只在 traversal_nodes 中记录第一个 Topic（路径展示用）
                     if not first_topic_added:
                         traversal_nodes.append(ObjectPathNode(
-                            uuid=topic_uuid, name="Topic", labels=["Topic"], summary="", depth=1,
+                            uuid=topic_uuid, name=topic_name, labels=["Topic"], summary="", depth=1,
                         ))
                         traversal_edges.append(ObjectPathEdge(
                             uuid=f"{topic_uuid}-{root_uuid}", name="MENTIONS",
@@ -1127,6 +1131,7 @@ class GraphToolsService:
                                 "relation_name": "HAS_TOPIC",
                                 "traversal_depth": 2,
                                 "similarity_score": 0.0,
+                                "topics": [topic_name],
                             }
                             if pdf_info.get("pdf_bboxes"):
                                 fact_entry["pdf_bboxes"] = pdf_info["pdf_bboxes"]
@@ -1140,6 +1145,7 @@ class GraphToolsService:
                     "name": root_node.get("name", ""),
                     "labels": root_node.get("labels", []),
                     "summary": root_node.get("summary", ""),
+                    "topics": all_topic_names,
                     "pdf_info": {},
                     "graph_id": graph_id,
                 }

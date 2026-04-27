@@ -188,26 +188,38 @@ def rerank_facts():
         logger.info(f"Rerank complete: scored={len(rerank_result.scored_facts)}, filtered={len(rerank_result.filtered_facts)} (top_k={top_k}, min_score={rerank_min_score})")
 
         # 构建 fact_key -> topics 映射，用于为结果附加关联 Topic
+        # 优先从 row.facts 中聚合所有 Topic 名称（比 traversal_paths 更完整）
         topic_map = {}
         for row in (getattr(rerank_result, 'rows_with_scored_facts', []) or []):
-            topics = [p.name for p in (row.traversal_paths or []) if 'Topic' in (p.labels or [])]
+            all_topics = set()
+            for fact in (row.facts or []):
+                fact_topics = fact.get('topics', []) if isinstance(fact, dict) else getattr(fact, 'topics', [])
+                all_topics.update(fact_topics)
+            # fallback：从 traversal_paths 中提取 Topic 名称
+            if not all_topics:
+                for p in (row.traversal_paths or []):
+                    if 'Topic' in (p.labels or []):
+                        all_topics.add(p.name)
+            topic_list = sorted(all_topics)
             for fact in (row.facts or []):
                 ft = fact.get('text', '') if isinstance(fact, dict) else getattr(fact, 'text', '')
                 fs = fact.get('source', '') if isinstance(fact, dict) else getattr(fact, 'source', '')
-                topic_map[(ft, fs)] = topics
+                topic_map[(ft, fs)] = topic_list
 
         scored_facts = []
         for f in (rerank_result.scored_facts or []):
             fc = dict(f) if not isinstance(f, dict) else dict(f)
-            key = (fc.get('text', ''), fc.get('source', ''))
-            fc['topics'] = topic_map.get(key, [])
+            if not fc.get('topics'):
+                key = (fc.get('text', ''), fc.get('source', ''))
+                fc['topics'] = topic_map.get(key, [])
             scored_facts.append(fc)
 
         filtered_facts = []
         for f in (rerank_result.filtered_facts or []):
             fc = dict(f) if not isinstance(f, dict) else dict(f)
-            key = (fc.get('text', ''), fc.get('source', ''))
-            fc['topics'] = topic_map.get(key, [])
+            if not fc.get('topics'):
+                key = (fc.get('text', ''), fc.get('source', ''))
+                fc['topics'] = topic_map.get(key, [])
             filtered_facts.append(fc)
 
         return jsonify({
@@ -467,20 +479,31 @@ def public_query():
             )
 
             # 构建 fact_key -> topics 映射，用于为结果附加关联 Topic
+            # 优先从 row.facts 中聚合所有 Topic 名称（比 traversal_paths 更完整）
             topic_map = {}
             for row in (getattr(rerank_result, 'rows_with_scored_facts', []) or []):
-                topics = [p.name for p in (row.traversal_paths or []) if 'Topic' in (p.labels or [])]
+                all_topics = set()
+                for fact in (row.facts or []):
+                    fact_topics = fact.get('topics', []) if isinstance(fact, dict) else getattr(fact, 'topics', [])
+                    all_topics.update(fact_topics)
+                # fallback：从 traversal_paths 中提取 Topic 名称
+                if not all_topics:
+                    for p in (row.traversal_paths or []):
+                        if 'Topic' in (p.labels or []):
+                            all_topics.add(p.name)
+                topic_list = sorted(all_topics)
                 for fact in (row.facts or []):
                     ft = fact.get('text', '') if isinstance(fact, dict) else getattr(fact, 'text', '')
                     fs = fact.get('source', '') if isinstance(fact, dict) else getattr(fact, 'source', '')
-                    topic_map[(ft, fs)] = topics
+                    topic_map[(ft, fs)] = topic_list
 
             raw_facts = rerank_result.filtered_facts or rerank_result.scored_facts or []
             facts = []
             for f in raw_facts:
                 fc = dict(f) if not isinstance(f, dict) else f
-                key = (fc.get('text', ''), fc.get('source', ''))
-                fc['topics'] = topic_map.get(key, [])
+                if not fc.get('topics'):
+                    key = (fc.get('text', ''), fc.get('source', ''))
+                    fc['topics'] = topic_map.get(key, [])
                 facts.append(fc)
         except Exception as e:
             logger.warning(f"Rerank failed in public-query, fallback to raw facts: {e}")

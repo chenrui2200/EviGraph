@@ -159,15 +159,14 @@
                   </div>
 
                   <!-- 关联 Topic 标签 -->
-                  <div v-if="row.traversal_paths?.some(p => p.labels?.includes('Topic'))" class="object-topics">
+                  <div v-if="row.object_node?.topics?.length" class="object-topics">
                     <span class="topics-label">关联 Topic:</span>
                     <span
-                      v-for="(topicNode, tIdx) in row.traversal_paths.filter(p => p.labels?.includes('Topic'))"
+                      v-for="(topicName, tIdx) in row.object_node.topics"
                       :key="tIdx"
                       class="topic-tag"
-                      :title="topicNode.summary || ''"
                     >
-                      {{ topicNode.name || topicNode.uuid?.slice(0, 8) }}
+                      {{ topicName }}
                     </span>
                   </div>
 
@@ -452,6 +451,10 @@
                     </span>
                     <span v-if="fact.page" class="full-evidence-page">P{{ fact.page }}</span>
                     <p class="fact-text-fallback">{{ fact.text }}</p>
+                  </div>
+                  <div v-if="fact.topics?.length" class="evidence-topics">
+                    <span class="topics-label">关联 Topic:</span>
+                    <span v-for="(topic, tIdx) in fact.topics" :key="tIdx" class="topic-tag">{{ topic }}</span>
                   </div>
                   <div class="full-evidence-item-pdf">
                     <button class="fold-btn" @click.stop="togglePdf(fact._idx)">
