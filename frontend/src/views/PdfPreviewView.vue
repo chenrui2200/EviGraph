@@ -4,14 +4,8 @@
       <div class="header-left">
         <span class="header-icon">🔎</span>
         <div class="header-meta">
-          <h1 class="app-title">{{ appName }}</h1>
           <span class="source-tag">📄 {{ source }}</span>
         </div>
-      </div>
-      <div class="header-actions">
-        <a v-if="chatLink" :href="chatLink" class="back-btn">
-          ← 返回问答
-        </a>
       </div>
     </header>
 
