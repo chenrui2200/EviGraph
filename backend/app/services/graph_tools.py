@@ -1118,6 +1118,7 @@ class GraphToolsService:
                             seen_fact_texts.add(norm)
                             fact_entry: Dict[str, Any] = {
                                 "uuid": clause_uuid,
+                                "clause_id": clause_data.get("clause_id", ""),
                                 "text": fact_text,
                                 "original_text": clause_summary,
                                 "source": pdf_info.get("source") or "Graph",
@@ -1197,6 +1198,7 @@ class GraphToolsService:
                     seen_fact_texts.add(norm)
                     facts.append({
                         "uuid": c_uuid,
+                        "clause_id": clause_data.get("clause_id", ""),
                         "text": fact_text,
                         "original_text": clause_summary,
                         "source": pdf_info.get("source") or "Graph",
@@ -1246,6 +1248,7 @@ class GraphToolsService:
                     seen_fact_texts.add(norm)
                     facts.append({
                         "uuid": c_uuid,
+                        "clause_id": ec.get("clause_id", ""),
                         "text": fact_text,
                         "original_text": clause_summary,
                         "source": pdf_info.get("source") or "Graph",

@@ -349,6 +349,7 @@ def public_query():
                 "results": [
                     {
                         "text": "条款内容",
+                        "clause_id": "3.2.1",
                         "source": "GB50054.pdf",
                         "page": 12,
                         "pdf_bboxes": [[12, 100, 200, 300, 400]],
@@ -528,6 +529,7 @@ def public_query():
         for f in facts:
             item = {
                 "text": f.get('original_text', '').strip() or f.get('text', '').strip(),
+                "clause_id": f.get('clause_id', ''),
                 "source": f.get('source', ''),
                 "page": f.get('page'),
                 "pdf_bboxes": f.get('pdf_bboxes', []),
