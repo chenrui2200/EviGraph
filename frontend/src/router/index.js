@@ -10,6 +10,7 @@ import KbPipelineTrackView from '../views/KbPipelineTrackView.vue'
 import GraphSearchView from '../views/GraphSearchView.vue'
 import ApiPlaygroundView from '../views/ApiPlaygroundView.vue'
 import PdfPreviewView from '../views/PdfPreviewView.vue'
+import IntentMatchView from '../views/IntentMatchView.vue'
 
 const routes = [
   {
@@ -74,6 +75,12 @@ const routes = [
     path: '/preview/:app_id',
     name: 'PdfPreview',
     component: PdfPreviewView,
+    props: true
+  },
+  {
+    path: '/intent-match/:projectId',
+    name: 'IntentMatch',
+    component: IntentMatchView,
     props: true
   },
 ]

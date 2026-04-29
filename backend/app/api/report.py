@@ -58,6 +58,54 @@ def search_object_first():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@report_bp.route('/tools/query-intent-match', methods=['POST'])
+def query_intent_match():
+    """
+    问题意图摘要匹配：
+    1. hybrid 检索 Topic 节点（向量 + BM25）
+    2. bge-reranker 对 Topic 按用户问题相关性重排
+    3. 获取每个 Top Topic 关联的 Entity / Term
+    4. bge-reranker 对 Entity / Term 重排
+    5. 返回 Topic + 关联 Entity 的全量图谱信息与分数
+
+    POST body:
+        graph_id: str (required)
+        query: str (required)
+        topic_limit: int (default 10)
+        entity_limit: int (default 10)
+    """
+    data = request.get_json() or {}
+    graph_id = data.get('graph_id')
+    query = data.get('query', '')
+    topic_limit = int(data.get('topic_limit', 10))
+    entity_limit = int(data.get('entity_limit', 10))
+
+    if not graph_id:
+        return jsonify({"success": False, "error": "graph_id is required"}), 400
+    if not query:
+        return jsonify({"success": False, "error": "query is required"}), 400
+
+    from flask import current_app
+    storage = current_app.extensions.get('neo4j_storage')
+    if not storage:
+        return jsonify({"success": False, "error": "Storage not available"}), 503
+
+    try:
+        tools = GraphToolsService(storage=storage)
+        result = tools.query_intent_match(
+            graph_id=graph_id,
+            query=query,
+            topic_limit=topic_limit,
+            entity_limit=entity_limit,
+        )
+        return jsonify({"success": True, "data": result})
+    except Exception as e:
+        logger.error(f"query_intent_match failed: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @report_bp.route('/tools/search-entity-topic-clause', methods=['POST'])
 def search_entity_topic_clause():
     """

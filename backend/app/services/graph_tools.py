@@ -653,6 +653,319 @@ class GraphToolsService:
                     f['relevance_score'] = 0.0
             return facts
 
+    def _rerank_items(
+        self,
+        query: str,
+        items: List[Tuple[Any, str]],
+        top_n: int = 50,
+    ) -> List[Tuple[Any, float]]:
+        """
+        通用 bge-reranker 重排：对任意 (item, text) 列表按与 query 的相关性排序。
+        返回 [(item, relevance_score), ...]，按分数降序排列。
+        """
+        if not items:
+            return []
+
+        import requests as _requests
+        from ..config import Config
+
+        items_to_process = items[:50]  # SiliconFlow reranker limit
+        documents = [text[:800] for _, text in items_to_process]
+
+        try:
+            payload = {
+                "model": Config.RERANKER_MODEL,
+                "query": query,
+                "documents": documents,
+                "top_n": len(documents),
+                "return_documents": False,
+            }
+            headers = {
+                "Authorization": f"Bearer {Config.RERANKER_API_KEY}",
+                "Content-Type": "application/json",
+            }
+            resp = _requests.post(Config.RERANKER_BASE_URL, json=payload, headers=headers, timeout=60)
+            resp.raise_for_status()
+            result = resp.json()
+
+            if result.get("error") or result.get("code", 200) != 200:
+                raise ValueError(f"Reranker API error: {json.dumps(result, ensure_ascii=False)[:500]}")
+
+            results_list = result.get("results", []) or []
+            score_map = {}
+            for item in results_list:
+                idx = item.get("index")
+                raw_score = item.get("relevance_score") if item.get("relevance_score") is not None else item.get("score", 0.0)
+                try:
+                    score = float(raw_score)
+                except (TypeError, ValueError):
+                    score = 0.0
+                if isinstance(idx, int):
+                    score_map[idx] = score
+                elif isinstance(idx, str) and idx.isdigit():
+                    score_map[int(idx)] = score
+
+            scored_items = []
+            for idx, (item, _) in enumerate(items_to_process):
+                score = score_map.get(idx, 0.0)
+                scored_items.append((item, round(score * 100, 1)))
+
+            scored_items.sort(key=lambda x: x[1], reverse=True)
+            return scored_items[:top_n]
+        except Exception as e:
+            logger.error(f"[_rerank_items] bge-reranker failed: {str(e)}")
+            # fallback: 保留原始 hybrid score 或默认 0
+            return [(item, item.get("score", 0.0) * 100 if isinstance(item, dict) else 0.0) for item, _ in items_to_process]
+
+    def query_intent_match(
+        self,
+        graph_id: str,
+        query: str,
+        topic_limit: int = 10,
+        entity_limit: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        问题意图摘要匹配：
+        1.  提取查询关键词（LLM）
+        2.  原查询 + 关键词 多路并行检索 Topic 节点（向量 + BM25）
+        3.  合并去重，bge-reranker 对 Topic 重排
+        4.  对每个 Top Topic，获取其 MENTIONS 的 Entity / Term
+        5.  bge-reranker 对 Entity / Term 重排
+        6.  返回 Topic + 关联 Entity 的全量图谱信息与分数
+        """
+        logger.info(f"[IntentMatch] graph_id={graph_id}, query={query[:60]}, topic_limit={topic_limit}, entity_limit={entity_limit}")
+
+        # Step 0: Extract keywords from query using LLM
+        optimized_keywords_text = self.optimize_query(query)
+        keywords = [k.strip() for k in optimized_keywords_text.split() if k.strip() and len(k.strip()) > 1]
+        # Deduplicate and keep order
+        search_queries = list(dict.fromkeys([query] + keywords))
+        logger.info(f"[IntentMatch] Extracted keywords: {keywords}, search_queries={search_queries}")
+
+        # Step 1: Parallel Topic search with original query + keywords
+        query_vector = self.storage._search.embedding.embed(query)
+        all_topic_nodes: List[Dict[str, Any]] = []
+        seen_topic_uuids: set = set()
+
+        def _search_topics(q: str) -> List[Dict[str, Any]]:
+            return self.storage.search_topic_nodes(
+                graph_id=graph_id, query=q, limit=topic_limit * 3,
+                query_vector=query_vector, min_score=None,
+            )
+
+        search_tasks = search_queries
+        search_step_results: List[Dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=len(search_tasks)) as executor:
+            futures = {executor.submit(_search_topics, q): q for q in search_tasks}
+            for future in as_completed(futures):
+                q = futures[future]
+                nodes = future.result()
+                method = "向量 + BM25"
+                search_step_results.append({
+                    "step": len(search_step_results) + 1,
+                    "query": q,
+                    "search_method": method,
+                    "results_count": len(nodes),
+                })
+                logger.info(f"[IntentMatch] Topic search '{q[:30]}' -> {len(nodes)} results")
+                for t in nodes:
+                    uid = t.get("uuid")
+                    if uid and uid not in seen_topic_uuids:
+                        seen_topic_uuids.add(uid)
+                        all_topic_nodes.append(t)
+
+        if not all_topic_nodes:
+            logger.info("[IntentMatch] No topic nodes found")
+            return {
+                "query": query,
+                "topics": [],
+                "total_topics": 0,
+                "retrieval_process": {
+                    "keywords": keywords,
+                    "search_steps": search_step_results,
+                    "merged_candidates": 0,
+                    "reranked_topics": 0,
+                },
+            }
+
+        logger.info(f"[IntentMatch] Found {len(all_topic_nodes)} unique topic candidates")
+
+        # Step 2: Rerank topics with bge-reranker
+        topic_items = [(t, f"{t.get('name', '')} {t.get('summary', '')}") for t in all_topic_nodes]
+        scored_topics = self._rerank_items(query, topic_items, top_n=topic_limit)
+
+        # Step 3: Fetch associated Entity/Term for each top topic
+        topic_uuids = [t.get("uuid") for t, _ in scored_topics if t.get("uuid")]
+        topic_entity_map: Dict[str, List[Dict[str, Any]]] = {}
+        all_entities: List[Dict[str, Any]] = []
+
+        topic_clause_map: Dict[str, List[Dict[str, Any]]] = {}
+        if topic_uuids:
+            with self.storage._driver.session() as session:
+                # Fetch associated Entity/Term
+                result = session.run(
+                    """
+                    MATCH (t:Topic)-[:MENTIONS]->(e)
+                    WHERE t.uuid IN $topic_uuids
+                      AND t.graph_id = $gid
+                      AND e.graph_id = $gid
+                      AND (e:Entity OR e:Term)
+                    RETURN t.uuid AS topic_uuid,
+                           e.uuid AS entity_uuid,
+                           e.name AS entity_name,
+                           e.summary AS entity_summary,
+                           labels(e) AS entity_labels,
+                           e.clause_count AS entity_clause_count
+                    """,
+                    topic_uuids=topic_uuids,
+                    gid=graph_id,
+                )
+                for record in result:
+                    t_uuid = record.get("topic_uuid")
+                    entity = {
+                        "uuid": record.get("entity_uuid"),
+                        "name": record.get("entity_name"),
+                        "summary": record.get("entity_summary"),
+                        "labels": record.get("entity_labels", []),
+                        "clause_count": record.get("entity_clause_count"),
+                    }
+                    if t_uuid:
+                        topic_entity_map.setdefault(t_uuid, []).append(entity)
+                        all_entities.append(entity)
+
+                # Fetch associated Clauses (Clause-[:HAS_TOPIC]->Topic)
+                clause_result = session.run(
+                    """
+                    MATCH (c:Clause)-[:HAS_TOPIC]->(t:Topic)
+                    WHERE t.uuid IN $topic_uuids
+                      AND t.graph_id = $gid
+                      AND c.graph_id = $gid
+                    RETURN t.uuid AS topic_uuid,
+                           c.uuid AS clause_uuid,
+                           c.name AS clause_name,
+                           c.summary AS clause_summary,
+                           c.clause_id AS clause_id,
+                           c.pdf_source AS pdf_source,
+                           c.pdf_page AS pdf_page,
+                           c.pdf_bbox AS pdf_bbox,
+                           c.pdf_bboxes AS pdf_bboxes,
+                           c.pdf_page_width AS pdf_page_width,
+                           c.pdf_page_height AS pdf_page_height
+                    ORDER BY c.clause_id ASC
+                    """,
+                    topic_uuids=topic_uuids,
+                    gid=graph_id,
+                )
+                for record in clause_result:
+                    t_uuid = record.get("topic_uuid")
+                    # Parse pdf_bboxes JSON string if present
+                    pdf_bboxes_raw = record.get("pdf_bboxes")
+                    pdf_bboxes = None
+                    if pdf_bboxes_raw:
+                        try:
+                            if isinstance(pdf_bboxes_raw, str):
+                                pdf_bboxes = json.loads(pdf_bboxes_raw)
+                            elif isinstance(pdf_bboxes_raw, list):
+                                pdf_bboxes = pdf_bboxes_raw
+                        except Exception:
+                            pdf_bboxes = None
+
+                    # Derive page/bbox from pdf_bboxes if available
+                    page = record.get("pdf_page")
+                    bbox = record.get("pdf_bbox")
+                    if pdf_bboxes and len(pdf_bboxes) > 0 and len(pdf_bboxes[0]) >= 5:
+                        page = pdf_bboxes[0][0]
+                        bbox = pdf_bboxes[0][1:5]
+
+                    clause = {
+                        "uuid": record.get("clause_uuid"),
+                        "name": record.get("clause_name"),
+                        "summary": record.get("clause_summary"),
+                        "clause_id": record.get("clause_id"),
+                        "source": record.get("pdf_source"),
+                        "page": page,
+                        "bbox": bbox,
+                        "page_width": record.get("pdf_page_width"),
+                        "page_height": record.get("pdf_page_height"),
+                        "pdf_bboxes": pdf_bboxes,
+                    }
+                    if t_uuid:
+                        topic_clause_map.setdefault(t_uuid, []).append(clause)
+
+        # Deduplicate all_entities by uuid
+        seen_entity_uuids = set()
+        unique_entities = []
+        for e in all_entities:
+            uid = e.get("uuid")
+            if uid and uid not in seen_entity_uuids:
+                seen_entity_uuids.add(uid)
+                unique_entities.append(e)
+
+        # Step 4: Rerank all unique entities against the query
+        entity_items = [(e, f"{e.get('name', '')} {e.get('summary', '')}") for e in unique_entities]
+        scored_entity_map: Dict[str, float] = {}
+        if entity_items:
+            scored_entities = self._rerank_items(query, entity_items, top_n=entity_limit)
+            for entity, score in scored_entities:
+                uid = entity.get("uuid")
+                if uid:
+                    scored_entity_map[uid] = score
+
+        # Build result topics with their associated entities and clauses
+        result_topics = []
+        for topic, topic_score in scored_topics:
+            t_uuid = topic.get("uuid")
+            associated = []
+            for ent in topic_entity_map.get(t_uuid, []):
+                ent_uid = ent.get("uuid")
+                associated.append({
+                    "uuid": ent_uid,
+                    "name": ent.get("name"),
+                    "summary": ent.get("summary"),
+                    "labels": ent.get("labels", []),
+                    "clause_count": ent.get("clause_count"),
+                    "relevance_score": scored_entity_map.get(ent_uid, 0.0),
+                })
+            # Sort associated entities by relevance_score desc
+            associated.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+            # Keep only top entity_limit per topic
+            associated = associated[:entity_limit]
+
+            # Get associated clauses for this topic
+            clauses = topic_clause_map.get(t_uuid, [])
+
+            result_topics.append({
+                "uuid": t_uuid,
+                "name": topic.get("name", ""),
+                "summary": topic.get("summary", ""),
+                "labels": topic.get("labels", []),
+                "topic": topic.get("topic", ""),
+                "hybrid_score": round(topic.get("score", 0.0), 4),
+                "relevance_score": topic_score,
+                "associated_entities": associated,
+                "entity_count": len(associated),
+                "associated_clauses": clauses,
+                "clause_count": len(clauses),
+            })
+
+        total_clauses = sum(len(t.get("associated_clauses", [])) for t in result_topics)
+        logger.info(
+            f"[IntentMatch] Done: {len(result_topics)} topics, "
+            f"{len(scored_entity_map)} unique entities scored, "
+            f"{total_clauses} clauses"
+        )
+        return {
+            "query": query,
+            "topics": result_topics,
+            "total_topics": len(result_topics),
+            "retrieval_process": {
+                "keywords": keywords,
+                "search_steps": search_step_results,
+                "merged_candidates": len(all_topic_nodes),
+                "reranked_topics": len(scored_topics),
+            },
+        }
+
     def run_retrieval_flow(
         self,
         final_rows: List[ObjectFirstRow],

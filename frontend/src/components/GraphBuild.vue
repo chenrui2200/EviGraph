@@ -108,6 +108,13 @@
             >
               图谱检索测试 🕸️
             </button>
+            <button
+              v-if="currentPhase >= 1 && !buildProgress"
+              class="action-btn intent-match-btn"
+              @click="router.push({ name: 'IntentMatch', params: { projectId: projectData.project_id } })"
+            >
+              问题意图摘要匹配 🎯
+            </button>
           </div>
 
         </div>
@@ -403,6 +410,10 @@ watch(() => props.systemLogs.length, () => {
 
 .graph-search-btn {
   background: #409eff;
+}
+
+.intent-match-btn {
+  background: #9c27b0;
 }
 
 .progress-section {

@@ -168,6 +168,19 @@ export function rerankFacts(data) {
 }
 
 /**
+ * 问题意图摘要匹配：Topic 召回 + 关联 Entity 重排
+ * @param {Object} data - Contains graph_id, query, topic_limit, entity_limit
+ * @returns {Promise}
+ */
+export function queryIntentMatch(data) {
+  return service({
+    url: '/api/report/tools/query-intent-match',
+    method: 'post',
+    data
+  })
+}
+
+/**
  * LLM 推理问答：基于过滤后的 facts 生成回答
  * @param {Object} data - Contains facts, query, temperature
  * @returns {Promise}

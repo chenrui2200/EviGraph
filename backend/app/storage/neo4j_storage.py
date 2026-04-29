@@ -225,6 +225,8 @@ class Neo4jStorage(GraphStorage):
                 neo4j_schema.CREATE_EPISODE_UUID_CONSTRAINT,
                 neo4j_schema.CREATE_DOCUMENT_UUID_CONSTRAINT,
                 neo4j_schema.CREATE_PAGE_UUID_CONSTRAINT,
+                neo4j_schema.CREATE_TOPIC_UUID_CONSTRAINT,
+                neo4j_schema.CREATE_CLAUSE_UUID_CONSTRAINT,
                 neo4j_schema.CREATE_ENTITY_GRAPH_ID_INDEX,
                 neo4j_schema.CREATE_ENTITY_NAME_LOWER_INDEX,
                 neo4j_schema.CREATE_DOC_GRAPH_ID_INDEX,
@@ -232,6 +234,10 @@ class Neo4jStorage(GraphStorage):
                 neo4j_schema.CREATE_EPISODE_GRAPH_ID_INDEX,
                 neo4j_schema.CREATE_EPISODE_SOURCE_INDEX,
                 neo4j_schema.CREATE_EPISODE_CHUNK_INDEX,
+                neo4j_schema.CREATE_TOPIC_GRAPH_ID_INDEX,
+                neo4j_schema.CREATE_TOPIC_CLAUSE_ID_INDEX,
+                neo4j_schema.CREATE_CLAUSE_GRAPH_ID_INDEX,
+                neo4j_schema.CREATE_CLAUSE_CLAUSE_ID_INDEX,
             ]
 
             # 1. Create critical indexes first
@@ -247,6 +253,8 @@ class Neo4jStorage(GraphStorage):
                 ("entity_embedding", neo4j_schema.get_entity_vector_index_query(Config.EMBEDDING_DIMENSION)),
                 ("episode_embedding", neo4j_schema.get_episode_vector_index_query(Config.EMBEDDING_DIMENSION)),
                 ("fact_embedding", neo4j_schema.get_relation_vector_index_query(Config.EMBEDDING_DIMENSION)),
+                ("topic_embedding", neo4j_schema.get_topic_vector_index_query(Config.EMBEDDING_DIMENSION)),
+                ("clause_embedding", neo4j_schema.get_clause_vector_index_query(Config.EMBEDDING_DIMENSION)),
             ]
 
             for index_name, query in vector_index_queries:
@@ -285,6 +293,8 @@ class Neo4jStorage(GraphStorage):
                 ("entity_fulltext", neo4j_schema.CREATE_ENTITY_FULLTEXT_INDEX),
                 ("fact_fulltext", neo4j_schema.CREATE_FACT_FULLTEXT_INDEX),
                 ("episode_fulltext", neo4j_schema.CREATE_EPISODE_FULLTEXT_INDEX),
+                ("topic_fulltext", neo4j_schema.CREATE_TOPIC_FULLTEXT_INDEX),
+                ("clause_fulltext", neo4j_schema.CREATE_CLAUSE_FULLTEXT_INDEX),
             ]
 
             for index_name, query in fulltext_queries:
@@ -299,6 +309,10 @@ class Neo4jStorage(GraphStorage):
 
             # 4. Verify all required indexes after creation
             self._verify_indexes(session)
+
+            # 5. Refresh index status cache so search_service knows about new indexes
+            _index_status._checked = False
+            _index_status.check_indexes(session)
 
     def _check_neo4j_version(self, session):
         """Check Neo4j version for vector index compatibility."""
@@ -368,9 +382,11 @@ class Neo4jStorage(GraphStorage):
     def _verify_indexes(self, session):
         """Verify critical indexes exist and log status."""
         required_indexes = [
-            "graph_uuid", "entity_uuid", "episode_uuid",
-            "entity_graph_id", "entity_name_lower",
-            "entity_embedding", "episode_embedding", "fact_embedding"
+            "graph_uuid", "entity_uuid", "episode_uuid", "topic_uuid", "clause_uuid",
+            "entity_graph_id", "entity_name_lower", "topic_graph_id", "topic_clause_id",
+            "clause_graph_id", "clause_clause_id",
+            "entity_embedding", "episode_embedding", "fact_embedding",
+            "topic_embedding", "clause_embedding",
         ]
 
         existing = self._get_existing_indexes(session)

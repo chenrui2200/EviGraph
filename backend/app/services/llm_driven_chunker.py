@@ -3348,6 +3348,56 @@ topic：{topic}
                             clause.content = txt
                             self.logger.debug(f"[条款合并] clause_id={cid}: 单 chunk，content 已更新为原始文本 (len={len(txt)})")
 
+            # 自动补充：从归属到本 clause 的 table chunk 中提取完整表格信息
+            # （解决 LLM 遗漏提取或章节文本截断导致的 referenced_tables 为空问题）
+            if cid in clause_chunk_map:
+                auto_table_refs: list[dict] = []
+                seen_ids: set[str] = set()
+                for c_id in clause_chunk_map[cid]:
+                    for chunk in chunks_data:
+                        if chunk.get('chunk_id') == c_id and chunk.get('type') == 'table':
+                            caption = (chunk.get('table_caption') or '').strip()
+                            table_id = ''
+                            if caption.startswith('表'):
+                                rest = caption[1:].lstrip()
+                                num = ''
+                                for ch in rest:
+                                    if ch.isdigit() or ch == '.':
+                                        num += ch
+                                    else:
+                                        break
+                                table_id = num
+
+                            # 去重：按 chunk_id 去重
+                            chunk_id = chunk.get('chunk_id', '')
+                            if chunk_id in seen_ids:
+                                continue
+                            seen_ids.add(chunk_id)
+
+                            auto_table_refs.append({
+                                "table_id": table_id,
+                                "caption": caption,
+                                "chunk_id": chunk_id,
+                                "page_idx": chunk.get('page_idx'),
+                                "bbox_pdf": chunk.get('bbox_pdf'),
+                                "bbox_viewport": chunk.get('bbox_viewport'),
+                                "table_content": chunk.get('table_content', ''),
+                                "table_img_path": chunk.get('table_img_path', ''),
+                                "table_footnote": chunk.get('table_footnote', ''),
+                            })
+
+                if auto_table_refs:
+                    existing = clause.metadata.get('referenced_tables', [])
+                    # 兼容旧数据：existing 可能是字符串列表，也可能是 dict 列表
+                    existing_dicts = [r for r in existing if isinstance(r, dict)]
+                    existing_ids = {r.get('chunk_id') for r in existing_dicts if isinstance(r, dict) and r.get('chunk_id')}
+                    merged = existing_dicts + [r for r in auto_table_refs if r.get('chunk_id') not in existing_ids]
+                    clause.metadata['referenced_tables'] = merged
+                    self.logger.info(
+                        f"[表格引用补充] clause_id={cid}: 从 table chunk 提取到 {len(auto_table_refs)} 个表格: "
+                        f"{[r.get('table_id') for r in auto_table_refs]}"
+                    )
+
         # 诊断日志：汇总 image chunk 统计
         total_img_chunks = sum(1 for c in chunks_data if c.get('type') == 'image')
         img_chunks_with_content = sum(
@@ -3804,13 +3854,21 @@ topic：{topic}
         refs: List[CrossReference] = []
         clause_refs: List[ReferencedClause] = []
 
-        # 表格引用
+        # 表格引用（兼容字符串和 dict 两种格式）
         for table in clause_data.get("referenced_tables", []):
-            refs.append(CrossReference(
-                ref_id=table,
-                ref_type="table",
-                description=f"引用表格 {table}"
-            ))
+            if isinstance(table, dict):
+                table_id = table.get("table_id") or table.get("caption", "")
+                refs.append(CrossReference(
+                    ref_id=table_id,
+                    ref_type="table",
+                    description=f"引用表格 {table.get('caption', table_id)}"
+                ))
+            else:
+                refs.append(CrossReference(
+                    ref_id=table,
+                    ref_type="table",
+                    description=f"引用表格 {table}"
+                ))
 
         # 公式引用
         for formula in clause_data.get("referenced_formulas", []):
