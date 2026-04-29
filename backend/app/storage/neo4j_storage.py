@@ -68,13 +68,13 @@ VALID_EPISODE_LABELS = frozenset({
     "Table", "Figure", "Appendix", "Level1", "Level2", "Level3",
     # 通用标签
     "Term", "Entity", "Component", "Action", "Condition", "Object",
-    "Episode", "Topic", "Document", "Page",
+    "Episode", "Topic", "Document", "Page", "Image",
 })
 
 # Entity/Topic/Clause 节点支持的类型标签
 VALID_NODE_LABELS = frozenset({
     "Term", "Entity", "Component", "Action", "Condition", "Object",
-    "Topic", "Clause",
+    "Topic", "Clause", "Image", "Table",
 })
 
 # 用于验证并返回安全标签的辅助函数
@@ -238,6 +238,10 @@ class Neo4jStorage(GraphStorage):
                 neo4j_schema.CREATE_TOPIC_CLAUSE_ID_INDEX,
                 neo4j_schema.CREATE_CLAUSE_GRAPH_ID_INDEX,
                 neo4j_schema.CREATE_CLAUSE_CLAUSE_ID_INDEX,
+                neo4j_schema.CREATE_IMAGE_UUID_CONSTRAINT,
+                neo4j_schema.CREATE_IMAGE_GRAPH_ID_INDEX,
+                neo4j_schema.CREATE_TABLE_UUID_CONSTRAINT,
+                neo4j_schema.CREATE_TABLE_GRAPH_ID_INDEX,
             ]
 
             # 1. Create critical indexes first
@@ -385,6 +389,8 @@ class Neo4jStorage(GraphStorage):
             "graph_uuid", "entity_uuid", "episode_uuid", "topic_uuid", "clause_uuid",
             "entity_graph_id", "entity_name_lower", "topic_graph_id", "topic_clause_id",
             "clause_graph_id", "clause_clause_id",
+            "image_uuid", "image_graph_id",
+            "table_uuid", "table_graph_id",
             "entity_embedding", "episode_embedding", "fact_embedding",
             "topic_embedding", "clause_embedding",
         ]
@@ -770,25 +776,22 @@ class Neo4jStorage(GraphStorage):
 
                 label_conditions = " OR ".join([f"n:{lt}" for lt in safe_types])
                 has_clause = "Clause" in safe_types
+                has_image = "Image" in safe_types
+                has_table = "Table" in safe_types
+                text_conditions = ["toLower(n.name) CONTAINS $keyword", "toLower(n.topic) CONTAINS $keyword"]
                 if has_clause:
-                    cypher = f"""
-                        MATCH (n {{graph_id: $gid}})
-                        WHERE ({label_conditions})
-                          AND (toLower(n.name) CONTAINS $keyword
-                               OR toLower(n.topic) CONTAINS $keyword
-                               OR (n:Clause AND toLower(n.clause_id) CONTAINS $keyword))
-                        RETURN n, labels(n) AS labels
-                        LIMIT $limit
-                    """
-                else:
-                    cypher = f"""
-                        MATCH (n {{graph_id: $gid}})
-                        WHERE ({label_conditions})
-                          AND (toLower(n.name) CONTAINS $keyword
-                               OR toLower(n.topic) CONTAINS $keyword)
-                        RETURN n, labels(n) AS labels
-                        LIMIT $limit
-                    """
+                    text_conditions.append("(n:Clause AND toLower(n.clause_id) CONTAINS $keyword)")
+                if has_image:
+                    text_conditions.append("(n:Image AND (toLower(n.caption) CONTAINS $keyword OR toLower(n.img_path) CONTAINS $keyword))")
+                if has_table:
+                    text_conditions.append("(n:Table AND (toLower(n.caption) CONTAINS $keyword OR toLower(n.table_id) CONTAINS $keyword OR toLower(n.table_content) CONTAINS $keyword))")
+                cypher = f"""
+                    MATCH (n {{graph_id: $gid}})
+                    WHERE ({label_conditions})
+                      AND ({" OR ".join(text_conditions)})
+                    RETURN n, labels(n) AS labels
+                    LIMIT $limit
+                """
             # 单类型过滤（向后兼容）
             elif node_type and node_type != "All":
                 safe_label = _safe_label(node_type, VALID_NODE_LABELS)
@@ -804,6 +807,23 @@ class Neo4jStorage(GraphStorage):
                         RETURN n, labels(n) AS labels
                         LIMIT $limit
                     """
+                elif safe_label == "Image":
+                    cypher = f"""
+                        MATCH (n:{safe_label} {{graph_id: $gid}})
+                        WHERE toLower(n.caption) CONTAINS $keyword
+                           OR toLower(n.img_path) CONTAINS $keyword
+                        RETURN n, labels(n) AS labels
+                        LIMIT $limit
+                    """
+                elif safe_label == "Table":
+                    cypher = f"""
+                        MATCH (n:{safe_label} {{graph_id: $gid}})
+                        WHERE toLower(n.caption) CONTAINS $keyword
+                           OR toLower(n.table_id) CONTAINS $keyword
+                           OR toLower(n.table_content) CONTAINS $keyword
+                        RETURN n, labels(n) AS labels
+                        LIMIT $limit
+                    """
                 else:
                     cypher = f"""
                         MATCH (n:{safe_label} {{graph_id: $gid}})
@@ -815,10 +835,12 @@ class Neo4jStorage(GraphStorage):
             else:
                 cypher = """
                     MATCH (n {graph_id: $gid})
-                    WHERE (n:Entity OR n:Topic OR n:Clause)
+                    WHERE (n:Entity OR n:Topic OR n:Clause OR n:Image OR n:Table)
                       AND (toLower(n.name) CONTAINS $keyword
                            OR toLower(n.topic) CONTAINS $keyword
-                           OR (n:Clause AND toLower(n.clause_id) CONTAINS $keyword))
+                           OR (n:Clause AND toLower(n.clause_id) CONTAINS $keyword)
+                           OR (n:Image AND (toLower(n.caption) CONTAINS $keyword OR toLower(n.img_path) CONTAINS $keyword))
+                           OR (n:Table AND (toLower(n.caption) CONTAINS $keyword OR toLower(n.table_id) CONTAINS $keyword OR toLower(n.table_content) CONTAINS $keyword)))
                     RETURN n, labels(n) AS labels
                     LIMIT $limit
                 """
@@ -1294,7 +1316,21 @@ class Neo4jStorage(GraphStorage):
                 "MATCH (n:Entity {graph_id: $gid}) RETURN count(n) AS cnt",
                 gid=graph_id,
             )
-            node_count = node_result.single()["cnt"]
+            entity_count = node_result.single()["cnt"]
+
+            image_result = tx.run(
+                "MATCH (n:Image {graph_id: $gid}) RETURN count(n) AS cnt",
+                gid=graph_id,
+            )
+            image_count = image_result.single()["cnt"]
+
+            table_result = tx.run(
+                "MATCH (n:Table {graph_id: $gid}) RETURN count(n) AS cnt",
+                gid=graph_id,
+            )
+            table_count = table_result.single()["cnt"]
+
+            node_count = entity_count + image_count + table_count
 
             # Count edges (实际图谱中只有 HAS_TOPIC 和 MENTIONS 两种边)
             edge_result = tx.run(
@@ -1320,6 +1356,9 @@ class Neo4jStorage(GraphStorage):
                 "node_count": node_count,
                 "edge_count": edge_count,
                 "entity_types": entity_types,
+                "entity_count": entity_count,
+                "image_count": image_count,
+                "table_count": table_count,
                 "has_topic_count": 0,  # placeholder, computed below
                 "mentions_count": 0,   # placeholder, computed below
             }
@@ -1332,9 +1371,9 @@ class Neo4jStorage(GraphStorage):
             )
             has_topic_count = has_topic_result.single()["cnt"]
 
-            # MENTIONS: Topic → Entity 或 Topic → Entity:Term
+            # MENTIONS: Topic → Entity 或 Topic → Entity:Term 或 Clause → Image/Table
             mentions_result = tx.run(
-                "MATCH (t:Topic)-[r:MENTIONS]->(e) WHERE t.graph_id = $gid AND (e:Entity OR e:Entity:Term) RETURN count(r) AS cnt",
+                "MATCH ()-[r:MENTIONS]->(e) WHERE r.graph_id = $gid AND (e:Entity OR e:Entity:Term OR e:Image OR e:Table) RETURN count(r) AS cnt",
                 gid=graph_id,
             )
             mentions_count = mentions_result.single()["cnt"]
@@ -1357,6 +1396,7 @@ class Neo4jStorage(GraphStorage):
         def _read(tx):
             # 1. Get semantic nodes (Entities AND Topics) and their labels
             # Include Clause nodes as Clause nodes for frontend stats
+            # Include Image and Table nodes
             node_result = tx.run(
                 """
                 MATCH (n:Entity {graph_id: $gid})
@@ -1366,6 +1406,12 @@ class Neo4jStorage(GraphStorage):
                 RETURN n, labels(n) AS labels
                 UNION
                 MATCH (n:Clause {graph_id: $gid})
+                RETURN n, labels(n) AS labels
+                UNION
+                MATCH (n:Image {graph_id: $gid})
+                RETURN n, labels(n) AS labels
+                UNION
+                MATCH (n:Table {graph_id: $gid})
                 RETURN n, labels(n) AS labels
                 """,
                 gid=graph_id,
@@ -1422,7 +1468,7 @@ class Neo4jStorage(GraphStorage):
                     node["pdf_info"] = node_pdf_info.get(node["uuid"], {})
 
             # 3. Get semantic relationships between entities
-            # 实际图谱中只有 HAS_TOPIC (Clause→Topic) 和 MENTIONS (Topic→Entity/Term, Episode→Clause) 两种边
+            # 实际图谱中只有 HAS_TOPIC (Clause→Topic) 和 MENTIONS (Topic→Entity/Term, Episode→Clause, Clause→Image/Table) 两种边
             edge_result = tx.run(
                 """
                 MATCH (c:Clause {graph_id: $gid})-[r:HAS_TOPIC]->(t:Topic {graph_id: $gid})
@@ -1438,6 +1484,16 @@ class Neo4jStorage(GraphStorage):
                 MATCH (ep:Episode {graph_id: $gid})-[r:MENTIONS]->(c:Clause {graph_id: $gid})
                 RETURN r, ep.uuid AS src_uuid, c.uuid AS tgt_uuid,
                        ep.data AS src_name, c.name AS tgt_name,
+                       type(r) AS rel_type
+                UNION
+                MATCH (c:Clause {graph_id: $gid})-[r:MENTIONS]->(i:Image {graph_id: $gid})
+                RETURN r, c.uuid AS src_uuid, i.uuid AS tgt_uuid,
+                       c.name AS src_name, COALESCE(i.caption, i.img_path) AS tgt_name,
+                       type(r) AS rel_type
+                UNION
+                MATCH (c:Clause {graph_id: $gid})-[r:MENTIONS]->(tbl:Table {graph_id: $gid})
+                RETURN r, c.uuid AS src_uuid, tbl.uuid AS tgt_uuid,
+                       c.name AS src_name, COALESCE(tbl.caption, tbl.table_id) AS tgt_name,
                        type(r) AS rel_type
                 """,
                 gid=graph_id,
@@ -1469,9 +1525,9 @@ class Neo4jStorage(GraphStorage):
             )
             has_topic_count = has_topic_result.single()["cnt"]
 
-            # MENTIONS: Topic → Entity 或 Topic → Entity:Term
+            # MENTIONS: Topic → Entity/Term 或 Clause → Image/Table
             mentions_result = tx.run(
-                "MATCH (t:Topic)-[r:MENTIONS]->(e) WHERE t.graph_id = $gid AND (e:Entity OR e:Entity:Term) RETURN count(r) AS cnt",
+                "MATCH ()-[r:MENTIONS]->(e) WHERE r.graph_id = $gid AND (e:Entity OR e:Entity:Term OR e:Image OR e:Table) RETURN count(r) AS cnt",
                 gid=graph_id,
             )
             mentions_count = mentions_result.single()["cnt"]
@@ -1555,6 +1611,12 @@ class Neo4jStorage(GraphStorage):
                 display_name = data_val[:50]
             else:
                 display_name = ""
+        elif "Image" in labels:
+            display_labels = ["Image"]
+            display_name = props.get("caption") or props.get("img_path", "")
+        elif "Table" in labels:
+            display_labels = ["Table"]
+            display_name = props.get("caption") or props.get("table_id", "")
         else:
             # Keep all labels including Entity for frontend stats
             # Convert to list in case Neo4j returns special iterable type
@@ -1581,6 +1643,18 @@ class Neo4jStorage(GraphStorage):
             "clause_id": props.get("clause_id"),
             # Clause 的多页 bbox 列表
             "pdf_bboxes": props.get("pdf_bboxes"),
+            # Image 特有字段
+            "img_path": props.get("img_path"),
+            "img_vlm_content": props.get("img_vlm_content"),
+            "vlm_status": props.get("vlm_status"),
+            "content": props.get("content"),
+            # Table 特有字段
+            "table_id": props.get("table_id"),
+            "table_content": props.get("table_content"),
+            "table_img_path": props.get("table_img_path"),
+            "table_footnote": props.get("table_footnote"),
+            "bbox_pdf": props.get("bbox_pdf"),
+            "bbox_viewport": props.get("bbox_viewport"),
         }
 
     def _edge_to_dict(self, rel, source_uuid: str, target_uuid: str) -> Dict[str, Any]:
@@ -2212,6 +2286,128 @@ class Neo4jStorage(GraphStorage):
                                 """,
                                 pairs=entity_topic_map, gid=graph_id
                             )
+
+                        # ===== Phase 8: Image / Table 节点 + Clause-MENTIONS =====
+                        all_images = []
+                        all_tables = []
+                        clause_image_pairs = []
+                        clause_table_pairs = []
+                        for it in batch_clause_items:
+                            m = it["metadata"]
+                            cid = m.get("clause_id", "").strip()
+                            clause_uuid = it["clause_uuid"]
+                            images = m.get("images", [])
+                            if isinstance(images, list):
+                                for img in images:
+                                    img_path = img.get("img_path", "") if isinstance(img, dict) else ""
+                                    if not img_path:
+                                        continue
+                                    img_uuid = str(uuid.UUID(hashlib.md5(
+                                        f"{graph_id}:{img_path}:image".encode()).hexdigest()))
+                                    all_images.append({
+                                        "uuid": img_uuid,
+                                        "graph_id": graph_id,
+                                        "caption": img.get("caption", "") if isinstance(img, dict) else "",
+                                        "content": img.get("content", "") if isinstance(img, dict) else "",
+                                        "img_path": img_path,
+                                        "chunk_id": img.get("chunk_id", "") if isinstance(img, dict) else "",
+                                        "page_idx": img.get("page_idx", 0) if isinstance(img, dict) else 0,
+                                        "img_vlm_content": img.get("img_vlm_content", "") if isinstance(img, dict) else "",
+                                        "vlm_status": img.get("vlm_status", "") if isinstance(img, dict) else "",
+                                    })
+                                    clause_image_pairs.append({"clause_id": cid, "img_uuid": img_uuid})
+                            tables = m.get("referenced_tables", [])
+                            if isinstance(tables, list):
+                                for tbl in tables:
+                                    table_id = tbl.get("table_id", "") if isinstance(tbl, dict) else ""
+                                    if not table_id:
+                                        continue
+                                    tbl_uuid = str(uuid.UUID(hashlib.md5(
+                                        f"{graph_id}:{table_id}:table".encode()).hexdigest()))
+                                    all_tables.append({
+                                        "uuid": tbl_uuid,
+                                        "graph_id": graph_id,
+                                        "table_id": table_id,
+                                        "caption": tbl.get("caption", "") if isinstance(tbl, dict) else "",
+                                        "chunk_id": tbl.get("chunk_id", "") if isinstance(tbl, dict) else "",
+                                        "page_idx": tbl.get("page_idx", 0) if isinstance(tbl, dict) else 0,
+                                        "bbox_pdf": json.dumps(tbl.get("bbox_pdf", []), ensure_ascii=False) if isinstance(tbl, dict) else "[]",
+                                        "bbox_viewport": json.dumps(tbl.get("bbox_viewport", []), ensure_ascii=False) if isinstance(tbl, dict) else "[]",
+                                        "table_content": tbl.get("table_content", "") if isinstance(tbl, dict) else "",
+                                        "table_img_path": tbl.get("table_img_path", "") if isinstance(tbl, dict) else "",
+                                        "table_footnote": tbl.get("table_footnote", "") if isinstance(tbl, dict) else "",
+                                    })
+                                    clause_table_pairs.append({"clause_id": cid, "tbl_uuid": tbl_uuid})
+
+                        if all_images:
+                            tx.run(
+                                """
+                                UNWIND $images AS img
+                                MERGE (i:Image {uuid: img.uuid})
+                                ON CREATE SET
+                                    i.graph_id = img.graph_id,
+                                    i.caption = img.caption,
+                                    i.content = img.content,
+                                    i.img_path = img.img_path,
+                                    i.chunk_id = img.chunk_id,
+                                    i.page_idx = img.page_idx,
+                                    i.img_vlm_content = img.img_vlm_content,
+                                    i.vlm_status = img.vlm_status,
+                                    i.created_at = datetime()
+                                ON MATCH SET
+                                    i.caption = COALESCE(img.caption, i.caption),
+                                    i.content = COALESCE(img.content, i.content),
+                                    i.img_vlm_content = COALESCE(img.img_vlm_content, i.img_vlm_content),
+                                    i.vlm_status = COALESCE(img.vlm_status, i.vlm_status)
+                                """,
+                                images=all_images
+                            )
+                            tx.run(
+                                """
+                                UNWIND $pairs AS p
+                                MATCH (c:Clause {graph_id: $gid, clause_id: p.clause_id}), (i:Image {uuid: p.img_uuid})
+                                MERGE (c)-[r:MENTIONS]->(i)
+                                SET r.graph_id = $gid, r.created_at = datetime()
+                                """,
+                                pairs=clause_image_pairs, gid=graph_id
+                            )
+                            logger.info(f"[batch] Created/linked {len(all_images)} Image nodes")
+
+                        if all_tables:
+                            tx.run(
+                                """
+                                UNWIND $tables AS t
+                                MERGE (tbl:Table {uuid: t.uuid})
+                                ON CREATE SET
+                                    tbl.graph_id = t.graph_id,
+                                    tbl.table_id = t.table_id,
+                                    tbl.caption = t.caption,
+                                    tbl.chunk_id = t.chunk_id,
+                                    tbl.page_idx = t.page_idx,
+                                    tbl.bbox_pdf = t.bbox_pdf,
+                                    tbl.bbox_viewport = t.bbox_viewport,
+                                    tbl.table_content = t.table_content,
+                                    tbl.table_img_path = t.table_img_path,
+                                    tbl.table_footnote = t.table_footnote,
+                                    tbl.created_at = datetime()
+                                ON MATCH SET
+                                    tbl.caption = COALESCE(t.caption, tbl.caption),
+                                    tbl.table_content = COALESCE(t.table_content, tbl.table_content),
+                                    tbl.table_img_path = COALESCE(t.table_img_path, tbl.table_img_path),
+                                    tbl.table_footnote = COALESCE(t.table_footnote, tbl.table_footnote)
+                                """,
+                                tables=all_tables
+                            )
+                            tx.run(
+                                """
+                                UNWIND $pairs AS p
+                                MATCH (c:Clause {graph_id: $gid, clause_id: p.clause_id}), (tbl:Table {uuid: p.tbl_uuid})
+                                MERGE (c)-[r:MENTIONS]->(tbl)
+                                SET r.graph_id = $gid, r.created_at = datetime()
+                                """,
+                                pairs=clause_table_pairs, gid=graph_id
+                            )
+                            logger.info(f"[batch] Created/linked {len(all_tables)} Table nodes")
 
                 self._call_with_retry(session.execute_write, _batch_write)
 

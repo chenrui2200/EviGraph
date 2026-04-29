@@ -175,6 +175,28 @@ CREATE INDEX clause_clause_id IF NOT EXISTS
 FOR (c:Clause) ON (c.clause_id)
 """
 
+# Image indexes
+CREATE_IMAGE_UUID_CONSTRAINT = """
+CREATE CONSTRAINT image_uuid IF NOT EXISTS
+FOR (i:Image) REQUIRE i.uuid IS UNIQUE
+"""
+
+CREATE_IMAGE_GRAPH_ID_INDEX = """
+CREATE INDEX image_graph_id IF NOT EXISTS
+FOR (i:Image) ON (i.graph_id)
+"""
+
+# Table indexes
+CREATE_TABLE_UUID_CONSTRAINT = """
+CREATE CONSTRAINT table_uuid IF NOT EXISTS
+FOR (t:Table) REQUIRE t.uuid IS UNIQUE
+"""
+
+CREATE_TABLE_GRAPH_ID_INDEX = """
+CREATE INDEX table_graph_id IF NOT EXISTS
+FOR (t:Table) ON (t.graph_id)
+"""
+
 # All schema queries (as functions or constants)
 def get_all_schema_queries(dimension: int = 768) -> list:
     return [
@@ -196,6 +218,10 @@ def get_all_schema_queries(dimension: int = 768) -> list:
         CREATE_TOPIC_CLAUSE_ID_INDEX,
         CREATE_CLAUSE_GRAPH_ID_INDEX,
         CREATE_CLAUSE_CLAUSE_ID_INDEX,
+        CREATE_IMAGE_UUID_CONSTRAINT,
+        CREATE_IMAGE_GRAPH_ID_INDEX,
+        CREATE_TABLE_UUID_CONSTRAINT,
+        CREATE_TABLE_GRAPH_ID_INDEX,
         get_entity_vector_index_query(dimension),
         get_relation_vector_index_query(dimension),
         get_episode_vector_index_query(dimension),

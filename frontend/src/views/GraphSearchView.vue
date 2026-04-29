@@ -170,7 +170,7 @@ const props = defineProps({
 const router = useRouter()
 const route = useRoute()
 
-const TYPE_OPTIONS = ['Entity', 'Term', 'Topic', 'Clause']
+const TYPE_OPTIONS = ['Entity', 'Term', 'Topic', 'Clause', 'Image', 'Table']
 
 // Project info
 const projectName = ref('')
@@ -178,7 +178,7 @@ const graphId = ref('')
 
 // Search state
 const searchQuery = ref('')
-const selectedTypes = ref(['Entity', 'Term', 'Topic', 'Clause'])
+const selectedTypes = ref(['Entity', 'Term', 'Topic', 'Clause', 'Image', 'Table'])
 const searching = ref(false)
 const searchResults = ref([])
 const hasSearched = ref(false)

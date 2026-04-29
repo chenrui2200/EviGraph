@@ -65,6 +65,14 @@
               <span class="stat-label">Topic 主题</span>
             </div>
             <div class="stat-card">
+              <span class="stat-value">{{ nodeTypeStats.Image }}</span>
+              <span class="stat-label">Image 图片</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-value">{{ nodeTypeStats.Table }}</span>
+              <span class="stat-label">Table 表格</span>
+            </div>
+            <div class="stat-card">
               <span class="stat-value">{{ graphData?.has_topic_count || 0 }}</span>
               <span class="stat-label">HAS_TOPIC 关系</span>
             </div>
@@ -169,7 +177,7 @@ const graphStats = computed(() => {
 })
 
 const nodeTypeStats = computed(() => {
-  const stats = { Clause: 0, Term: 0, Entity: 0, Topic: 0 }
+  const stats = { Clause: 0, Term: 0, Entity: 0, Topic: 0, Image: 0, Table: 0 }
   const nodes = props.graphData?.nodes || []
   nodes.forEach(node => {
     const labels = node.labels || []
@@ -177,6 +185,8 @@ const nodeTypeStats = computed(() => {
     else if (labels.includes('Term')) stats.Term++
     else if (labels.includes('Entity')) stats.Entity++
     else if (labels.includes('Topic')) stats.Topic++
+    else if (labels.includes('Image')) stats.Image++
+    else if (labels.includes('Table')) stats.Table++
   })
   return stats
 })
@@ -333,7 +343,7 @@ watch(() => props.systemLogs.length, () => {
 /* Step 01 Stats */
 .stats-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
   gap: 12px;
   background: #F9F9F9;
   padding: 16px;
