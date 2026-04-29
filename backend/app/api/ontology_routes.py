@@ -252,7 +252,7 @@ def generate_ontology():
                         continue
 
                     # 使用 graph._parse_mineru_jsonl 解析 chunks
-                    file_chunks = _parse_mineru_jsonl(jsonl_path, orig_name)
+                    file_chunks = _parse_mineru_jsonl(jsonl_path, orig_name, pdf_path)
                     for c in file_chunks:
                         c["chunk_id"] = f"chunk_{idx}_{c['chunk_id'].split('_', 1)[-1]}"
                     all_chunks.extend(file_chunks)
