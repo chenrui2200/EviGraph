@@ -31,45 +31,10 @@ from . import neo4j_schema
 
 logger = logging.getLogger('mirofish.neo4j_storage')
 
-# Action 过滤器：识别非实操性词汇（状态描述、被动含义或抽象动词）
-# 这些词汇不应作为 Action 实体提取
-ACTION_FILTER_WORDS = {
-    # 状态描述词 - 这些是"符合性"要求，不是具体动作
-    "符合", "满足", "达到", "遵守", "遵循", "适应",
-    "符合要求", "满足要求", "达到要求", "符合标准", "满足标准",
-    "应符合", "应满足", "应达到", "应遵守", "应遵循",
-    # 被动/抽象动词
-    "承受", "涉及", "属于", "包括",
-    # 程度副词 + 动词组合（需要拆分）
-    "合理", "正确", "可靠", "安全",
-    # 常见的"假动作"短语
-    "具有", "具备", "保有", "保持", "维持",
-}
-
-# 允许的实操性动作词根（用于验证）
-ACTION_ALLOWED_PREFIXES = {
-    "安装", "敷设", "连接", "选用", "配置", "设置", "布置",
-    "采用", "使用", "应用", "使用", "运用",
-    "接地", "接零", "接保护", "屏蔽", "隔离",
-    "检测", "试验", "校验", "测量", "检查", "检验",
-    "防护", "保护", "报警", "断开", "接通",
-    "预留", "预埋", "固定", "支撑", "吊装",
-    "配电", "供电", "馈电", "控制",
-    "标识", "标记", "标志", "挂牌",
-    "阻燃", "耐火", "防腐", "防水",  # 这些通常是材料属性，但可作为动作理解
-}
 
 # ============================================================
 # Neo4j Label 白名单（防止 Cypher 注入）
 # ============================================================
-# Episode 节点支持的层级标签
-VALID_EPISODE_LABELS = frozenset({
-    "Chapter", "Section", "Subsection", "Clause", "Term",
-    "Table", "Figure", "Appendix", "Level1", "Level2", "Level3",
-    # 通用标签
-    "Term", "Entity", "Component", "Action", "Condition", "Object",
-    "Episode", "Topic", "Document", "Page", "Image",
-})
 
 # Entity/Topic/Clause 节点支持的类型标签
 VALID_NODE_LABELS = frozenset({
@@ -93,57 +58,6 @@ def _safe_label(label: str, allowed: frozenset = VALID_NODE_LABELS) -> Optional[
         return None
     return safe_label
 
-
-def is_actionable(action_name: str) -> bool:
-    """
-    判断一个动作名称是否是实操性的。
-
-    Args:
-        action_name: 动作名称
-
-    Returns:
-        True 如果是实操性动作，False 否则
-    """
-    if not action_name:
-        return False
-
-    action = action_name.strip()
-
-    # 过滤空字符串和太短的
-    if len(action) < 2:
-        return False
-
-    # 检查是否在黑名单中
-    if action in ACTION_FILTER_WORDS:
-        return False
-
-    # 检查是否包含黑名单词
-    for black_word in ACTION_FILTER_WORDS:
-        if black_word in action:
-            return False
-
-    # 检查是否以允许的前缀开头
-    for prefix in ACTION_ALLOWED_PREFIXES:
-        if action.startswith(prefix):
-            return True
-
-    # 检查长度：太长的可能是复合短语，需要人工审核
-    # 典型实操动作应该在 4 个字以内
-    if len(action) > 6:
-        # 可能是复合短语，尝试检查是否包含实操词
-        for prefix in ACTION_ALLOWED_PREFIXES:
-            if prefix in action:
-                return True
-        # 不包含任何实操词，拒绝
-        return False
-
-    # 2-4 个字的中文词，默认允许（需要依赖 LLM 提示词的质量）
-    # 但排除纯状态词
-    state_words = {"的", "应", "须", "要", "能", "会"}
-    if action in state_words or action[0] in state_words:
-        return False
-
-    return True
 
 
 class Neo4jStorage(GraphStorage):
@@ -493,53 +407,6 @@ class Neo4jStorage(GraphStorage):
             self._call_with_retry(session.execute_write, _set)
 
 
-    def get_ontology(self, graph_id: str) -> Dict[str, Any]:
-        with self._driver.session() as session:
-            result = session.run(
-                "MATCH (g:Graph {graph_id: $gid}) RETURN g.ontology_json AS oj",
-                gid=graph_id,
-            )
-            record = result.single()
-            if record and record["oj"]:
-                return self._parse_json_safe(record.get("oj"))
-            return {}
-
-    # ----------------------------------------------------------------
-    # Add data (NER → nodes/edges)
-    # ----------------------------------------------------------------
-
-
-    def wait_for_processing(
-        self,
-        episode_ids: List[str],
-        progress_callback: Optional[Callable] = None,
-        timeout: int = 600,
-    ) -> None:
-        """No-op — processing is synchronous in Neo4j."""
-        if progress_callback:
-            progress_callback(1.0)
-
-    # ----------------------------------------------------------------
-    # Read nodes
-    # ----------------------------------------------------------------
-
-    def get_all_nodes(self, graph_id: str, limit: int = 2000) -> List[Dict[str, Any]]:
-        def _read(tx):
-            result = tx.run(
-                """
-                MATCH (n:Entity {graph_id: $gid})
-                RETURN n, labels(n) AS labels
-                ORDER BY n.created_at DESC
-                LIMIT $limit
-                """,
-                gid=graph_id,
-                limit=limit,
-            )
-            return [self._node_to_dict(record["n"], record["labels"]) for record in result]
-
-        with self._driver.session() as session:
-            return self._call_with_retry(session.execute_read, _read)
-
     def get_node(self, uuid: str) -> Optional[Dict[str, Any]]:
         def _read(tx):
             result = tx.run(
@@ -592,30 +459,6 @@ class Neo4jStorage(GraphStorage):
                 for record in result
             ]
 
-        with self._driver.session() as session:
-            return self._call_with_retry(session.execute_read, _read)
-
-    def get_edges_for_nodes_batch(self, node_uuids: List[str], bidirectional: bool = True) -> Dict[str, List[Dict[str, Any]]]:
-        """批量获取多个节点的所有边（一次性 Cypher 查询，支持 Entity/Topic/Clause）"""
-        if not node_uuids:
-            return {}
-        def _read(tx):
-            rel_type = "[r]-(m)" if bidirectional else "[r]->(m)"
-            result = tx.run(
-                f"""
-                MATCH (n)-{rel_type}
-                WHERE n.uuid IN $uuids AND (n:Entity OR n:Topic OR n:Clause)
-                RETURN n.uuid AS node_uuid, r, startNode(r).uuid AS src_uuid, endNode(r).uuid AS tgt_uuid
-                """,
-                uuids=node_uuids,
-            )
-            edges_map: Dict[str, List[Dict[str, Any]]] = {uid: [] for uid in node_uuids}
-            for record in result:
-                src_uuid = record["src_uuid"]
-                edges_map.setdefault(src_uuid, []).append(
-                    self._edge_to_dict(record["r"], record["src_uuid"], record["tgt_uuid"])
-                )
-            return edges_map
         with self._driver.session() as session:
             return self._call_with_retry(session.execute_read, _read)
 
@@ -727,24 +570,6 @@ class Neo4jStorage(GraphStorage):
             with self._driver.session() as session:
                 return self._call_with_retry(session.execute_read, _read)
 
-
-    def get_nodes_by_label(self, graph_id: str, label: str) -> List[Dict[str, Any]]:
-        # 白名单验证，防止 Cypher 注入
-        safe_label = _safe_label(label, VALID_NODE_LABELS)
-        if not safe_label:
-            logger.warning(f"[storage] get_nodes_by_label: invalid label '{label}'")
-            return []
-
-        def _read(tx):
-            query = f"""
-                MATCH (n:Entity:`{{safe_label}}` {{graph_id: $gid}})
-                RETURN n, labels(n) AS labels
-            """
-            result = tx.run(query, gid=graph_id)
-            return [self._node_to_dict(record["n"], record["labels"]) for record in result]
-
-        with self._driver.session() as session:
-            return self._call_with_retry(session.execute_read, _read)
 
     def search_nodes_by_name(
         self,
@@ -1653,6 +1478,7 @@ class Neo4jStorage(GraphStorage):
             "table_content": props.get("table_content"),
             "table_img_path": props.get("table_img_path"),
             "table_footnote": props.get("table_footnote"),
+            "table_image_base64_content": props.get("table_image_base64_content"),
             "bbox_pdf": props.get("bbox_pdf"),
             "bbox_viewport": props.get("bbox_viewport"),
         }
@@ -2336,6 +2162,7 @@ class Neo4jStorage(GraphStorage):
                                         "table_content": tbl.get("table_content", "") if isinstance(tbl, dict) else "",
                                         "table_img_path": tbl.get("table_img_path", "") if isinstance(tbl, dict) else "",
                                         "table_footnote": tbl.get("table_footnote", "") if isinstance(tbl, dict) else "",
+                                        "table_image_base64_content": tbl.get("table_image_base64_content", "") if isinstance(tbl, dict) else "",
                                     })
                                     clause_table_pairs.append({"clause_id": cid, "tbl_uuid": tbl_uuid})
 
@@ -2389,12 +2216,14 @@ class Neo4jStorage(GraphStorage):
                                     tbl.table_content = t.table_content,
                                     tbl.table_img_path = t.table_img_path,
                                     tbl.table_footnote = t.table_footnote,
+                                    tbl.table_image_base64_content = t.table_image_base64_content,
                                     tbl.created_at = datetime()
                                 ON MATCH SET
                                     tbl.caption = COALESCE(t.caption, tbl.caption),
                                     tbl.table_content = COALESCE(t.table_content, tbl.table_content),
                                     tbl.table_img_path = COALESCE(t.table_img_path, tbl.table_img_path),
-                                    tbl.table_footnote = COALESCE(t.table_footnote, tbl.table_footnote)
+                                    tbl.table_footnote = COALESCE(t.table_footnote, tbl.table_footnote),
+                                    tbl.table_image_base64_content = COALESCE(t.table_image_base64_content, tbl.table_image_base64_content)
                                 """,
                                 tables=all_tables
                             )
@@ -3144,150 +2973,3 @@ class Neo4jStorage(GraphStorage):
         logger.info(f"[hierarchical] Built {count} hierarchical relations")
         return count
 
-    # ========================================================================
-    # LLM 解析器支持方法（新增）
-    # ========================================================================
-
-    def find_clause_by_id(self, graph_id: str, clause_id: str) -> Optional[Dict[str, Any]]:
-        """
-        根据条款 ID 查找条款 Episode
-
-        Args:
-            graph_id: 图谱ID
-            clause_id: 条款编号（如 "3.2.1"）
-
-        Returns:
-            条款数据或 None
-        """
-        with self._driver.session() as session:
-            result = session.run(
-                """
-                MATCH (ep:Clause {graph_id: $gid})
-                WHERE ep.clause_id = $clause_id
-                   OR ep.clause_id = $clause_id_full
-                RETURN ep.uuid AS uuid, ep.data AS content
-                LIMIT 1
-                """,
-                gid=graph_id,
-                clause_id=clause_id,
-                clause_id_full=f"条款{clause_id}"
-            )
-
-            record = result.single()
-            if record:
-                return {
-                    "uuid": record["uuid"],
-                    "content": record["content"]
-                }
-            return None
-
-    def get_or_create_entity(
-        self,
-        graph_id: str,
-        entity_type: str,
-        entity_name: str,
-        description: str = ""
-    ) -> Optional[str]:
-        """
-        获取或创建实体节点
-
-        直接使用 LLM 返回的实体类型，不再硬编码推断
-
-        Args:
-            graph_id: 图谱ID
-            entity_type: 实体类型（如 "Component", "Action", "Condition"）
-            entity_name: 实体名称
-            description: 实体描述
-
-        Returns:
-            实体 UUID
-        """
-        import re
-        # 清理实体名称中的特殊字符用于 name_lower
-        name_clean = re.sub(r'[^\w\u4e00-\u9fff]', '_', entity_name).lower()[:100]
-
-        # 生成稳定 UUID
-        entity_seed = f"{graph_id}:{entity_type}:{entity_name}".encode('utf-8')
-        entity_uuid = str(uuid.UUID(hashlib.md5(entity_seed).hexdigest()))
-
-        try:
-            with self._driver.session() as session:
-                def _create_entity(tx):
-                    # 使用参数化标签（Neo4j 支持）
-                    tx.run(
-                        f"""
-                        MERGE (e:Entity:{entity_type} {{graph_id: $gid, name_lower: $name_lower}})
-                        ON CREATE SET
-                            e.uuid = $uuid,
-                            e.name = $name,
-                            e.summary = $summary,
-                            e.created_at = datetime()
-                        ON MATCH SET
-                            e.summary = COALESCE(e.summary, $summary)
-                        """,
-                        gid=graph_id,
-                        name_lower=name_clean,
-                        uuid=entity_uuid,
-                        name=entity_name,
-                        summary=description[:500] if description else ""
-                    )
-                    return entity_uuid
-
-                return self._call_with_retry(session.execute_write, _create_entity)
-
-        except Exception as e:
-            logger.warning(f"[entity] Failed to create entity {entity_type}:{entity_name}: {e}")
-            return None
-
-    def add_edge(
-        self,
-        graph_id: str,
-        source_uuid: str,
-        target_uuid: str,
-        properties: Dict[str, Any]
-    ) -> bool:
-        """
-        添加边（关系）
-
-        Args:
-            graph_id: 图谱ID
-            source_uuid: 源节点 UUID
-            target_uuid: 目标节点 UUID
-            properties: 关系属性
-
-        Returns:
-            是否成功
-        """
-        if source_uuid == target_uuid:
-            return False
-
-        rel_type = properties.get("type", "RELATES_TO")
-
-        try:
-            with self._driver.session() as session:
-                def _create_edge(tx):
-                    tx.run(
-                        f"""
-                        MATCH (s {{uuid: $source_uuid}}), (t {{uuid: $target_uuid}})
-                        MERGE (s)-[r:{rel_type}]->(t)
-                        ON CREATE SET
-                            r.graph_id = $gid,
-                            r.fact = $fact,
-                            r.target_type = $target_type,
-                            r.created_at = datetime()
-                        ON MATCH SET
-                            r.fact = COALESCE(r.fact, $fact)
-                        """,
-                        source_uuid=source_uuid,
-                        target_uuid=target_uuid,
-                        gid=graph_id,
-                        fact=properties.get("fact", ""),
-                        target_type=properties.get("target_type", "")
-                    )
-                    return True
-
-                return self._call_with_retry(session.execute_write, _create_edge)
-
-        except Exception as e:
-            logger.warning(f"[edge] Failed to create edge: {e}")
-            return False

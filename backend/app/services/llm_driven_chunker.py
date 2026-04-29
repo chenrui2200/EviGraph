@@ -3384,6 +3384,7 @@ topic：{topic}
                                 "table_content": chunk.get('table_content', ''),
                                 "table_img_path": chunk.get('table_img_path', ''),
                                 "table_footnote": chunk.get('table_footnote', ''),
+                                "table_image_base64_content": chunk.get('table_image_base64_content', ''),
                             })
 
                 if auto_table_refs:

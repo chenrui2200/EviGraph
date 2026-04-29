@@ -26,30 +26,7 @@ class GraphStorage(ABC):
     def set_ontology(self, graph_id: str, ontology: Dict[str, Any]) -> None:
         """Store ontology (entity types + relation types) for a graph."""
 
-    @abstractmethod
-    def get_ontology(self, graph_id: str) -> Dict[str, Any]:
-        """Retrieve stored ontology for a graph."""
-
-    # --- Add data ---
-
-    @abstractmethod
-    def wait_for_processing(
-        self,
-        episode_ids: List[str],
-        progress_callback: Optional[Callable] = None,
-        timeout: int = 600,
-    ) -> None:
-        """
-        Wait for episodes to be processed.
-        For Neo4j: no-op (synchronous processing).
-        Kept for API compatibility with Zep-era callers.
-        """
-
     # --- Read nodes ---
-
-    @abstractmethod
-    def get_all_nodes(self, graph_id: str, limit: int = 2000) -> List[Dict[str, Any]]:
-        """Get all nodes in a graph (with optional limit)."""
 
     @abstractmethod
     def get_node(self, uuid: str) -> Optional[Dict[str, Any]]:
@@ -58,10 +35,6 @@ class GraphStorage(ABC):
     @abstractmethod
     def get_node_edges(self, node_uuid: str) -> List[Dict[str, Any]]:
         """Get all edges connected to a node (O(1) via Cypher, not full scan)."""
-
-    @abstractmethod
-    def get_nodes_by_label(self, graph_id: str, label: str) -> List[Dict[str, Any]]:
-        """Get nodes filtered by entity type label."""
 
     # --- Read edges ---
 

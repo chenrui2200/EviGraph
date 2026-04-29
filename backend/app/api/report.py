@@ -599,7 +599,53 @@ def public_query():
                 import urllib.parse
                 bboxes_str = urllib.parse.quote(json.dumps(pdf_bboxes))
                 item['source_link'] = f"{frontend_base_url}/preview/{app_id}?source={f['source']}&page={f.get('page', 1)}&pdf_bboxes={bboxes_str}&graph_id={f['graph_id']}"
+            item['clause_uuid'] = f.get('uuid', '')
             results.append(item)
+
+        # Batch query related Table / Image nodes for each clause
+        clause_uuids = [r['clause_uuid'] for r in results if r.get('clause_uuid')]
+        if clause_uuids and storage:
+            try:
+                with storage._driver.session() as session:
+                    rel_result = session.run(
+                        """
+                        UNWIND $clause_uuids AS cu
+                        MATCH (c:Clause {uuid: cu})-[r:MENTIONS]->(n)
+                        WHERE n:Table OR n:Image
+                        RETURN cu AS clause_uuid,
+                               collect(DISTINCT CASE WHEN n:Table THEN {
+                                   uuid: n.uuid, caption: n.caption, table_id: n.table_id,
+                                   table_content: n.table_content, image_content: n.image_content,
+                                   table_img_path: n.table_img_path, bbox_pdf: n.bbox_pdf,
+                                   bbox_viewport: n.bbox_viewport
+                               } END) AS tables,
+                               collect(DISTINCT CASE WHEN n:Image THEN {
+                                   uuid: n.uuid, caption: n.caption, content: n.content,
+                                   img_path: n.img_path
+                               } END) AS images
+                        """,
+                        clause_uuids=clause_uuids,
+                    )
+                    rel_map = {}
+                    for record in rel_result:
+                        cu = record.get("clause_uuid")
+                        tables = [t for t in record.get("tables", []) if t]
+                        images = [i for i in record.get("images", []) if i]
+                        rel_map[cu] = {"tables": tables, "images": images}
+
+                    for r in results:
+                        cu = r.get("clause_uuid")
+                        if cu and cu in rel_map:
+                            r["related_tables"] = rel_map[cu]["tables"]
+                            r["related_images"] = rel_map[cu]["images"]
+                        else:
+                            r["related_tables"] = []
+                            r["related_images"] = []
+            except Exception as e:
+                logger.warning(f"Failed to query related tables/images: {e}")
+                for r in results:
+                    r["related_tables"] = []
+                    r["related_images"] = []
 
         return jsonify({
             "success": True,

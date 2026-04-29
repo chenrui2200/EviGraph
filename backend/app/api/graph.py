@@ -1734,6 +1734,11 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                     if len(final_bbox) >= 4 and final_bbox[1] > final_bbox[3]:
                         final_bbox = [final_bbox[0], final_bbox[3], final_bbox[2], final_bbox[1]]
 
+                    # 从 images_base64 提取表格截图 base64
+                    table_image_content = ''
+                    if img_path and img_path in images_base64:
+                        table_image_content = images_base64[img_path]
+
                     chunks.append({
                         "chunk_id": f"chunk_{len(chunks)}",
                         "page_idx": page_num,
@@ -1750,6 +1755,7 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                         "table_img_path": img_path,
                         "table_content": table_html,
                         "table_footnote": table_footnote.rstrip('\n') if table_footnote else '',
+                        "table_image_base64_content": table_image_content,
                     })
 
                 # ---- 图片块 ----
