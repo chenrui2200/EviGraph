@@ -37,6 +37,89 @@ def _stop_chunk_thread(project_id: str):
                 logger.warning(f"[{project_id}] 旧分块线程未能在3秒内退出")
 
 
+def _generate_kb_words_pool(project_id: str, chunks_result: dict) -> str:
+    """
+    从智能分析结果中提取 Topic 摘要和知识实体，生成 kb_words_pool.md 供 LLM 读取。
+
+    输出结构：
+      - 【Topic 摘要块】：所有 clause 的 topics.topic 去重列表
+      - 【知识实体块】：所有 topics 下的 entities 去重列表
+    """
+    from datetime import datetime
+
+    clauses = chunks_result.get("clauses", [])
+    if not clauses:
+        return ""
+
+    # 收集所有 topics 和 entities（保留来源统计）
+    topic_map: dict = {}       # topic_text -> {"text": str, "clause_ids": set}
+    entity_map: dict = {}      # entity_name -> {"name": str, "topics": set, "clause_ids": set}
+
+    for clause in clauses:
+        clause_id = clause.get("clause_id", "")
+        for topic in clause.get("topics", []):
+            topic_text = topic.get("topic", "").strip()
+            if not topic_text:
+                continue
+            if topic_text not in topic_map:
+                topic_map[topic_text] = {"text": topic_text, "clause_ids": set()}
+            topic_map[topic_text]["clause_ids"].add(clause_id)
+
+            for ent in topic.get("entities", []):
+                ent_name = ent.strip() if isinstance(ent, str) else str(ent).strip()
+                if not ent_name:
+                    continue
+                if ent_name not in entity_map:
+                    entity_map[ent_name] = {"name": ent_name, "topics": set(), "clause_ids": set()}
+                entity_map[ent_name]["topics"].add(topic_text)
+                entity_map[ent_name]["clause_ids"].add(clause_id)
+
+    # 排序：按名称
+    sorted_topics = sorted(topic_map.values(), key=lambda x: x["text"])
+    sorted_entities = sorted(entity_map.values(), key=lambda x: x["name"])
+
+    md_lines = [
+        "# 知识实体词池 (KB Words Pool)",
+        "",
+        f"> 自动生成自 LLM 智能分析结果",
+        f"> 项目ID: {project_id}",
+        f"> 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"> 总条款数: {len(clauses)}",
+        f"> 总Topic数: {len(sorted_topics)}",
+        f"> 总实体数: {len(sorted_entities)}",
+        "",
+        "---",
+        "",
+        "## 【Topic 摘要块】",
+        "",
+        "以下是从所有条款中提取的主题摘要列表（已按 topic 文本去重）：",
+        "",
+    ]
+
+    for idx, t in enumerate(sorted_topics, 1):
+        md_lines.append(f"{idx}. {t['text']}")
+
+    md_lines.extend([
+        "",
+        "---",
+        "",
+        "## 【知识实体块】",
+        "",
+        "以下是从所有 Topic 关联中提取的知识实体名词列表（已按实体名称去重）：",
+        "",
+    ])
+
+    for idx, e in enumerate(sorted_entities, 1):
+        md_lines.append(f"{idx}. {e['name']}")
+
+    content = "\n".join(md_lines)
+    project_dir = ProjectManager._get_project_dir(project_id)
+    md_path = os.path.join(project_dir, "kb_words_pool.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return md_path
+
+
 # ============== Intelligent Chunking ==============
 
 @graph_bp.route('/chunk/intelligent', methods=['POST'])
@@ -257,6 +340,13 @@ def intelligent_chunk():
                         chunker_logger.error(f"[{task_id}] 兜底失败: {fb_err}")
 
                 if save_success and chunks_result:
+                    # 生成 kb_words_pool.md 供 LLM 读取
+                    try:
+                        md_path = _generate_kb_words_pool(project_id, chunks_result)
+                        chunker_logger.info(f"[{task_id}] kb_words_pool.md 已生成: {md_path}")
+                    except Exception as md_err:
+                        chunker_logger.warning(f"[{task_id}] 生成 kb_words_pool.md 失败: {md_err}")
+
                     ProjectManager.delete_chunk_checkpoint_v2(project_id)
                     project = ProjectManager.get_project(project_id)
                     project.status = ProjectStatus.GRAPH_CHUNKED

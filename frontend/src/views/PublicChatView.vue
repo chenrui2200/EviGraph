@@ -60,6 +60,21 @@
                     <span class="evidence-text">{{ fact.text }}</span>
                     <span v-if="getFactPageBboxes(fact).length" class="evidence-page">{{ formatPageRange(getFactPageBboxes(fact)) }}</span>
                   </div>
+                  <!-- 关联表格图片 -->
+                  <div v-if="fact.related_tables?.length" class="evidence-tables">
+                    <div
+                      v-for="(tbl, tIdx) in fact.related_tables.filter(t => t.table_image_base64_content)"
+                      :key="tIdx"
+                      class="table-image-item"
+                    >
+                      <div v-if="tbl.caption" class="table-caption">{{ tbl.caption }}</div>
+                      <img
+                        :src="tbl.table_image_base64_content.startsWith('data:') ? tbl.table_image_base64_content : 'data:image/png;base64,' + tbl.table_image_base64_content"
+                        :alt="tbl.caption || '表格图片'"
+                        class="table-image"
+                      />
+                    </div>
+                  </div>
                   <div v-if="fact.topic" class="evidence-topics">
                     <span class="topics-label">关联 Topic:</span>
                     <span class="topic-tag">{{ fact.topic }}</span>
@@ -760,6 +775,33 @@ onMounted(async () => {
   color: #333;
   line-height: 1.7;
   flex: 1;
+}
+
+.evidence-tables {
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.table-image-item {
+  border: 1px dashed #dcdfe6;
+  border-radius: 8px;
+  padding: 8px;
+  background: #f8f9fa;
+}
+
+.table-caption {
+  font-size: 12px;
+  font-weight: 600;
+  color: #606266;
+  margin-bottom: 6px;
+}
+
+.table-image {
+  max-width: 100%;
+  border-radius: 4px;
+  display: block;
 }
 
 .evidence-page {

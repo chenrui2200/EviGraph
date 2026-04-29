@@ -723,6 +723,7 @@ class GraphToolsService:
         query: str,
         topic_limit: int = 10,
         entity_limit: int = 10,
+        rerank_min_score: float = 0,
     ) -> Dict[str, Any]:
         """
         问题意图摘要匹配：
@@ -793,6 +794,12 @@ class GraphToolsService:
         # Step 2: Rerank topics with bge-reranker
         topic_items = [(t, f"{t.get('name', '')} {t.get('summary', '')}") for t in all_topic_nodes]
         scored_topics = self._rerank_items(query, topic_items, top_n=topic_limit)
+
+        # Step 2.5: Filter topics by rerank_min_score
+        if rerank_min_score > 0:
+            before_filter = len(scored_topics)
+            scored_topics = [(t, s) for t, s in scored_topics if s >= rerank_min_score]
+            logger.info(f"[IntentMatch] Topic filter by min_score={rerank_min_score}: before={before_filter}, after={len(scored_topics)}")
 
         # Step 3: Fetch associated Entity/Term for each top topic
         topic_uuids = [t.get("uuid") for t, _ in scored_topics if t.get("uuid")]

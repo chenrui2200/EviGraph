@@ -169,12 +169,12 @@ export function rerankFacts(data) {
 
 /**
  * 问题意图摘要匹配：Topic 召回 + 关联 Entity 重排
- * @param {Object} data - Contains graph_id, query, topic_limit, entity_limit
+ * @param {Object} data - Contains app_id (or graph_id), query, topic_limit, entity_limit, rerank_min_score
  * @returns {Promise}
  */
 export function queryIntentMatch(data) {
   return service({
-    url: '/api/report/tools/query-intent-match',
+    url: '/api/report/query-intent-match',
     method: 'post',
     data
   })

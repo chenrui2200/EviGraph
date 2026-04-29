@@ -58,7 +58,7 @@ def search_object_first():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@report_bp.route('/tools/query-intent-match', methods=['POST'])
+@report_bp.route('/query-intent-match', methods=['POST'])
 def query_intent_match():
     """
     问题意图摘要匹配：
@@ -69,19 +69,19 @@ def query_intent_match():
     5. 返回 Topic + 关联 Entity 的全量图谱信息与分数
 
     POST body:
-        graph_id: str (required)
+        app_id: str (preferred) - 应用ID，自动解析出关联图谱
+        graph_id: str (legacy) - 直接指定图谱ID（向后兼容）
         query: str (required)
         topic_limit: int (default 10)
         entity_limit: int (default 10)
     """
     data = request.get_json() or {}
+    app_id = data.get('app_id', '')
     graph_id = data.get('graph_id')
     query = data.get('query', '')
     topic_limit = int(data.get('topic_limit', 10))
     entity_limit = int(data.get('entity_limit', 10))
 
-    if not graph_id:
-        return jsonify({"success": False, "error": "graph_id is required"}), 400
     if not query:
         return jsonify({"success": False, "error": "query is required"}), 400
 
@@ -90,19 +90,138 @@ def query_intent_match():
     if not storage:
         return jsonify({"success": False, "error": "Storage not available"}), 503
 
+    graph_ids = []
+    if app_id:
+        from ..models.ai_app import AiAppManager
+        app = AiAppManager.get_app(app_id)
+        if not app:
+            return jsonify({"success": False, "error": "Application not found"}), 404
+        if not app.is_published:
+            return jsonify({"success": False, "error": "Application is not published"}), 403
+        wf = app.workflow_data or {}
+        saved_project_ids = wf.get('selectedProjectIds', [])
+        if saved_project_ids:
+            from ..models.project import ProjectManager
+            for pid in saved_project_ids:
+                proj = ProjectManager.get_project(pid)
+                if proj and getattr(proj, 'graph_id', None):
+                    graph_ids.append(proj.graph_id)
+        if not graph_ids:
+            graph_ids = wf.get('selectedGraphIds', [])
+    elif graph_id:
+        graph_ids = [graph_id]
+    else:
+        return jsonify({"success": False, "error": "app_id or graph_id is required"}), 400
+
+    if not graph_ids:
+        return jsonify({"success": False, "error": "No knowledge base configured"}), 400
+
     try:
         tools = GraphToolsService(storage=storage)
-        result = tools.query_intent_match(
-            graph_id=graph_id,
-            query=query,
-            topic_limit=topic_limit,
-            entity_limit=entity_limit,
-        )
-        return jsonify({"success": True, "data": result})
+        all_topics: list = []
+        seen_topic_uuids: set = set()
+        all_search_steps: list = []
+        total_merged = 0
+        total_reranked = 0
+        keywords: list = []
+
+        for gid in graph_ids:
+            result = tools.query_intent_match(
+                graph_id=gid,
+                query=query,
+                topic_limit=topic_limit,
+                entity_limit=entity_limit,
+                rerank_min_score=float(data.get('rerank_min_score', 0)),
+            )
+            rp = result.get("retrieval_process", {})
+            if not keywords:
+                keywords = rp.get("keywords", [])
+            all_search_steps.extend(rp.get("search_steps", []))
+            total_merged += rp.get("merged_candidates", 0)
+            total_reranked += rp.get("reranked_topics", 0)
+            for t in result.get("topics", []):
+                uid = t.get("uuid")
+                if uid and uid not in seen_topic_uuids:
+                    seen_topic_uuids.add(uid)
+                    all_topics.append(t)
+
+        # Sort by relevance_score desc
+        all_topics.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+
+        merged_result = {
+            "query": query,
+            "topics": all_topics,
+            "total_topics": len(all_topics),
+            "retrieval_process": {
+                "keywords": keywords,
+                "search_steps": all_search_steps,
+                "merged_candidates": total_merged,
+                "reranked_topics": total_reranked,
+            },
+        }
+        return jsonify({"success": True, "data": merged_result})
     except Exception as e:
         logger.error(f"query_intent_match failed: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@report_bp.route('/kb-words-pool', methods=['GET'])
+def kb_words_pool():
+    """
+    返回知识实体词池 (kb_words_pool.md) 的纯文本内容。
+
+    Query params:
+        app_id: str (preferred) - 应用ID，自动解析关联项目
+        project_id: str (alternative) - 直接指定项目ID
+    """
+    app_id = request.args.get('app_id', '')
+    project_id = request.args.get('project_id', '')
+
+    if not app_id and not project_id:
+        return jsonify({"success": False, "error": "app_id or project_id is required"}), 400
+
+    if app_id:
+        from ..models.ai_app import AiAppManager
+        from ..models.project import ProjectManager
+        app = AiAppManager.get_app(app_id)
+        if not app:
+            return jsonify({"success": False, "error": "Application not found"}), 404
+        wf = app.workflow_data or {}
+        saved_project_ids = wf.get('selectedProjectIds', [])
+        if saved_project_ids:
+            for pid in saved_project_ids:
+                proj = ProjectManager.get_project(pid)
+                if proj:
+                    project_id = proj.project_id
+                    break
+        if not project_id:
+            graph_ids = wf.get('selectedGraphIds', [])
+            if graph_ids:
+                # Try to find project by graph_id
+                all_projects = ProjectManager.list_projects()
+                for proj in all_projects:
+                    if getattr(proj, 'graph_id', None) in graph_ids:
+                        project_id = proj.project_id
+                        break
+
+    if not project_id:
+        return jsonify({"success": False, "error": "No project found for the given app"}), 404
+
+    import os
+    file_path = os.path.join(
+        os.path.dirname(__file__), '../../uploads/projects', project_id, 'kb_words_pool.md'
+    )
+    if not os.path.exists(file_path):
+        return jsonify({"success": False, "error": f"kb_words_pool.md not found for project {project_id}"}), 404
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return content, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    except Exception as e:
+        logger.error(f"kb_words_pool read failed: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -271,6 +390,53 @@ def rerank_facts():
                 key = (fc.get('text', ''), fc.get('source', ''))
                 fc['topic'] = topic_map.get(key, '')
             filtered_facts.append(fc)
+
+        # Batch query related Table / Image nodes for each clause fact
+        all_scored_uuids = [f.get('uuid') for f in scored_facts if f.get('uuid')]
+        if all_scored_uuids and storage:
+            try:
+                with storage._driver.session() as session:
+                    rel_result = session.run(
+                        """
+                        UNWIND $clause_uuids AS cu
+                        MATCH (c:Clause {uuid: cu})-[r:MENTIONS]->(n)
+                        WHERE n:Table OR n:Image
+                        RETURN cu AS clause_uuid,
+                               collect(DISTINCT CASE WHEN n:Table THEN {
+                                   uuid: n.uuid, caption: n.caption, table_id: n.table_id,
+                                   table_content: n.table_content, table_image_base64_content: n.table_image_base64_content,
+                                   table_img_path: n.table_img_path, bbox_pdf: n.bbox_pdf,
+                                   bbox_viewport: n.bbox_viewport
+                               } END) AS tables,
+                               collect(DISTINCT CASE WHEN n:Image THEN {
+                                   uuid: n.uuid, caption: n.caption, content: n.content,
+                                   img_path: n.img_path
+                               } END) AS images
+                        """,
+                        clause_uuids=all_scored_uuids,
+                    )
+                    rel_map = {}
+                    for record in rel_result:
+                        cu = record.get("clause_uuid")
+                        tables = [t for t in record.get("tables", []) if t]
+                        images = [i for i in record.get("images", []) if i]
+                        rel_map[cu] = {"tables": tables, "images": images}
+
+                    for fact_list in (scored_facts, filtered_facts):
+                        for f in fact_list:
+                            cu = f.get("uuid")
+                            if cu and cu in rel_map:
+                                f["related_tables"] = rel_map[cu]["tables"]
+                                f["related_images"] = rel_map[cu]["images"]
+                            else:
+                                f["related_tables"] = []
+                                f["related_images"] = []
+            except Exception as e:
+                logger.warning(f"Failed to query related tables/images in rerank: {e}")
+                for fact_list in (scored_facts, filtered_facts):
+                    for f in fact_list:
+                        f["related_tables"] = []
+                        f["related_images"] = []
 
         return jsonify({
             "success": True,
@@ -615,7 +781,7 @@ def public_query():
                         RETURN cu AS clause_uuid,
                                collect(DISTINCT CASE WHEN n:Table THEN {
                                    uuid: n.uuid, caption: n.caption, table_id: n.table_id,
-                                   table_content: n.table_content, image_content: n.image_content,
+                                   table_content: n.table_content, table_image_base64_content: n.table_image_base64_content,
                                    table_img_path: n.table_img_path, bbox_pdf: n.bbox_pdf,
                                    bbox_viewport: n.bbox_viewport
                                } END) AS tables,

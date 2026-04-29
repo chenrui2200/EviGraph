@@ -29,6 +29,21 @@
               <span v-else class="spinner-sm"></span>
             </button>
           </div>
+          <div class="search-controls">
+            <div class="threshold-control">
+              <span class="threshold-label">重排阈值</span>
+              <input
+                type="range"
+                v-model.number="rerankMinScore"
+                min="0"
+                max="100"
+                step="5"
+                class="threshold-slider"
+              />
+              <span class="threshold-value">{{ rerankMinScore }}</span>
+              <span class="threshold-hint" v-if="rerankMinScore > 0">低于 {{ rerankMinScore }} 分的 Topic 将被过滤</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -336,6 +351,7 @@ const durationMs = ref(0)
 const results = ref({ topics: [], total_topics: 0 })
 const expandedTopics = ref(new Set())
 const graphIdLoading = ref(true)
+const rerankMinScore = ref(0)
 
 // PDF document viewer state
 const showDocViewer = ref(false)
@@ -385,6 +401,7 @@ const handleSearch = async () => {
       query: q,
       topic_limit: 50,
       entity_limit: 50,
+      rerank_min_score: rerankMinScore.value,
     })
     if (res?.success) {
       results.value = res.data || { topics: [], total_topics: 0 }
@@ -609,6 +626,47 @@ const allUniqueEntities = computed(() => {
 .search-btn:disabled {
   background: #ccc;
   cursor: not-allowed;
+}
+
+/* Search Controls */
+.search-controls {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+}
+
+.threshold-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #606266;
+}
+
+.threshold-label {
+  font-weight: 600;
+  color: #1a1a1a;
+  white-space: nowrap;
+}
+
+.threshold-slider {
+  width: 160px;
+  cursor: pointer;
+}
+
+.threshold-value {
+  font-weight: 700;
+  color: #409eff;
+  min-width: 28px;
+  text-align: center;
+}
+
+.threshold-hint {
+  font-size: 11px;
+  color: #e6a23c;
+  background: #fdf6ec;
+  padding: 2px 8px;
+  border-radius: 10px;
 }
 
 /* Empty / Searching states inside left panel */
