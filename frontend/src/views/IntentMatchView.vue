@@ -1,10 +1,10 @@
 <template>
-  <div class="intent-match-view">
+  <div class="intent-match-view" :class="{ embedded: !showHeader }">
     <!-- Header -->
-    <header class="view-header">
+    <header v-if="showHeader" class="view-header">
       <div class="header-left">
-        <button class="back-btn" @click="router.push({ name: 'GraphBuild', params: { projectId } })">←</button>
-        <h2 class="view-title">问题意图摘要匹配</h2>
+        <button class="back-btn" @click="router.push({ name: 'GraphBuild', params: { projectId: effectiveProjectId } })">←</button>
+        <h2 class="view-title">全量捕获</h2>
       </div>
       <div class="header-right">
         <span class="project-info" v-if="projectName">
@@ -30,18 +30,45 @@
             </button>
           </div>
           <div class="search-controls">
+            <div class="controls-header">⚙️ 检索参数配置</div>
+            <div class="threshold-control">
+              <span class="threshold-label">Topic 上限</span>
+              <input
+                type="range"
+                :value="topicLimit"
+                @input="e => emit('update:topicLimit', Number(e.target.value))"
+                min="5"
+                max="100"
+                step="5"
+                class="threshold-slider"
+              />
+              <span class="threshold-value">{{ topicLimit }}</span>
+            </div>
+            <div class="threshold-control">
+              <span class="threshold-label">Entity 上限</span>
+              <input
+                type="range"
+                :value="entityLimit"
+                @input="e => emit('update:entityLimit', Number(e.target.value))"
+                min="5"
+                max="100"
+                step="5"
+                class="threshold-slider"
+              />
+              <span class="threshold-value">{{ entityLimit }}</span>
+            </div>
             <div class="threshold-control">
               <span class="threshold-label">重排阈值</span>
               <input
                 type="range"
-                v-model.number="rerankMinScore"
+                v-model.number="localRerankMinScore"
                 min="0"
                 max="100"
                 step="5"
                 class="threshold-slider"
               />
-              <span class="threshold-value">{{ rerankMinScore }}</span>
-              <span class="threshold-hint" v-if="rerankMinScore > 0">低于 {{ rerankMinScore }} 分的 Topic 将被过滤</span>
+              <span class="threshold-value">{{ localRerankMinScore }}</span>
+              <span class="threshold-hint" v-if="localRerankMinScore > 0">低于 {{ localRerankMinScore }} 分的 Topic 将被过滤</span>
             </div>
           </div>
         </div>
@@ -216,29 +243,12 @@
 
             <div class="rp-arrow">↓</div>
 
-            <!-- Step 1: Keyword Extraction -->
+            <!-- Step 1: Hybrid Search -->
             <div class="rp-step">
               <div class="rp-step-dot">1</div>
               <div class="rp-step-content">
-                <div class="rp-step-label">LLM 提取关键词</div>
-                <div class="rp-keywords">
-                  <span
-                    v-for="(kw, kIdx) in results.retrieval_process.keywords"
-                    :key="kIdx"
-                    class="rp-keyword-tag"
-                  >{{ kw }}</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="rp-arrow">↓</div>
-
-            <!-- Step 2: Parallel Search -->
-            <div class="rp-step">
-              <div class="rp-step-dot">2</div>
-              <div class="rp-step-content">
                 <div class="rp-step-label">
-                  并行 {{ results.retrieval_process.search_steps?.length || 0 }} 路搜索 Topic
+                  Hybrid 检索 Topic（向量 + BM25）
                 </div>
                 <div class="rp-search-steps">
                   <div
@@ -261,9 +271,9 @@
 
             <div class="rp-arrow">↓</div>
 
-            <!-- Step 3: Merge & Rerank -->
+            <!-- Step 2: Merge & Rerank -->
             <div class="rp-step">
-              <div class="rp-step-dot">3</div>
+              <div class="rp-step-dot">2</div>
               <div class="rp-step-content">
                 <div class="rp-step-label">合并去重 + bge-reranker 重排</div>
                 <div class="rp-step-desc">
@@ -332,26 +342,45 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getProject } from '../api/graph'
 import { queryIntentMatch } from '../api/graph'
 import PdfViewer from '../components/PdfViewer.vue'
 
+const props = defineProps({
+  projectId: { type: String, default: '' },
+  graphId: { type: String, default: '' },
+  topicLimit: { type: Number, default: 50 },
+  entityLimit: { type: Number, default: 50 },
+  rerankMinScore: { type: Number, default: 0 },
+  showHeader: { type: Boolean, default: true },
+})
+
+const emit = defineEmits(['update:topicLimit', 'update:entityLimit', 'update:rerankMinScore'])
+
 const route = useRoute()
 const router = useRouter()
 
-const projectId = route.params.projectId
+const routeProjectId = route.params.projectId
+const effectiveProjectId = computed(() => props.projectId || routeProjectId)
+
 const projectName = ref('')
-const graphId = ref('')
+const internalGraphId = ref('')
+const graphIdLoading = ref(true)
 
 const searchQuery = ref('')
 const searching = ref(false)
 const durationMs = ref(0)
 const results = ref({ topics: [], total_topics: 0 })
 const expandedTopics = ref(new Set())
-const graphIdLoading = ref(true)
-const rerankMinScore = ref(0)
+
+// 本地滑块值，同步 props 并 emit 变更
+const localRerankMinScore = ref(props.rerankMinScore)
+watch(() => props.rerankMinScore, (v) => { localRerankMinScore.value = v })
+watch(localRerankMinScore, (v) => { emit('update:rerankMinScore', v) })
+
+const effectiveGraphId = computed(() => props.graphId || internalGraphId.value)
 
 // PDF document viewer state
 const showDocViewer = ref(false)
@@ -366,13 +395,18 @@ const currentDoc = ref({
 })
 
 onMounted(async () => {
+  if (props.graphId) {
+    internalGraphId.value = props.graphId
+    graphIdLoading.value = false
+    return
+  }
   try {
-    const res = await getProject(projectId)
+    const res = await getProject(effectiveProjectId.value)
     console.log('[IntentMatch] getProject res:', res)
     if (res.success) {
       projectName.value = res.data.name
-      graphId.value = res.data.graph_id
-      console.log('[IntentMatch] graphId loaded:', graphId.value)
+      internalGraphId.value = res.data.graph_id
+      console.log('[IntentMatch] graphId loaded:', internalGraphId.value)
     }
   } catch (err) {
     console.error('Failed to init IntentMatch:', err)
@@ -383,7 +417,7 @@ onMounted(async () => {
 
 const handleSearch = async () => {
   const q = searchQuery.value.trim()
-  const gid = graphId.value || projectId
+  const gid = effectiveGraphId.value || effectiveProjectId.value
   console.log('[IntentMatch] handleSearch called, query:', q, 'graphId:', gid)
   if (!q) {
     alert('请输入查询问题')
@@ -399,9 +433,9 @@ const handleSearch = async () => {
     const res = await queryIntentMatch({
       graph_id: gid,
       query: q,
-      topic_limit: 50,
-      entity_limit: 50,
-      rerank_min_score: rerankMinScore.value,
+      topic_limit: props.topicLimit,
+      entity_limit: props.entityLimit,
+      rerank_min_score: localRerankMinScore.value,
     })
     if (res?.success) {
       results.value = res.data || { topics: [], total_topics: 0 }
@@ -432,7 +466,7 @@ const toggleTopic = (idx) => {
 // View clause in PDF document
 const viewDocument = (clause) => {
   if (!clause.source || clause.source === 'Unknown') return
-  const identifier = graphId.value || projectId
+  const identifier = effectiveGraphId.value || effectiveProjectId.value
   const filename = clause.source
   const page = clause.page || 1
   const bbox = clause.bbox || null
@@ -502,6 +536,11 @@ const allUniqueEntities = computed(() => {
   width: 100vw;
   background: #f5f7fa;
   overflow: hidden;
+}
+
+.intent-match-view.embedded {
+  height: 100%;
+  width: 100%;
 }
 
 .view-header {
@@ -630,15 +669,29 @@ const allUniqueEntities = computed(() => {
 
 /* Search Controls */
 .search-controls {
-  margin-top: 10px;
+  margin-top: 12px;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: 10px;
+  background: #f8f9fa;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.controls-header {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a1a1a;
+  margin-bottom: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed #dcdfe6;
 }
 
 .threshold-control {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   font-size: 13px;
   color: #606266;
 }
@@ -647,18 +700,27 @@ const allUniqueEntities = computed(() => {
   font-weight: 600;
   color: #1a1a1a;
   white-space: nowrap;
+  min-width: 70px;
 }
 
 .threshold-slider {
-  width: 160px;
+  flex: 1;
+  max-width: 220px;
+  min-width: 120px;
   cursor: pointer;
+  accent-color: #409eff;
+  height: 6px;
 }
 
 .threshold-value {
   font-weight: 700;
   color: #409eff;
-  min-width: 28px;
+  min-width: 32px;
   text-align: center;
+  font-size: 14px;
+  background: #ecf5ff;
+  padding: 2px 8px;
+  border-radius: 4px;
 }
 
 .threshold-hint {
@@ -1209,21 +1271,6 @@ const allUniqueEntities = computed(() => {
   border-radius: 6px;
   line-height: 1.4;
   word-break: break-all;
-}
-
-.rp-keywords {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.rp-keyword-tag {
-  font-size: 11px;
-  background: #ecf5ff;
-  color: #409eff;
-  padding: 3px 8px;
-  border-radius: 10px;
-  font-weight: 600;
 }
 
 .rp-arrow {

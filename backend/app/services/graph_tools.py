@@ -475,41 +475,6 @@ class GraphToolsService:
         text = re.sub(r'[^\w\s]', '', text)
         return text.lower()
 
-    def optimize_query(self, query: str) -> str:
-        """Use LLM to extract 3-5 core keywords/phrases from user query"""
-        logger.info(f"Optimizing query: {query[:50]}...")
-
-        extract_prompt = f"""你是一个工程规范知识图谱搜索专家。请从用户问题中提取用于知识图谱检索的核心关键词短语。
-
-知识图谱节点类型：术语(Term)、组件(Component)、条款(Clause)、参数(Parameter)。
-
-提取规则（按优先级）：
-1. **主语实体**：问题中的核心对象（如"局部等电位联结"、"剩余电流保护电器"）
-2. **关联实体**：与主语相关的设备/材料/属性（如"保护联结导体"、"截面积"）
-3. **忽略**：通用问句词（"应符合什么规定"、"应如何"、"是什么"、"怎么"）
-
-特殊句式处理：
-- "A用B的C" → 提取 A、B、C（如"局部等电位联结 保护联结导体 截面积"）
-- "A的B应符合" → 提取 A、B
-- "A在B时候" → 提取 A、B
-- 逗号分隔的成分要分别提取
-
-输出格式：空格分隔的关键词字符串，最多5个，不要编号，不要解释。
-
-### 用户问题:
-{query}
-
-请直接输出关键词："""
-
-        try:
-            optimized_keywords = self.llm.chat(messages=[{"role": "user", "content": extract_prompt}], temperature=0.1)
-            result = optimized_keywords.strip() if optimized_keywords else query
-            logger.info(f"Optimized search query: {result}")
-            return result
-        except Exception as e:
-            logger.error(f"Query optimization failed: {str(e)}")
-            return query
-
     def filter_facts(self, query: str, facts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Use LLM to filter only truly relevant facts for the given query"""
         if not facts:
@@ -727,53 +692,30 @@ class GraphToolsService:
     ) -> Dict[str, Any]:
         """
         问题意图摘要匹配：
-        1.  提取查询关键词（LLM）
-        2.  原查询 + 关键词 多路并行检索 Topic 节点（向量 + BM25）
-        3.  合并去重，bge-reranker 对 Topic 重排
-        4.  对每个 Top Topic，获取其 MENTIONS 的 Entity / Term
-        5.  bge-reranker 对 Entity / Term 重排
-        6.  返回 Topic + 关联 Entity 的全量图谱信息与分数
+        1.  Hybrid 检索 Topic 节点（向量 + BM25）
+        2.  合并去重，bge-reranker 对 Topic 重排
+        3.  对每个 Top Topic，获取其 MENTIONS 的 Entity / Term
+        4.  bge-reranker 对 Entity / Term 重排
+        5.  返回 Topic + 关联 Entity 的全量图谱信息与分数
         """
         logger.info(f"[IntentMatch] graph_id={graph_id}, query={query[:60]}, topic_limit={topic_limit}, entity_limit={entity_limit}")
 
-        # Step 0: Extract keywords from query using LLM
-        optimized_keywords_text = self.optimize_query(query)
-        keywords = [k.strip() for k in optimized_keywords_text.split() if k.strip() and len(k.strip()) > 1]
-        # Deduplicate and keep order
-        search_queries = list(dict.fromkeys([query] + keywords))
-        logger.info(f"[IntentMatch] Extracted keywords: {keywords}, search_queries={search_queries}")
-
-        # Step 1: Parallel Topic search with original query + keywords
+        # Step 1: Hybrid search Topic nodes (vector + BM25)
         query_vector = self.storage._search.embedding.embed(query)
-        all_topic_nodes: List[Dict[str, Any]] = []
-        seen_topic_uuids: set = set()
+        topic_nodes = self.storage.search_topic_nodes(
+            graph_id=graph_id, query=query, limit=topic_limit * 3,
+            query_vector=query_vector, min_score=None,
+        )
+        logger.info(f"[IntentMatch] Topic search '{query[:30]}' -> {len(topic_nodes)} results")
+        all_topic_nodes = topic_nodes
+        seen_topic_uuids = {t.get("uuid") for t in topic_nodes if t.get("uuid")}
 
-        def _search_topics(q: str) -> List[Dict[str, Any]]:
-            return self.storage.search_topic_nodes(
-                graph_id=graph_id, query=q, limit=topic_limit * 3,
-                query_vector=query_vector, min_score=None,
-            )
-
-        search_tasks = search_queries
-        search_step_results: List[Dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=len(search_tasks)) as executor:
-            futures = {executor.submit(_search_topics, q): q for q in search_tasks}
-            for future in as_completed(futures):
-                q = futures[future]
-                nodes = future.result()
-                method = "向量 + BM25"
-                search_step_results.append({
-                    "step": len(search_step_results) + 1,
-                    "query": q,
-                    "search_method": method,
-                    "results_count": len(nodes),
-                })
-                logger.info(f"[IntentMatch] Topic search '{q[:30]}' -> {len(nodes)} results")
-                for t in nodes:
-                    uid = t.get("uuid")
-                    if uid and uid not in seen_topic_uuids:
-                        seen_topic_uuids.add(uid)
-                        all_topic_nodes.append(t)
+        search_step_results = [{
+            "step": 1,
+            "query": query,
+            "search_method": "向量 + BM25",
+            "results_count": len(topic_nodes),
+        }]
 
         if not all_topic_nodes:
             logger.info("[IntentMatch] No topic nodes found")
@@ -782,7 +724,6 @@ class GraphToolsService:
                 "topics": [],
                 "total_topics": 0,
                 "retrieval_process": {
-                    "keywords": keywords,
                     "search_steps": search_step_results,
                     "merged_candidates": 0,
                     "reranked_topics": 0,
@@ -966,7 +907,6 @@ class GraphToolsService:
             "topics": result_topics,
             "total_topics": len(result_topics),
             "retrieval_process": {
-                "keywords": keywords,
                 "search_steps": search_step_results,
                 "merged_candidates": len(all_topic_nodes),
                 "reranked_topics": len(scored_topics),

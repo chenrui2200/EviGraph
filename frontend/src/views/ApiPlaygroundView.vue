@@ -234,28 +234,12 @@
                     <div class="rp-step">
                       <div class="rp-dot">1</div>
                       <div class="rp-content">
-                        <div class="rp-label">LLM 提取关键词</div>
-                        <div class="rp-tags">
-                          <span
-                            v-for="(kw, kIdx) in api.responseData?.data?.retrieval_process?.keywords || []"
-                            :key="kIdx"
-                            class="rp-tag"
-                          >{{ kw }}</span>
-                        </div>
+                        <div class="rp-label">Hybrid 检索 Topic（向量 + BM25）</div>
                       </div>
                     </div>
                     <div class="rp-arrow">↓</div>
                     <div class="rp-step">
                       <div class="rp-dot">2</div>
-                      <div class="rp-content">
-                        <div class="rp-label">
-                          并行 {{ api.responseData?.data?.retrieval_process?.search_steps?.length || 0 }} 路搜索 Topic
-                        </div>
-                      </div>
-                    </div>
-                    <div class="rp-arrow">↓</div>
-                    <div class="rp-step">
-                      <div class="rp-dot">3</div>
                       <div class="rp-content">
                         <div class="rp-label">合并去重 + bge-reranker 重排</div>
                       </div>
@@ -352,7 +336,7 @@ const apiList = ref([
     id: 'public-query',
     method: 'POST',
     path: '/api/report/public-query',
-    summary: '公共查询',
+    summary: '精确命中',
     description: '无需认证，通过 app_id 获取应用配置并执行检索，返回条款文本、PDF 来源、bbox 位置等信息。',
     url: `${baseUrl}/api/report/public-query`,
     responseType: 'clause-list',
@@ -367,7 +351,7 @@ const apiList = ref([
     method: 'GET',
     path: '/api/report/kb-words-pool',
     summary: '知识实体词池',
-    description: '返回项目知识实体词池 (kb_words_pool.md) 的纯文本内容，用于调试和查看项目提取的 Topic、实体等信息。',
+    description: '返回项目知识实体词池 (kb_words_pool.json) 的 JSON 内容，用于调试和查看项目提取的 Topic、实体等信息。结构：{pdf名称: {topics: [{topic, entities}]}}',
     url: `${baseUrl}/api/report/kb-words-pool`,
     responseType: 'text-plain',
     parameters: [
@@ -376,12 +360,12 @@ const apiList = ref([
     form: { app_id: appId },
   }),
   createApiState({
-    id: 'intent-match',
+    id: 'query-topic',
     method: 'POST',
-    path: '/api/report/query-intent-match',
-    summary: '问题意图摘要匹配',
+    path: '/api/report/query-topic',
+    summary: '全量捕获',
     description: 'hybrid 检索 Topic 节点（向量 + BM25），bge-reranker 重排，获取每个 Top Topic 关联的 Entity / Term 及 Clause。',
-    url: `${baseUrl}/api/report/query-intent-match`,
+    url: `${baseUrl}/api/report/query-topic`,
     responseType: 'intent-match',
     parameters: [
       { name: 'app_id', type: 'string', required: true, in: 'body', description: '应用 ID（已自动填充）', readonly: true },

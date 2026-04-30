@@ -58,7 +58,7 @@ def search_object_first():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@report_bp.route('/query-intent-match', methods=['POST'])
+@report_bp.route('/query-topic', methods=['POST'])
 def query_intent_match():
     """
     问题意图摘要匹配：
@@ -170,7 +170,7 @@ def query_intent_match():
 @report_bp.route('/kb-words-pool', methods=['GET'])
 def kb_words_pool():
     """
-    返回知识实体词池 (kb_words_pool.md) 的纯文本内容。
+    返回知识实体词池 (kb_words_pool.json) 的 JSON 内容。
 
     Query params:
         app_id: str (preferred) - 应用ID，自动解析关联项目
@@ -211,15 +211,15 @@ def kb_words_pool():
 
     import os
     file_path = os.path.join(
-        os.path.dirname(__file__), '../../uploads/projects', project_id, 'kb_words_pool.md'
+        os.path.dirname(__file__), '../../uploads/projects', project_id, 'kb_words_pool.json'
     )
     if not os.path.exists(file_path):
-        return jsonify({"success": False, "error": f"kb_words_pool.md not found for project {project_id}"}), 404
+        return jsonify({"success": False, "error": f"kb_words_pool.json not found for project {project_id}"}), 404
 
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        return content, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+            data = json.load(f)
+        return jsonify({"success": True, "data": data}), 200
     except Exception as e:
         logger.error(f"kb_words_pool read failed: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500

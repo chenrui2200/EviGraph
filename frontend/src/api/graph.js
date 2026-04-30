@@ -174,7 +174,7 @@ export function rerankFacts(data) {
  */
 export function queryIntentMatch(data) {
   return service({
-    url: '/api/report/query-intent-match',
+    url: '/api/report/query-topic',
     method: 'post',
     data
   })

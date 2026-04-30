@@ -38,9 +38,28 @@
       </div>
     </header>
 
-    <!-- Canvas Area -->
+    <!-- Tab Navigation -->
+    <div class="tab-bar">
+      <button
+        class="tab-btn"
+        :class="{ active: activeTab === 'workflow' }"
+        @click="activeTab = 'workflow'"
+      >
+        精确命中
+      </button>
+      <button
+        class="tab-btn"
+        :class="{ active: activeTab === 'intentMatch' }"
+        @click="activeTab = 'intentMatch'"
+      >
+        全量捕获
+      </button>
+    </div>
+
     <div class="main-container">
-      <div class="canvas-area" ref="canvas" @mousemove="handleDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
+      <!-- Workflow Tab -->
+      <template v-if="activeTab === 'workflow'">
+        <div class="canvas-area" ref="canvas" @mousemove="handleDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
         <svg class="connections-svg">
           <path v-for="(conn, idx) in connections" :key="idx" :d="getConnectionPath(conn)" class="conn-path" />
         </svg>
@@ -360,6 +379,21 @@
         :page-height="currentDoc.pageHeight"
         :pdf-bboxes="currentDoc.pdfBboxes"
       />
+      </template>
+
+      <!-- 全量捕获 Tab -->
+      <template v-else>
+        <IntentMatchView
+          :graph-id="workflowData.selectedGraphIds[0] || ''"
+          :topic-limit="workflowData.intentMatch.topicLimit"
+          :entity-limit="workflowData.intentMatch.entityLimit"
+          :rerank-min-score="workflowData.intentMatch.rerankMinScore"
+          :show-header="false"
+          @update:topic-limit="v => workflowData.intentMatch.topicLimit = v"
+          @update:entity-limit="v => workflowData.intentMatch.entityLimit = v"
+          @update:rerank-min-score="v => workflowData.intentMatch.rerankMinScore = v"
+        />
+      </template>
     </div> <!-- End Main Container -->
 
     <!-- Knowledge Base Tools Dialog -->
@@ -559,6 +593,7 @@ import { getProjectList, updateProject, rerankFacts } from '../api/graph'
 import { hitTestSearch } from '../composables/useHitTestSearch'
 import { saveApp, getApp, publishApp } from '../api/ai_app'
 import PdfViewer from '../components/PdfViewer.vue'
+import IntentMatchView from './IntentMatchView.vue'
 
 const props = defineProps({
   id: String
@@ -576,6 +611,7 @@ const showApiModal = ref(false)
 const projectListLoading = ref(false)
 const projects = ref([])
 const activeNodeId = ref(null)
+const activeTab = ref('workflow')
 
 // App State
 const appId = ref(props.id?.startsWith('app_') ? props.id : null)
@@ -921,10 +957,15 @@ const workflowData = ref({
   query: '',
   selectedGraphIds: [],
   temperature: 0.7,
-  similarityThreshold: 0,    // 相似度阈值：检索后预过滤，减少 reranking 数量（与 hit-test 对齐，默认0不过滤）
-  topK: 5,                 // top_k：bge-reranker-v2-m3 精排后保留得分最高的 K 条
-  rerankMinScore: 0,        // 重排分数阈值：低于此分数的 facts 会被过滤（默认0）
-  rootTypes: ['Entity', 'Term'],  // 根节点类型（与 hit-test 对齐）
+  similarityThreshold: 0,
+  topK: 5,
+  rerankMinScore: 0,
+  rootTypes: ['Entity', 'Term'],
+  intentMatch: {
+    topicLimit: 50,
+    entityLimit: 50,
+    rerankMinScore: 0,
+  },
 })
 
 const results = ref({
@@ -3143,5 +3184,36 @@ onUnmounted(() => {
   border-radius: 50%;
   animation: spin 1s linear infinite;
   display: inline-block;
+}
+
+/* Tab Bar */
+.tab-bar {
+  display: flex;
+  background: #fff;
+  border-bottom: 1px solid #e0e0e0;
+  padding: 0 20px;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.tab-btn {
+  padding: 10px 20px;
+  border: none;
+  background: none;
+  font-size: 14px;
+  font-weight: 600;
+  color: #606266;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  color: #000;
+}
+
+.tab-btn.active {
+  color: #000;
+  border-bottom-color: #000;
 }
 </style>
