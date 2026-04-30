@@ -172,9 +172,12 @@ def kb_words_pool():
     """
     返回知识实体词池 (kb_words_pool.json) 的 JSON 内容。
 
+    当传入 app_id 时，自动聚合该应用关联的**所有**项目词池数据。
+    相同 topic 下的 entities 会自动去重合并。
+
     Query params:
-        app_id: str (preferred) - 应用ID，自动解析关联项目
-        project_id: str (alternative) - 直接指定项目ID
+        app_id: str (preferred) - 应用ID，自动解析关联所有项目并聚合
+        project_id: str (alternative) - 直接指定单个项目ID
     """
     app_id = request.args.get('app_id', '')
     project_id = request.args.get('project_id', '')
@@ -182,9 +185,14 @@ def kb_words_pool():
     if not app_id and not project_id:
         return jsonify({"success": False, "error": "app_id or project_id is required"}), 400
 
+    import os
+    from ..models.project import ProjectManager
+
+    # 收集需要读取的项目ID列表
+    project_ids: list = []
+
     if app_id:
         from ..models.ai_app import AiAppManager
-        from ..models.project import ProjectManager
         app = AiAppManager.get_app(app_id)
         if not app:
             return jsonify({"success": False, "error": "Application not found"}), 404
@@ -194,35 +202,125 @@ def kb_words_pool():
             for pid in saved_project_ids:
                 proj = ProjectManager.get_project(pid)
                 if proj:
-                    project_id = proj.project_id
-                    break
-        if not project_id:
+                    project_ids.append(proj.project_id)
+        if not project_ids:
             graph_ids = wf.get('selectedGraphIds', [])
             if graph_ids:
-                # Try to find project by graph_id
                 all_projects = ProjectManager.list_projects()
                 for proj in all_projects:
                     if getattr(proj, 'graph_id', None) in graph_ids:
-                        project_id = proj.project_id
-                        break
+                        project_ids.append(proj.project_id)
+    elif project_id:
+        project_ids = [project_id]
 
-    if not project_id:
+    if not project_ids:
         return jsonify({"success": False, "error": "No project found for the given app"}), 404
 
-    import os
-    file_path = os.path.join(
-        os.path.dirname(__file__), '../../uploads/projects', project_id, 'kb_words_pool.json'
-    )
-    if not os.path.exists(file_path):
-        return jsonify({"success": False, "error": f"kb_words_pool.json not found for project {project_id}"}), 404
+    # 聚合所有项目的 kb_words_pool.json
+    merged_pdfs: dict = {}           # pdf_key -> { "topics": [...] }
+    topic_entities_map: dict = {}    # topic_text -> set(entity_names)
+    total_clauses = 0
+    success_count = 0
+    missing_projects: list = []
 
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return jsonify({"success": True, "data": data}), 200
-    except Exception as e:
-        logger.error(f"kb_words_pool read failed: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
+    for pid in project_ids:
+        file_path = os.path.join(
+            os.path.dirname(__file__), '../../uploads/projects', pid, 'kb_words_pool.json'
+        )
+        if not os.path.exists(file_path):
+            missing_projects.append(pid)
+            continue
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.warning(f"kb_words_pool read failed for project {pid}: {e}")
+            missing_projects.append(pid)
+            continue
+
+        # 累加 meta
+        meta = data.get("_meta", {})
+        total_clauses += meta.get("total_clauses", 0)
+
+        # 合并各 PDF 的 topics
+        for key, val in data.items():
+            if key == "_meta":
+                continue
+            topics = val.get("topics", [])
+            for t in topics:
+                topic_text = t.get("topic", "").strip()
+                if not topic_text:
+                    continue
+                if topic_text not in topic_entities_map:
+                    topic_entities_map[topic_text] = set()
+                for ent in t.get("entities", []):
+                    ent_name = ent.strip() if isinstance(ent, str) else str(ent).strip()
+                    if ent_name:
+                        topic_entities_map[topic_text].add(ent_name)
+
+            # 保留原始 PDF 粒度的 topics 列表（去重后会在下面重新组装）
+            if key not in merged_pdfs:
+                merged_pdfs[key] = {"topics": []}
+            merged_pdfs[key]["topics"].extend(topics)
+
+        success_count += 1
+
+    if success_count == 0:
+        return jsonify({
+            "success": False,
+            "error": f"kb_words_pool.json not found for any project: {missing_projects}"
+        }), 404
+
+    # 按 topic 去重后组装全局 topics 列表
+    topics_list = []
+    for topic_text in sorted(topic_entities_map.keys()):
+        topics_list.append({
+            "topic": topic_text,
+            "entities": sorted(topic_entities_map[topic_text])
+        })
+
+    # 组装最终返回结构：保留各 PDF 粒度，同时提供聚合后的全局视图
+    result_data: dict = {}
+    for pdf_key, pdf_val in merged_pdfs.items():
+        # 对该 PDF 下的 topics 也做去重合并
+        pdf_topic_map: dict = {}
+        for t in pdf_val["topics"]:
+            topic_text = t.get("topic", "").strip()
+            if not topic_text:
+                continue
+            if topic_text not in pdf_topic_map:
+                pdf_topic_map[topic_text] = set()
+            for ent in t.get("entities", []):
+                ent_name = ent.strip() if isinstance(ent, str) else str(ent).strip()
+                if ent_name:
+                    pdf_topic_map[topic_text].add(ent_name)
+
+        result_data[pdf_key] = {
+            "topics": [
+                {"topic": tt, "entities": sorted(ee)}
+                for tt, ee in sorted(pdf_topic_map.items())
+            ]
+        }
+
+    from datetime import datetime
+    result_data["_meta"] = {
+        "app_id": app_id or None,
+        "project_ids": project_ids,
+        "projects_loaded": success_count,
+        "projects_missing": missing_projects,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "total_clauses": total_clauses,
+        "total_topics": len(topics_list),
+        "total_entities": sum(len(t["entities"]) for t in topics_list),
+    }
+
+    # 新增聚合视图入口
+    result_data["_aggregated"] = {
+        "topics": topics_list
+    }
+
+    return jsonify({"success": True, "data": result_data}), 200
 
 
 @report_bp.route('/tools/search-entity-topic-clause', methods=['POST'])
