@@ -879,8 +879,18 @@ class GraphToolsService:
             # Keep only top entity_limit per topic
             associated = associated[:entity_limit]
 
-            # Get associated clauses for this topic
-            clauses = topic_clause_map.get(t_uuid, [])
+            # Get associated clauses for this topic (deduplicate by clause_id)
+            raw_clauses = topic_clause_map.get(t_uuid, [])
+            seen_clause_keys = set()
+            clauses = []
+            for c in raw_clauses:
+                cid = c.get("clause_id")
+                # 无 clause_id 时退化为按 uuid 去重，避免误丢
+                key = cid if cid else f"__uuid__:{c.get('uuid')}"
+                if key in seen_clause_keys:
+                    continue
+                seen_clause_keys.add(key)
+                clauses.append(c)
 
             result_topics.append({
                 "uuid": t_uuid,
