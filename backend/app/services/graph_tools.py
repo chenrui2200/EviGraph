@@ -849,6 +849,46 @@ class GraphToolsService:
                 seen_entity_uuids.add(uid)
                 unique_entities.append(e)
 
+        # Step 3.5: Batch query related Table / Image nodes for all associated clauses
+        all_clause_uuids = []
+        for clauses in topic_clause_map.values():
+            for c in clauses:
+                cu = c.get("uuid")
+                if cu:
+                    all_clause_uuids.append(cu)
+        all_clause_uuids = list(set(all_clause_uuids))
+
+        clause_rel_map: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        if all_clause_uuids:
+            try:
+                with self.storage._driver.session() as session:
+                    rel_result = session.run(
+                        """
+                        UNWIND $clause_uuids AS cu
+                        MATCH (c:Clause {uuid: cu})-[r:MENTIONS]->(n)
+                        WHERE n:Table OR n:Image
+                        RETURN cu AS clause_uuid,
+                               collect(DISTINCT CASE WHEN n:Table THEN {
+                                   uuid: n.uuid, caption: n.caption, table_id: n.table_id,
+                                   table_content: n.table_content, table_image_base64_content: n.table_image_base64_content,
+                                   table_img_path: n.table_img_path, bbox_pdf: n.bbox_pdf,
+                                   bbox_viewport: n.bbox_viewport
+                               } END) AS tables,
+                               collect(DISTINCT CASE WHEN n:Image THEN {
+                                   uuid: n.uuid, caption: n.caption, content: n.content,
+                                   img_path: n.img_path
+                               } END) AS images
+                        """,
+                        clause_uuids=all_clause_uuids,
+                    )
+                    for record in rel_result:
+                        cu = record.get("clause_uuid")
+                        tables = [t for t in record.get("tables", []) if t]
+                        images = [i for i in record.get("images", []) if i]
+                        clause_rel_map[cu] = {"tables": tables, "images": images}
+            except Exception as e:
+                logger.warning(f"[IntentMatch] Failed to query related tables/images: {e}")
+
         # Step 4: Rerank all unique entities against the query
         entity_items = [(e, f"{e.get('name', '')} {e.get('summary', '')}") for e in unique_entities]
         scored_entity_map: Dict[str, float] = {}
@@ -890,6 +930,10 @@ class GraphToolsService:
                 if key in seen_clause_keys:
                     continue
                 seen_clause_keys.add(key)
+                cu = c.get("uuid")
+                rel_data = clause_rel_map.get(cu, {})
+                c["related_tables"] = rel_data.get("tables", [])
+                c["related_images"] = rel_data.get("images", [])
                 clauses.append(c)
 
             result_topics.append({

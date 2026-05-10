@@ -2145,24 +2145,30 @@ class Neo4jStorage(GraphStorage):
                             tables = m.get("referenced_tables", [])
                             if isinstance(tables, list):
                                 for tbl in tables:
-                                    table_id = tbl.get("table_id", "") if isinstance(tbl, dict) else ""
-                                    if not table_id:
+                                    if not isinstance(tbl, dict):
                                         continue
+                                    table_id = tbl.get("table_id", "")
+                                    chunk_id = tbl.get("chunk_id", "")
+                                    # 任一字段不空即入图：兼容 LLM 未识别 table_id 的情况
+                                    if not (table_id or chunk_id):
+                                        continue
+                                    # uuid 种子：优先 table_id，回退 chunk_id（保证同一引用稳定去重）
+                                    seed_key = table_id or chunk_id
                                     tbl_uuid = str(uuid.UUID(hashlib.md5(
-                                        f"{graph_id}:{table_id}:table".encode()).hexdigest()))
+                                        f"{graph_id}:{seed_key}:table".encode()).hexdigest()))
                                     all_tables.append({
                                         "uuid": tbl_uuid,
                                         "graph_id": graph_id,
                                         "table_id": table_id,
-                                        "caption": tbl.get("caption", "") if isinstance(tbl, dict) else "",
-                                        "chunk_id": tbl.get("chunk_id", "") if isinstance(tbl, dict) else "",
-                                        "page_idx": tbl.get("page_idx", 0) if isinstance(tbl, dict) else 0,
-                                        "bbox_pdf": json.dumps(tbl.get("bbox_pdf", []), ensure_ascii=False) if isinstance(tbl, dict) else "[]",
-                                        "bbox_viewport": json.dumps(tbl.get("bbox_viewport", []), ensure_ascii=False) if isinstance(tbl, dict) else "[]",
-                                        "table_content": tbl.get("table_content", "") if isinstance(tbl, dict) else "",
-                                        "table_img_path": tbl.get("table_img_path", "") if isinstance(tbl, dict) else "",
-                                        "table_footnote": tbl.get("table_footnote", "") if isinstance(tbl, dict) else "",
-                                        "table_image_base64_content": tbl.get("table_image_base64_content", "") if isinstance(tbl, dict) else "",
+                                        "caption": tbl.get("caption", ""),
+                                        "chunk_id": chunk_id,
+                                        "page_idx": tbl.get("page_idx", 0),
+                                        "bbox_pdf": json.dumps(tbl.get("bbox_pdf", []), ensure_ascii=False),
+                                        "bbox_viewport": json.dumps(tbl.get("bbox_viewport", []), ensure_ascii=False),
+                                        "table_content": tbl.get("table_content", ""),
+                                        "table_img_path": tbl.get("table_img_path", ""),
+                                        "table_footnote": tbl.get("table_footnote", ""),
+                                        "table_image_base64_content": tbl.get("table_image_base64_content", ""),
                                     })
                                     clause_table_pairs.append({"clause_id": cid, "tbl_uuid": tbl_uuid})
 

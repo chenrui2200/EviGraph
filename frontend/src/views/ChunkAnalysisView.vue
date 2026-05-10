@@ -433,7 +433,7 @@
                       </div>
 
                       <!-- 知识实体 -->
-                      <div class="clause-entities-section" v-if="clause.topics?.length || clause.related_elements?.length || clause.images?.length">
+                      <div class="clause-entities-section" v-if="clause.topics?.length || clause.related_elements?.length || clause.images?.length || clause.referenced_tables?.length">
                         <!-- 多主题分组展示 -->
                         <template v-if="clause.topics?.length > 1">
                           <div class="entity-section-label">📝 主题分析</div>
@@ -478,6 +478,7 @@
                         <div v-if="clause.images?.length" class="clause-images-section">
                           <div class="entity-section-label">🖼️ 图片分析</div>
                           <div v-for="(img, ii) in clause.images" :key="'img-' + ii" class="clause-image-item">
+                            <div class="media-type-badge media-type-image">图片</div>
                             <div v-if="img.caption" class="image-caption">{{ img.caption }}</div>
                             <div v-if="img.content" class="image-preview">
                               <img :src="img.content" :alt="img.caption || '图片'" style="max-width: 200px; max-height: 150px; object-fit: contain; border: 1px solid #ddd; border-radius: 4px;" />
@@ -491,6 +492,22 @@
                               <span class="vlm-error">{{ img.vlm_status }}</span>
                             </div>
                           </div>
+                        </div>
+                        <!-- 引用表格图片 -->
+                        <div v-if="clause.referenced_tables?.length" class="clause-tables-section">
+                          <div class="entity-section-label">📊 引用表格</div>
+                          <template v-for="(tb, ti2) in clause.referenced_tables" :key="'tb-' + ti2">
+                            <div v-if="tb && typeof tb === 'object' && (tb.table_image_base64_content || tb.table_id || tb.caption)" class="clause-image-item">
+                              <div class="media-type-badge media-type-table">表格</div>
+                              <div v-if="tb.table_id || tb.caption" class="image-caption">
+                                <span v-if="tb.table_id" class="table-id">{{ tb.table_id }}</span>
+                                <span v-if="tb.caption"> {{ tb.caption }}</span>
+                              </div>
+                              <div v-if="tb.table_image_base64_content" class="image-preview">
+                                <img :src="tb.table_image_base64_content" :alt="tb.table_id || tb.caption || '表格'" style="max-width: 240px; max-height: 180px; object-fit: contain; border: 1px solid #ddd; border-radius: 4px;" />
+                              </div>
+                            </div>
+                          </template>
                         </div>
                       </div>
                     </div>
@@ -2167,6 +2184,20 @@ header.ca-header {
 .topic-group-title { font-size: 12px; font-weight: 600; color: #1e3a8a; }
 .topic-group-entities { padding: 6px 8px; }
 .topic-empty { font-size: 11px; color: #9ca3af; font-style: italic; padding: 2px 0; }
+
+/* 媒体（图片/表格）展示 */
+.clause-images-section, .clause-tables-section { margin-top: 8px; }
+.clause-image-item { position: relative; margin: 6px 0 10px; padding: 6px 8px 8px; background: #fafafa; border: 1px solid #f0f0f0; border-radius: 6px; }
+.media-type-badge { display: inline-block; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; margin-bottom: 4px; }
+.media-type-image { color: #0369a1; background: #e0f2fe; border: 1px solid #bae6fd; }
+.media-type-table { color: #b45309; background: #fef3c7; border: 1px solid #fde68a; }
+.image-caption { font-size: 11px; color: #4b5563; margin-bottom: 6px; line-height: 1.4; }
+.image-caption .table-id { color: #b45309; font-weight: 600; margin-right: 4px; }
+.image-preview { display: flex; align-items: flex-start; }
+.vlm-content { font-size: 11px; color: #374151; margin-top: 4px; line-height: 1.5; }
+.vlm-label { color: #6b7280; margin-right: 4px; }
+.vlm-status-error { font-size: 11px; color: #b91c1c; margin-top: 4px; }
+.vlm-error { color: #b91c1c; }
 .entity-item-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 11px; }
 .entity-type-tag { padding: 1px 6px; border-radius: 4px; font-size: 10px; background: #e5e7eb; color: #6b7280; font-weight: 600; }
 .entity-key { color: #1a1a2e; font-weight: 500; }
