@@ -94,8 +94,46 @@ def generate_ontology():
             shutil.rmtree(ProjectManager._get_project_dir(project.project_id), ignore_errors=True)
             return jsonify({"success": False, "error": "No valid files uploaded"}), 400
 
-        # 5. 保存项目元数据
+        # 5. Word 文件统一转换为 PDF，以便共享后续 MinerU 解析逻辑
+        from ..utils.word_converter import convert_word_to_pdf
+        _word_exts = {'.doc', '.docx'}
+        converted_files = []
+        for f in saved_files:
+            orig_name = f["original_filename"]
+            ext = os.path.splitext(orig_name)[1].lower()
+            if ext in _word_exts:
+                try:
+                    pdf_path = convert_word_to_pdf(f["path"])
+                    pdf_name = os.path.splitext(orig_name)[0] + ".pdf"
+                    converted_files.append({
+                        "original_filename": pdf_name,
+                        "saved_filename": os.path.basename(pdf_path),
+                        "path": pdf_path,
+                        "size": os.path.getsize(pdf_path)
+                    })
+                    # 更新原始文件条目，path 指向 PDF，original_filename 也改为 .pdf
+                    f["original_filename"] = pdf_name
+                    f["path"] = pdf_path
+                    f["saved_filename"] = os.path.basename(pdf_path)
+                    f["size"] = os.path.getsize(pdf_path)
+                    logger.info(f"[Word→PDF] 转换成功: {orig_name} → {pdf_name}")
+                except Exception as conv_err:
+                    logger.error(f"[Word→PDF] 转换失败: {orig_name}, error: {conv_err}")
+                    raise RuntimeError(
+                        f"Word 文件转换为 PDF 失败: {orig_name}。"
+                        "请确保已安装 LibreOffice (soffice) 或上传 PDF 文件。"
+                    ) from conv_err
+            else:
+                converted_files.append(f)
+
+        # 同步 project.files，确保后台任务使用转换后的 PDF 路径
+        project.files = [{
+            "filename": fi["original_filename"],
+            "path": fi["path"],
+            "size": fi["size"]
+        } for fi in converted_files]
         ProjectManager.save_project(project)
+        saved_files = converted_files
 
         # Create task
         task_manager = TaskManager()
@@ -214,7 +252,7 @@ def generate_ontology():
                         continue
 
                     # 使用 graph._parse_mineru_jsonl 解析 chunks
-                    file_chunks = _parse_mineru_jsonl(jsonl_path, orig_name)
+                    file_chunks = _parse_mineru_jsonl(jsonl_path, orig_name, pdf_path)
                     for c in file_chunks:
                         c["chunk_id"] = f"chunk_{idx}_{c['chunk_id'].split('_', 1)[-1]}"
                     all_chunks.extend(file_chunks)
@@ -287,6 +325,9 @@ def generate_ontology():
         })
 
     except Exception as e:
+        import sys
+        print(f"[EXCEPTION] generate_ontology FAILED: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         logger.error(f"API Error: {str(e)}\n{traceback.format_exc()}")
         if 'project' in dir() and project and project.project_id:
             try:

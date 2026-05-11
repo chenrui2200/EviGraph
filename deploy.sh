@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+git pull
 # 如果用户误用 sh 执行，自动切换到 bash
 if [ -z "${BASH_VERSION:-}" ]; then
     exec bash "$0" "$@"
@@ -8,6 +9,10 @@ set -euo pipefail
 # =============================================
 # Knowledge EviGraph 一键部署脚本
 # 用法: 将项目放到 Linux 机器上，执行 bash deploy.sh
+#
+# 首次部署: 构建完整镜像并打 tag 为 base
+# 后续部署: 仅同步代码到运行中的容器，重启服务（跳过依赖层重建）
+# 强制重建: bash deploy.sh --force-rebuild
 # =============================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,13 +22,25 @@ cd "${SCRIPT_DIR}"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-info() { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+step()  { echo -e "${CYAN}[STEP]${NC}  $*"; }
 
-# 检查 Docker
+# =============================================
+# 参数解析
+# =============================================
+FORCE_REBUILD=false
+if [[ "${1:-}" == "--force-rebuild" ]]; then
+    FORCE_REBUILD=true
+fi
+
+# =============================================
+# Docker 检查
+# =============================================
 if ! command -v docker &>/dev/null; then
     error "Docker 未安装，请先安装 Docker: https://docs.docker.com/engine/install/"
     exit 1
@@ -41,11 +58,37 @@ fi
 
 info "使用 Compose 命令: ${COMPOSE_CMD}"
 
-# 创建必要的本地持久化目录
+# =============================================
+# 系统依赖检查（仅 Linux）
+# =============================================
+if [[ "$(uname -s)" == "Linux" ]]; then
+    info "检查系统依赖..."
+    if ! command -v soffice &>/dev/null; then
+        if command -v apt-get &>/dev/null; then
+            # 检查是否有 root/sudo 权限
+            if [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; then
+                warn "LibreOffice (soffice) 未安装，正在安装..."
+                apt-get update -qq && apt-get install -y --no-install-recommends libreoffice-writer
+                info "LibreOffice 安装完成"
+            else
+                warn "LibreOffice (soffice) 未安装（缺少 root 权限，跳过自动安装）"
+                info "Docker 容器内已包含 LibreOffice，勿需担心。也可手动安装: sudo apt-get install libreoffice-writer"
+            fi
+        else
+            warn "LibreOffice (soffice) 未安装，apt-get 不可用"
+            info "如需安装: https://www.libreoffice.org/download/download/"
+        fi
+    else
+        info "LibreOffice 已安装: $(soffice --version 2>/dev/null || echo 'soffice found')"
+    fi
+fi
+
 mkdir -p backend/uploads
 info "已确保目录存在: backend/uploads"
 
-# 检查 .env 文件
+# =============================================
+# .env 检查
+# =============================================
 if [ ! -f ".env" ]; then
     if [ -f ".env.example" ]; then
         cp .env.example .env
@@ -62,15 +105,110 @@ if [ ! -f ".env" ]; then
     fi
 fi
 
-# 构建并启动服务
-info "开始构建镜像 knowledge-evigraph:latest ..."
-${COMPOSE_CMD} build --no-cache
+# =============================================
+# 镜像是否存在（决定走首次构建还是代码同步）
+# =============================================
+BASE_IMAGE="knowledge-evigraph:base"
+LATEST_IMAGE="knowledge-evigraph:latest"
+CONTAINER_NAME="knowledge-evigraph"
 
-info "启动服务..."
-${COMPOSE_CMD} up -d
+check_base_exists() {
+    docker image inspect "${BASE_IMAGE}" &>/dev/null
+}
 
-# 等待服务就绪
-info "等待服务健康检查（约 10-30 秒）..."
+# =============================================
+# 构建策略
+# =============================================
+if $FORCE_REBUILD; then
+    # --force-rebuild: 删除旧镜像，重新完整构建
+    step "强制重建模式，删除旧镜像..."
+    docker rmi "${BASE_IMAGE}" "${LATEST_IMAGE}" 2>/dev/null || true
+    step "完整构建镜像 (知识图谱 base 层 + 代码层，--no-cache 确保最新)..."
+    ${COMPOSE_CMD} build --no-cache
+    docker tag "${LATEST_IMAGE}" "${BASE_IMAGE}"
+    info "Base 镜像已更新: ${BASE_IMAGE}"
+    RESTART_MODE="recreate"
+
+elif check_base_exists; then
+    # 有 base 镜像：仅同步代码到运行中容器
+    step "检测到 base 镜像 '${BASE_IMAGE}'，进入增量部署模式"
+
+    # 容器是否在运行
+    if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+        # 检查 requirements.txt 是否有新增依赖（通过 hash 判断）
+        REQ_CUR_SHA="$(sha256sum backend/requirements.txt 2>/dev/null | cut -d' ' -f1)"
+        REQ_CONTAINER_SHA="$(docker exec "${CONTAINER_NAME}" sha256sum /usr/local/lib/python3.12/site-packages/requirements.txt 2>/dev/null | cut -d' ' -f1 || echo "")"
+
+        REQS_CHANGED=false
+        if [ -n "$REQ_CUR_SHA" ] && [ "$REQ_CUR_SHA" != "$REQ_CONTAINER_SHA" ]; then
+            REQS_CHANGED=true
+        fi
+
+        if $REQS_CHANGED; then
+            step "检测到 requirements.txt 有变更，执行依赖更新..."
+            docker cp backend/requirements.txt "${CONTAINER_NAME}:/usr/local/lib/python3.12/site-packages/requirements.txt"
+            docker exec "${CONTAINER_NAME}" pip install --no-cache-dir -r /usr/local/lib/python3.12/site-packages/requirements.txt
+            info "依赖安装完成"
+        fi
+
+        step "同步代码到容器..."
+
+        # 清理旧的前端构建产物（容器内root创建的，用docker容器来清理避免宿主机权限不足）
+        docker run --rm \
+            -v "$(pwd)/frontend/dist:/target" \
+            --entrypoint /bin/sh \
+            alpine:latest \
+            -c "rm -rf /target/* /target/.* 2>/dev/null; exit 0" \
+            2>/dev/null || true
+        mkdir -p frontend/dist
+
+        # 前端 rebuild（利用 Stage 1 Node.js，靠 cache 自动判断变更层）
+        step "前端 rebuild（利用 Docker 缓存）..."
+        ${COMPOSE_CMD} build
+        docker tag "${LATEST_IMAGE}" "${BASE_IMAGE}"
+
+        # 从镜像提取 dist 到宿主机（先清理避免旧文件残留），再 cp 到运行中容器
+        step "从镜像提取新 dist 到运行中容器..."
+        docker run --rm \
+            -v "$(pwd)/frontend/dist:/dist_out" \
+            --entrypoint /bin/sh \
+            "${LATEST_IMAGE}" \
+            -c "cp -r /app/frontend/dist/. /dist_out/ 2>/dev/null || true"
+        docker cp frontend/dist/. "${CONTAINER_NAME}:/app/frontend/dist/"
+
+        # 同步后端代码 + 配置文件
+        docker cp backend/. "${CONTAINER_NAME}:/app/backend/"
+        [ -f nginx.conf ]       && docker cp nginx.conf "${CONTAINER_NAME}:/etc/nginx/nginx.conf"
+        [ -f supervisord.conf ] && docker cp supervisord.conf "${CONTAINER_NAME}:/etc/supervisor/conf.d/supervisord.conf"
+        # .env 文件可能被运行中的进程占用，先复制到临时文件再 mv 替换
+        if [ -f .env ]; then
+            docker cp .env "${CONTAINER_NAME}:/app/.env.tmp"
+            docker exec "${CONTAINER_NAME}" sh -c "cat /app/.env.tmp > /app/.env && rm -f /app/.env.tmp"
+        fi
+
+        step "代码已同步，重启服务..."
+        docker restart "${CONTAINER_NAME}"
+    else
+        warn "容器未运行，以增量模式启动新容器..."
+        ${COMPOSE_CMD} up -d --no-build
+    fi
+    RESTART_MODE="restart"
+
+else
+    # 无 base 镜像：首次完整构建
+    step "首次部署，完整构建镜像并打 tag 为 base..."
+    ${COMPOSE_CMD} build --no-cache
+    docker tag "${LATEST_IMAGE}" "${BASE_IMAGE}"
+    info "Base 镜像已生成: ${BASE_IMAGE}"
+    step "启动服务..."
+    ${COMPOSE_CMD} up -d
+    RESTART_MODE="recreate"
+fi
+
+# =============================================
+# 健康检查
+# =============================================
+info "等待服务就绪（约 10-30 秒）..."
 for i in {1..30}; do
     if curl -sf http://localhost:5001/api/health &>/dev/null; then
         info "后端服务已就绪"
@@ -78,19 +216,23 @@ for i in {1..30}; do
     fi
     sleep 2
     if [ "$i" -eq 30 ]; then
-        warn "后端服务健康检查超时，请手动查看日志: ${COMPOSE_CMD} logs -f knowledge-evigraph"
+        warn "健康检查超时，请手动查看: ${COMPOSE_CMD} logs -f ${CONTAINER_NAME}"
     fi
 done
 
 echo ""
 echo "==============================================="
 info "部署完成！"
-echo "  - 前端访问: http://<服务器IP>"
-echo "  - 后端 API: http://<服务器IP>:5001"
-echo "  - Neo4j Browser: http://<服务器IP>:7474"
+[ "$RESTART_MODE" == "restart" ] && info "(增量模式: 仅同步代码 + 重启)"
+[ "$RESTART_MODE" == "recreate" ] && info "(全新模式: 完整构建 + 启动)"
+echo "  - 前端访问:  http://<服务器IP>"
+echo "  - 后端 API:  http://<服务器IP>:5001"
+echo "  - Neo4j:    http://<服务器IP>:7474"
+echo "  - Supervisor: http://<服务器IP>:9001 (admin/admin)"
 echo ""
 echo "常用命令:"
-echo "  查看日志: ${COMPOSE_CMD} logs -f knowledge-evigraph"
-echo "  停止服务: ${COMPOSE_CMD} down"
-echo "  重启服务: ${COMPOSE_CMD} restart"
+echo "  查看日志:   ${COMPOSE_CMD} logs -f ${CONTAINER_NAME}"
+echo "  停止服务:   ${COMPOSE_CMD} down"
+echo "  重启服务:   docker restart ${CONTAINER_NAME}"
+echo "  强制重建:   bash deploy.sh --force-rebuild"
 echo "==============================================="

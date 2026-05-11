@@ -8,6 +8,7 @@ services:
     ports:
       - "80:80"
       - "5001:5001"
+      - "9001:9001"
     restart: unless-stopped
     volumes:
       - ./backend/uploads:/app/backend/uploads

@@ -76,6 +76,7 @@ def create_app(config_class=Config):
 
     # Health check
     @app.route('/health')
+    @app.route('/api/health')
     def health():
         from .storage.embedding_service import EmbeddingService
 

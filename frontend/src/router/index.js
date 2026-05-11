@@ -5,6 +5,12 @@ import AiQaView from '../views/AiQaView.vue'
 import HitTestView from '../views/HitTestView.vue'
 import PublicChatView from '../views/PublicChatView.vue'
 import ChunkAnalysisView from '../views/ChunkAnalysisView.vue'
+import KbPipelineLaunchView from '../views/KbPipelineLaunchView.vue'
+import KbPipelineTrackView from '../views/KbPipelineTrackView.vue'
+import GraphSearchView from '../views/GraphSearchView.vue'
+import ApiPlaygroundView from '../views/ApiPlaygroundView.vue'
+import PdfPreviewView from '../views/PdfPreviewView.vue'
+import IntentMatchView from '../views/IntentMatchView.vue'
 
 const routes = [
   {
@@ -40,6 +46,41 @@ const routes = [
     path: '/ai-qa/:id',
     name: 'AiQa',
     component: AiQaView,
+    props: true
+  },
+  {
+    path: '/kb-pipeline',
+    name: 'KbPipelineLaunch',
+    component: KbPipelineLaunchView
+  },
+  {
+    path: '/kb-pipeline/:pipelineId',
+    name: 'KbPipelineTrack',
+    component: KbPipelineTrackView,
+    props: true
+  },
+  {
+    path: '/graph-search/:projectId',
+    name: 'GraphSearch',
+    component: GraphSearchView,
+    props: true
+  },
+  {
+    path: '/playground/:app_id',
+    name: 'ApiPlayground',
+    component: ApiPlaygroundView,
+    props: true
+  },
+  {
+    path: '/preview/:app_id',
+    name: 'PdfPreview',
+    component: PdfPreviewView,
+    props: true
+  },
+  {
+    path: '/intent-match/:projectId',
+    name: 'IntentMatch',
+    component: IntentMatchView,
     props: true
   },
 ]

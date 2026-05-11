@@ -23,6 +23,8 @@ class IndexStatus:
         self.entity_embedding: bool = False
         self.episode_embedding: bool = False
         self.fact_embedding: bool = False
+        self.topic_embedding: bool = False
+        self.clause_embedding: bool = False
         self._checked: bool = False
 
     def check_indexes(self, session: Neo4jSession):
@@ -37,13 +39,17 @@ class IndexStatus:
             self.entity_embedding = "entity_embedding" in existing
             self.episode_embedding = "episode_embedding" in existing
             self.fact_embedding = "fact_embedding" in existing
+            self.topic_embedding = "topic_embedding" in existing
+            self.clause_embedding = "clause_embedding" in existing
 
             if not all([self.entity_embedding, self.episode_embedding, self.fact_embedding]):
                 logger.warning(
                     f"⚠️ Vector indexes missing - using keyword search only. "
                     f"Available: entity={self.entity_embedding}, "
                     f"episode={self.episode_embedding}, "
-                    f"fact={self.fact_embedding}"
+                    f"fact={self.fact_embedding}, "
+                    f"topic={self.topic_embedding}, "
+                    f"clause={self.clause_embedding}"
                 )
             else:
                 logger.info("✅ All vector indexes are available for semantic search")
@@ -126,6 +132,66 @@ WHERE 'Entity' IN labels(n) AND NOT 'Term' IN labels(n)
   AND (toLower(n.name) CONTAINS toLower($keyword)
        OR toLower(n.summary) CONTAINS toLower($keyword))
 RETURN n, 1.0 AS score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
+# Topic node search
+_VECTOR_SEARCH_TOPIC_NODES = """
+CALL db.index.vector.queryNodes('topic_embedding', $limit, $query_vector)
+YIELD node, score
+WHERE node.graph_id = $graph_id AND 'Topic' IN labels(node)
+  AND ($min_score IS NULL OR score >= $min_score)
+RETURN node AS n, score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
+_FULLTEXT_SEARCH_TOPIC_NODES = """
+CALL db.index.fulltext.queryNodes('topic_fulltext', $query_text)
+YIELD node, score
+WHERE node.graph_id = $graph_id AND 'Topic' IN labels(node)
+  AND ($min_score IS NULL OR score >= $min_score)
+RETURN node AS n, score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
+_CONTAINS_SEARCH_TOPIC_NODES = """
+MATCH (t:Topic {graph_id: $graph_id})
+WHERE toLower(t.topic) CONTAINS toLower($keyword)
+   OR toLower(t.name) CONTAINS toLower($keyword)
+RETURN t, 1.0 AS score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
+# Clause node search
+_VECTOR_SEARCH_CLAUSE_NODES = """
+CALL db.index.vector.queryNodes('clause_embedding', $limit, $query_vector)
+YIELD node, score
+WHERE node.graph_id = $graph_id AND 'Clause' IN labels(node)
+  AND ($min_score IS NULL OR score >= $min_score)
+RETURN node AS n, score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
+_FULLTEXT_SEARCH_CLAUSE_NODES = """
+CALL db.index.fulltext.queryNodes('clause_fulltext', $query_text)
+YIELD node, score
+WHERE node.graph_id = $graph_id AND 'Clause' IN labels(node)
+  AND ($min_score IS NULL OR score >= $min_score)
+RETURN node AS n, score
+ORDER BY score DESC
+LIMIT $limit
+"""
+
+_CONTAINS_SEARCH_CLAUSE_NODES = """
+MATCH (c:Clause {graph_id: $graph_id})
+WHERE toLower(c.name) CONTAINS toLower($keyword)
+   OR toLower(c.summary) CONTAINS toLower($keyword)
+RETURN c AS n, 1.0 AS score
 ORDER BY score DESC
 LIMIT $limit
 """
@@ -338,6 +404,7 @@ class SearchService:
         merged = self._merge_results(
             vector_results, keyword_results, key="uuid", limit=limit
         )
+        merged = self._boost_exact_match(merged, query)
         logger.debug(
             f"Object node search '{query}': "
             f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
@@ -459,6 +526,7 @@ class SearchService:
         merged = self._merge_results(
             vector_results, keyword_results, key="uuid", limit=limit
         )
+        merged = self._boost_exact_match(merged, query)
         logger.debug(
             f"Object node search '{query}': "
             f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
@@ -491,7 +559,13 @@ class SearchService:
     def _run_object_node_keyword_search(
         self, session: Neo4jSession, graph_id: str, query: str, limit: int, min_score: float = None
     ) -> List[Dict[str, Any]]:
-        """Run fulltext search on Object entity name + summary with CONTAINS fallback."""
+        """Run fulltext search on Object entity name + summary with CONTAINS fallback.
+
+        修复：不再在任一策略命中后提前返回，而是执行全部策略后合并去重，
+        避免 fulltext 返回少量结果后遗漏 CONTAINS 能命中的节点。
+        """
+        all_results: List[Dict[str, Any]] = []
+
         # Strategy 1: Fulltext index search (primary)
         try:
             safe_query = self._escape_lucene(query)
@@ -508,7 +582,7 @@ class SearchService:
             ]
             if results:
                 logger.debug(f"Object keyword search (fulltext): '{query}' -> {len(results)} results")
-                return results
+                all_results.extend(results)
         except Exception as e:
             logger.debug(f"Object fulltext search failed: {e}")
 
@@ -528,7 +602,7 @@ class SearchService:
             ]
             if results:
                 logger.debug(f"Object keyword search (wildcard): '{query}' -> {len(results)} results")
-                return results
+                all_results.extend(results)
         except Exception as e:
             logger.debug(f"Object wildcard search failed: {e}")
 
@@ -545,12 +619,22 @@ class SearchService:
                 {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
                 for record in result
             ]
-            logger.debug(f"Object keyword search (contains): '{query}' -> {len(results)} results")
-            return results
+            if results:
+                logger.debug(f"Object keyword search (contains): '{query}' -> {len(results)} results")
+                all_results.extend(results)
         except Exception as e:
             logger.debug(f"Object CONTAINS search failed: {e}")
 
-        return []
+        # 去重：按 uuid 保留第一个（fulltext 分数通常更高，优先保留）
+        seen_uuids = set()
+        unique_results = []
+        for r in all_results:
+            uid = r.get("uuid")
+            if uid and uid not in seen_uuids:
+                seen_uuids.add(uid)
+                unique_results.append(r)
+
+        return unique_results[:limit]
 
     def search_term_nodes(
         self,
@@ -587,10 +671,95 @@ class SearchService:
         merged = self._merge_results(
             vector_results, keyword_results, key="uuid", limit=limit
         )
+        merged = self._boost_exact_match(merged, query)
         logger.debug(
             f"Term node search '{query}': "
             f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
             f"merged={len(merged)}, vector_index={'available' if _index_status.entity_embedding else 'N/A'}"
+        )
+        return merged
+
+    def search_topic_nodes(
+        self,
+        session: Neo4jSession,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+        min_score: float = None,
+        query_vector: List[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Search Topic nodes using hybrid scoring (vector + keyword).
+
+        当 Entity/Term 搜索无法命中时，作为 fallback 搜索 Topic 节点，
+        用于提高以 topic 核心词搜索时的召回率。
+        """
+        _index_status.check_indexes(session)
+
+        if query_vector is None:
+            query_vector = self.embedding.embed(query)
+
+        vector_results = []
+        if _index_status.topic_embedding:
+            vector_results = self._run_topic_node_vector_search(
+                session, graph_id, query_vector, limit + 5, min_score
+            )
+        else:
+            logger.debug("Skipping Topic node vector search (index not available)")
+
+        keyword_results = self._run_topic_node_keyword_search(
+            session, graph_id, query, limit + 5, min_score
+        )
+
+        merged = self._merge_results(
+            vector_results, keyword_results, key="uuid", limit=limit
+        )
+        merged = self._boost_exact_match(merged, query)
+        logger.debug(
+            f"Topic node search '{query}': "
+            f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
+            f"merged={len(merged)}, vector_index={'available' if _index_status.topic_embedding else 'N/A'}"
+        )
+        return merged
+
+    def search_clause_nodes(
+        self,
+        session: Neo4jSession,
+        graph_id: str,
+        query: str,
+        limit: int = 10,
+        min_score: float = None,
+        query_vector: List[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Search Clause nodes using hybrid scoring (vector + keyword).
+
+        作为独立召回源，直接搜索 Clause 节点内容，
+        解决 Entity 提取遗漏导致的召回缺口。
+        """
+        _index_status.check_indexes(session)
+
+        if query_vector is None:
+            query_vector = self.embedding.embed(query)
+
+        vector_results = []
+        if _index_status.clause_embedding:
+            vector_results = self._run_clause_node_vector_search(
+                session, graph_id, query_vector, limit + 5, min_score
+            )
+        else:
+            logger.debug("Skipping Clause node vector search (index not available)")
+
+        keyword_results = self._run_clause_node_keyword_search(
+            session, graph_id, query, limit + 5, min_score
+        )
+
+        merged = self._merge_results(
+            vector_results, keyword_results, key="uuid", limit=limit
+        )
+        merged = self._boost_exact_match(merged, query)
+        logger.debug(
+            f"Clause node search '{query}': "
+            f"vector={len(vector_results)}, keyword={len(keyword_results)}, "
+            f"merged={len(merged)}, vector_index={'available' if _index_status.clause_embedding else 'N/A'}"
         )
         return merged
 
@@ -680,6 +849,177 @@ class SearchService:
 
         return []
 
+    def _run_topic_node_vector_search(
+        self, session: Neo4jSession, graph_id: str, query_vector: List[float], limit: int, min_score: float = None
+    ) -> List[Dict[str, Any]]:
+        """Run vector similarity search on Topic embedding."""
+        try:
+            result = session.run(
+                _VECTOR_SEARCH_TOPIC_NODES,
+                graph_id=graph_id,
+                query_vector=query_vector,
+                limit=limit,
+                min_score=min_score,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
+                for record in result
+            ]
+            logger.debug(f"Topic vector search: {len(results)} results (index available)")
+            return results
+        except Exception as e:
+            logger.debug(f"Vector Topic node search failed: {e}")
+            return []
+
+    def _run_topic_node_keyword_search(
+        self, session: Neo4jSession, graph_id: str, query: str, limit: int, min_score: float = None
+    ) -> List[Dict[str, Any]]:
+        """Run fulltext search on Topic topic/name with CONTAINS fallback."""
+        # Strategy 1: Fulltext index search (primary)
+        try:
+            safe_query = self._escape_lucene(query)
+            result = session.run(
+                _FULLTEXT_SEARCH_TOPIC_NODES,
+                graph_id=graph_id,
+                query_text=safe_query,
+                limit=limit,
+                min_score=min_score,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
+                for record in result
+            ]
+            if results:
+                logger.debug(f"Topic keyword search (fulltext): '{query}' -> {len(results)} results")
+                return results
+        except Exception as e:
+            logger.debug(f"Topic fulltext search failed: {e}")
+
+        # Strategy 2: Fulltext index with wildcard (partial match)
+        try:
+            wildcard_query = "*" + self._escape_lucene(query.strip()) + "*"
+            result = session.run(
+                _FULLTEXT_SEARCH_TOPIC_NODES,
+                graph_id=graph_id,
+                query_text=wildcard_query,
+                limit=limit,
+                min_score=min_score,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
+                for record in result
+            ]
+            if results:
+                logger.debug(f"Topic keyword search (wildcard): '{query}' -> {len(results)} results")
+                return results
+        except Exception as e:
+            logger.debug(f"Topic wildcard search failed: {e}")
+
+        # Strategy 3: Direct CONTAINS fallback (no index required)
+        try:
+            result = session.run(
+                _CONTAINS_SEARCH_TOPIC_NODES,
+                graph_id=graph_id,
+                keyword=query.strip(),
+                limit=limit,
+            )
+            results = [
+                {**dict(record["t"]), "uuid": record["t"]["uuid"], "_score": record["score"], "labels": list(record["t"].labels)}
+                for record in result
+            ]
+            logger.debug(f"Topic keyword search (contains): '{query}' -> {len(results)} results")
+            return results
+        except Exception as e:
+            logger.debug(f"Topic CONTAINS search failed: {e}")
+
+        return []
+
+    def _run_clause_node_vector_search(
+        self, session: Neo4jSession, graph_id: str, query_vector: List[float], limit: int, min_score: float = None
+    ) -> List[Dict[str, Any]]:
+        """Run vector similarity search on Clause embedding."""
+        try:
+            result = session.run(
+                _VECTOR_SEARCH_CLAUSE_NODES,
+                graph_id=graph_id,
+                query_vector=query_vector,
+                limit=limit,
+                min_score=min_score,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
+                for record in result
+            ]
+            logger.debug(f"Clause vector search: {len(results)} results (index available)")
+            return results
+        except Exception as e:
+            logger.debug(f"Vector Clause node search failed: {e}")
+            return []
+
+    def _run_clause_node_keyword_search(
+        self, session: Neo4jSession, graph_id: str, query: str, limit: int, min_score: float = None
+    ) -> List[Dict[str, Any]]:
+        """Run fulltext search on Clause name/summary with CONTAINS fallback."""
+        # Strategy 1: Fulltext index search (primary)
+        try:
+            safe_query = self._escape_lucene(query)
+            result = session.run(
+                _FULLTEXT_SEARCH_CLAUSE_NODES,
+                graph_id=graph_id,
+                query_text=safe_query,
+                limit=limit,
+                min_score=min_score,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
+                for record in result
+            ]
+            if results:
+                logger.debug(f"Clause keyword search (fulltext): '{query}' -> {len(results)} results")
+                return results
+        except Exception as e:
+            logger.debug(f"Clause fulltext search failed: {e}")
+
+        # Strategy 2: Fulltext index with wildcard (partial match)
+        try:
+            wildcard_query = "*" + self._escape_lucene(query.strip()) + "*"
+            result = session.run(
+                _FULLTEXT_SEARCH_CLAUSE_NODES,
+                graph_id=graph_id,
+                query_text=wildcard_query,
+                limit=limit,
+                min_score=min_score,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
+                for record in result
+            ]
+            if results:
+                logger.debug(f"Clause keyword search (wildcard): '{query}' -> {len(results)} results")
+                return results
+        except Exception as e:
+            logger.debug(f"Clause wildcard search failed: {e}")
+
+        # Strategy 3: Direct CONTAINS fallback (no index required)
+        try:
+            result = session.run(
+                _CONTAINS_SEARCH_CLAUSE_NODES,
+                graph_id=graph_id,
+                keyword=query.strip(),
+                limit=limit,
+                min_score=min_score,
+            )
+            results = [
+                {**dict(record["n"]), "uuid": record["n"]["uuid"], "_score": record["score"], "labels": list(record["n"].labels)}
+                for record in result
+            ]
+            logger.debug(f"Clause keyword search (contains): '{query}' -> {len(results)} results")
+            return results
+        except Exception as e:
+            logger.debug(f"Clause CONTAINS search failed: {e}")
+
+        return []
+
     def _merge_results(
         self,
         vector_results: List[Dict[str, Any]],
@@ -693,6 +1033,8 @@ class SearchService:
         that appear high in both result sets.
         """
         k_rrf = 60  # Standard constant for RRF
+        VECTOR_WEIGHT = 1.0
+        KEYWORD_WEIGHT = 2.0  # 提高文本关键字权重为 vector 的 2 倍
 
         # Map to store combined info and RRF score
         combined_map: Dict[str, Dict[str, Any]] = {}
@@ -703,7 +1045,7 @@ class SearchService:
             if uid not in combined_map:
                 combined_map[uid] = {k: v for k, v in res.items() if k != "_score"}
                 combined_map[uid]["rrf_score"] = 0.0
-            combined_map[uid]["rrf_score"] += 1.0 / (k_rrf + rank)
+            combined_map[uid]["rrf_score"] += VECTOR_WEIGHT / (k_rrf + rank)
 
         # Process keyword results
         for rank, res in enumerate(keyword_results, 1):
@@ -711,7 +1053,7 @@ class SearchService:
             if uid not in combined_map:
                 combined_map[uid] = {k: v for k, v in res.items() if k != "_score"}
                 combined_map[uid]["rrf_score"] = 0.0
-            combined_map[uid]["rrf_score"] += 1.0 / (k_rrf + rank)
+            combined_map[uid]["rrf_score"] += KEYWORD_WEIGHT / (k_rrf + rank)
 
         # Sort by RRF score descending
         sorted_items = sorted(
@@ -727,6 +1069,26 @@ class SearchService:
             for r in results:
                 r["score"] = r["rrf_score"] / max_rrf
 
+        return results
+
+    @staticmethod
+    def _boost_exact_match(
+        results: List[Dict[str, Any]], query: str
+    ) -> List[Dict[str, Any]]:
+        """
+        将 name 与查询精确匹配的节点提升到结果首位。
+        解决无 embedding 节点因仅命中 keyword 搜索而导致 RRF 排名靠后的问题。
+        """
+        if not results or not query:
+            return results
+        query_lower = query.strip().lower()
+        for i, r in enumerate(results):
+            name = (r.get("name") or "").strip().lower()
+            if name == query_lower:
+                matched = results.pop(i)
+                matched["score"] = 1.0
+                results.insert(0, matched)
+                break
         return results
 
     @staticmethod

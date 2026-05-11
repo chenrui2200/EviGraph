@@ -172,123 +172,78 @@ def get_graph_data(graph_id: str):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@graph_bp.route('/delete/<graph_id>', methods=['DELETE'])
+@graph_bp.route('/ops/search-nodes', methods=['POST'])
 @api_handler
-def delete_graph(graph_id: str):
-    """Delete graph"""
-    from .graph import _get_storage
-
-    try:
-        storage = _get_storage()
-        builder = GraphBuilderService(storage=storage)
-        builder.delete_graph(graph_id)
-
-        return jsonify({"success": True, "message": f"Graph deleted: {graph_id}"})
-    except Exception as e:
-        logger.error(f"API Error: {str(e)}\n{traceback.format_exc()}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-@graph_bp.route('/supplement', methods=['POST'])
-@api_handler
-def supplement_knowledge():
+def search_nodes():
     """
-    Supplement knowledge by processing specific regions of a PDF.
-    Expects: { project_id, filename, regions: [{page, bbox: [x0, y0, x1, y1]}] }
+    按节点名称模糊搜索 + 类型过滤。
+
+    Request:
+        {
+            "graph_id": "proj_xxx",
+            "query": "导体",
+            "node_types": ["Entity", "Term"],  // 可选: 多选类型数组
+            "node_type": "Entity",              // 向后兼容: 单类型字符串
+            "limit": 20
+        }
     """
     from .graph import _get_storage
 
+    data = request.get_json() or {}
+    graph_id = data.get('graph_id')
+    query = data.get('query', '').strip()
+    node_types = data.get('node_types')
+    node_type = data.get('node_type', 'All')
+    limit = data.get('limit', 20)
+
+    if not graph_id:
+        return jsonify({"success": False, "error": "graph_id is required"}), 400
+    if not query:
+        return jsonify({"success": False, "error": "query is required"}), 400
+
     try:
-        data = request.get_json() or {}
-        project_id = data.get('project_id')
-        filename = data.get('filename')
-        regions = data.get('regions', [])
-
-        if not project_id or not filename or not regions:
-            return jsonify({"success": False, "error": "Missing parameters"}), 400
-
-        project = ProjectManager.get_project(project_id)
-        if not project or not project.graph_id:
-            return jsonify({"success": False, "error": "Project or Graph not found"}), 404
-
-        project_dir = ProjectManager._get_project_dir(project_id)
-        file_path = None
-        found_filename = None
-
-        search_name = filename.lower().strip()
-        for root, dirs, files in os.walk(project_dir):
-            for f in files:
-                f_lower = f.lower().strip()
-                if f_lower == search_name or search_name in f_lower or f_lower in search_name:
-                    file_path = os.path.join(root, f)
-                    found_filename = f
-                    break
-            if file_path:
-                break
-
-        if not file_path:
-            all_files = []
-            for root, dirs, files in os.walk(project_dir):
-                all_files.extend(files)
-            logger.warning(f"Supplement lookup failed. Searching for '{search_name}'. Present files: {all_files}")
-            return jsonify({"success": False, "error": f"Source file {filename} not found in project directory."}), 404
-
-        logger.info(f"Supplementing using file: {file_path}")
-
-        import fitz
-        from ..utils.file_parser import TextChunk
-
-        supplementary_chunks = []
-        doc = fitz.open(file_path)
-        total_pages = len(doc)
-
-        for i, reg in enumerate(regions):
-            page_num = reg.get('page')
-            bbox = reg.get('bbox')
-            if not page_num or not bbox or len(bbox) != 4:
-                continue
-
-            page = doc[page_num - 1]
-            page_rect = page.rect
-            pw, ph = page_rect.width, page_rect.height
-
-            text = page.get_textbox(fitz.Rect(bbox))
-
-            if text.strip():
-                supplementary_chunks.append(TextChunk(
-                    text=text.strip(),
-                    metadata={
-                        "source": filename,
-                        "page": page_num,
-                        "total_pages": total_pages,
-                        "bbox": bbox,
-                        "page_width": pw,
-                        "page_height": ph,
-                        "type": "supplementary",
-                        "supplement_index": i
-                    }
-                ))
-
-        doc.close()
-
-        if not supplementary_chunks:
-            return jsonify({"success": False, "error": "No text found in selected regions"}), 400
-
         storage = _get_storage()
-        builder = GraphBuilderService(storage=storage)
-
-        episode_ids = builder.add_text_batches(
-            project.graph_id,
-            supplementary_chunks,
-            batch_size=1
-        )
-
-        return jsonify({
-            "success": True,
-            "message": f"Successfully supplemented {len(supplementary_chunks)} knowledge fragments.",
-            "episode_ids": episode_ids
-        })
-
+        if node_types and isinstance(node_types, list):
+            nodes = storage.search_nodes_by_name(graph_id, query, node_type=None, node_types=node_types, limit=limit)
+        else:
+            nodes = storage.search_nodes_by_name(graph_id, query, node_type=node_type, limit=limit)
+        return jsonify({"success": True, "data": {"nodes": nodes}})
     except Exception as e:
-        logger.error(f"Supplement failed: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"search_nodes error: {e}\n{traceback.format_exc()}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@graph_bp.route('/ops/node-neighborhood', methods=['POST'])
+@api_handler
+def node_neighborhood():
+    """
+    获取节点的 1 跳邻域（中心节点 + 邻接节点 + 邻边）。
+
+    Request:
+        {
+            "graph_id": "proj_xxx",
+            "node_uuid": "uuid"
+        }
+    """
+    from .graph import _get_storage
+
+    data = request.get_json() or {}
+    graph_id = data.get('graph_id')
+    node_uuid = data.get('node_uuid')
+
+    if not graph_id:
+        return jsonify({"success": False, "error": "graph_id is required"}), 400
+    if not node_uuid:
+        return jsonify({"success": False, "error": "node_uuid is required"}), 400
+
+    try:
+        storage = _get_storage()
+        result = storage.get_node_neighborhood(node_uuid, graph_id)
+        if not result:
+            return jsonify({"success": False, "error": "Node not found"}), 404
+        return jsonify({"success": True, "data": result})
+    except Exception as e:
+        logger.error(f"node_neighborhood error: {e}\n{traceback.format_exc()}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+

@@ -65,6 +65,14 @@
               <span class="stat-label">Topic 主题</span>
             </div>
             <div class="stat-card">
+              <span class="stat-value">{{ nodeTypeStats.Image }}</span>
+              <span class="stat-label">Image 图片</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-value">{{ nodeTypeStats.Table }}</span>
+              <span class="stat-label">Table 表格</span>
+            </div>
+            <div class="stat-card">
               <span class="stat-value">{{ graphData?.has_topic_count || 0 }}</span>
               <span class="stat-label">HAS_TOPIC 关系</span>
             </div>
@@ -93,13 +101,22 @@
           <p class="api-note">测试 GraphRAG 检索准确性</p>
           <p class="description">图谱构建已完成。建议通过视觉化的命中测试验证知识库的召回能力和关联结构。</p>
 
-          <button
-            v-if="currentPhase >= 1 && !buildProgress"
-            class="action-btn hit-test-btn"
-            @click="router.push({ name: 'HitTest', params: { projectId: projectData.project_id } })"
-          >
-            进入命中测试面板 🔍
-          </button>
+          <div class="step-actions">
+            <button
+              v-if="currentPhase >= 1 && !buildProgress"
+              class="action-btn hit-test-btn"
+              @click="router.push({ name: 'HitTest', params: { projectId: projectData.project_id } })"
+            >
+              进入命中测试面板 🔍
+            </button>
+            <button
+              v-if="currentPhase >= 1 && !buildProgress"
+              class="action-btn graph-search-btn"
+              @click="router.push({ name: 'GraphSearch', params: { projectId: projectData.project_id } })"
+            >
+              图谱检索测试 🕸️
+            </button>
+          </div>
 
         </div>
       </div>
@@ -153,7 +170,7 @@ const graphStats = computed(() => {
 })
 
 const nodeTypeStats = computed(() => {
-  const stats = { Clause: 0, Term: 0, Entity: 0, Topic: 0 }
+  const stats = { Clause: 0, Term: 0, Entity: 0, Topic: 0, Image: 0, Table: 0 }
   const nodes = props.graphData?.nodes || []
   nodes.forEach(node => {
     const labels = node.labels || []
@@ -161,6 +178,8 @@ const nodeTypeStats = computed(() => {
     else if (labels.includes('Term')) stats.Term++
     else if (labels.includes('Entity')) stats.Entity++
     else if (labels.includes('Topic')) stats.Topic++
+    else if (labels.includes('Image')) stats.Image++
+    else if (labels.includes('Table')) stats.Table++
   })
   return stats
 })
@@ -317,7 +336,7 @@ watch(() => props.systemLogs.length, () => {
 /* Step 01 Stats */
 .stats-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
   gap: 12px;
   background: #F9F9F9;
   padding: 16px;
@@ -380,6 +399,20 @@ watch(() => props.systemLogs.length, () => {
 
 .start-build-btn {
   background: #FF5722;
+}
+
+.step-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.step-actions .action-btn {
+  margin-bottom: 0;
+}
+
+.graph-search-btn {
+  background: #409eff;
 }
 
 .progress-section {

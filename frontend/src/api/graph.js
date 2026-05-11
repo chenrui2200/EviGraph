@@ -43,21 +43,6 @@ export function buildGraph(data) {
 }
 
 /**
- * Reset and re-run intelligent chunk annotation
- * @param {Object} data - Contains project_id, reset (bool)
- * @returns {Promise}
- */
-export function resetIntelligentChunks(data) {
-  return requestWithRetry(() =>
-    service({
-      url: '/api/graph/chunk/intelligent',
-      method: 'post',
-      data
-    })
-  )
-}
-
-/**
  * Query task status
  * @param {String} taskId - Task ID
  * @returns {Promise}
@@ -143,19 +128,6 @@ export function getProjectList(limit = 50) {
 }
 
 /**
- * Search graph (Hit Test) - supports both single and multi-graph search
- * @param {Object} data - Contains graph_id or graph_ids, query, limit
- * @returns {Promise}
- */
-export function searchGraph(data) {
-  return service({
-    url: '/api/report/tools/search',
-    method: 'post',
-    data
-  })
-}
-
-/**
  * Object-first DFS search - results grouped by Object node
  * @param {Object} data - Contains graph_id, query, limit, max_depth, root_type
  * @returns {Promise}
@@ -196,6 +168,19 @@ export function rerankFacts(data) {
 }
 
 /**
+ * 问题意图摘要匹配：Topic 召回 + 关联 Entity 重排
+ * @param {Object} data - Contains app_id (or graph_id), query, topic_limit, entity_limit, rerank_min_score
+ * @returns {Promise}
+ */
+export function queryIntentMatch(data) {
+  return service({
+    url: '/api/report/query-topic',
+    method: 'post',
+    data
+  })
+}
+
+/**
  * LLM 推理问答：基于过滤后的 facts 生成回答
  * @param {Object} data - Contains facts, query, temperature
  * @returns {Promise}
@@ -209,28 +194,14 @@ export function llmAnswer(data) {
 }
 
 /**
- * AI Q&A - retrieval from multiple graphs + LLM answering
- * @param {Object} data - Contains graph_ids, query
+ * 重新执行 Pipeline 的图谱构建阶段
+ * @param {String} pipelineId - Pipeline ID
  * @returns {Promise}
  */
-export function aiQa(data) {
+export function retryGraphBuilding(pipelineId) {
   return service({
-    url: '/api/graph/ai-qa',
-    method: 'post',
-    data
-  })
-}
-
-/**
- * Chat with Report Agent (Advanced retrieval)
- * @param {Object} data - Contains simulation_id, message, chat_history
- * @returns {Promise}
- */
-export function chatWithAgent(data) {
-  return service({
-    url: '/api/report/chat',
-    method: 'post',
-    data
+    url: `/api/graph/kb-pipeline/${pipelineId}/retry-graph-building`,
+    method: 'post'
   })
 }
 
@@ -290,6 +261,20 @@ export function startChunking(data) {
 }
 
 /**
+ * 自动推断推荐的章节锚点和最小条款容器锚点
+ * @param {String} projectId - 项目ID
+ * @returns {Promise}
+ */
+export function inferChunkAnchors(projectId) {
+  return requestWithRetry(() =>
+    service({
+      url: `/api/graph/chunk/${projectId}/infer-anchors`,
+      method: 'post'
+    })
+  )
+}
+
+/**
  * 更新单个 clause 的知识实体（手动编辑）
  * @param {String} projectId - 项目ID
  * @param {Object} data - Contains clause_id, terms, conditions, actions, components
@@ -304,26 +289,73 @@ export function updateClauseEntity(projectId, data) {
 }
 
 // ============================================================================
-// MinerU PDF 解析 API
+// KB Pipeline API
 // ============================================================================
 
 /**
- * 调用 MinerU API 解析 PDF
- * @param {FormData} formData - 包含 pdf_file 和可选的 project_id, filename
+ * 获取 MinIO 中的 PDF 文件列表
+ * @param {String} prefix - 前缀过滤
  * @returns {Promise}
  */
-export function mineruParse(formData) {
-  return requestWithRetry(() =>
-    service({
-      url: '/api/graph/pdf/mineru-parse',
-      method: 'post',
-      data: formData,
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
-    })
-  )
+export function getKbPipelineMinioFiles(prefix = '') {
+  return service({
+    url: '/api/graph/kb-pipeline/minio-files',
+    method: 'get',
+    params: { prefix }
+  })
 }
+
+/**
+ * 启动 KB Pipeline
+ * @param {String} minio_object - MinIO 对象名称
+ * @returns {Promise}
+ */
+export function startKbPipeline(minio_object) {
+  return service({
+    url: '/api/graph/kb-pipeline/start',
+    method: 'post',
+    data: { minio_object }
+  })
+}
+
+/**
+ * 获取 KB Pipeline 列表
+ * @param {Number} limit - 最大数量
+ * @returns {Promise}
+ */
+export function getKbPipelineList(limit = 100) {
+  return service({
+    url: '/api/graph/kb-pipeline/list',
+    method: 'get',
+    params: { limit }
+  })
+}
+
+/**
+ * 获取单个 KB Pipeline 状态
+ * @param {String} pipelineId
+ * @returns {Promise}
+ */
+export function getKbPipeline(pipelineId) {
+  return service({
+    url: `/api/graph/kb-pipeline/${pipelineId}`,
+    method: 'get'
+  })
+}
+
+/**
+ * 获取 KB Pipeline SSE Events URL
+ * @param {String} pipelineId
+ * @returns {String}
+ */
+export function getKbPipelineEventsURL(pipelineId) {
+  const baseURL = import.meta.env.VITE_API_BASE_URL
+  return `${baseURL}/api/graph/kb-pipeline/${pipelineId}/events`
+}
+
+// ============================================================================
+// MinerU PDF 解析 API
+// ============================================================================
 
 /**
  * 获取 MinerU 解析结果
@@ -348,5 +380,33 @@ export function reAnnotateMineru(projectId, parseMethod = 'ocr') {
     url: '/api/graph/pdf/re-annotate',
     method: 'post',
     data: { project_id: projectId, parse_method: parseMethod }
+  })
+}
+
+// ============================================================================
+// 图谱检索测试 API
+// ============================================================================
+
+/**
+ * 按名称模糊搜索节点
+ * @param {Object} data - { graph_id, query, node_type, limit }
+ */
+export function searchNodes(data) {
+  return service({
+    url: '/api/graph/ops/search-nodes',
+    method: 'post',
+    data
+  })
+}
+
+/**
+ * 获取节点 1 跳邻域
+ * @param {Object} data - { graph_id, node_uuid }
+ */
+export function getNodeNeighborhood(data) {
+  return service({
+    url: '/api/graph/ops/node-neighborhood',
+    method: 'post',
+    data
   })
 }

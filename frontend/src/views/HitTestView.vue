@@ -47,10 +47,6 @@
             </div>
 
             <div class="search-options">
-              <label class="checkbox-label">
-                <input type="checkbox" v-model="filterGraph" />
-                <span>自动过滤关联图结构</span>
-              </label>
               <!-- 根节点类型多选 -->
               <span class="depth-label">
                 根节点类型
@@ -71,7 +67,7 @@
                   <input
                     type="range"
                     v-model.number="similarityThreshold"
-                    min="50"
+                    min="0"
                     max="100"
                     step="5"
                     class="sim-slider"
@@ -389,7 +385,7 @@ const searching = ref(false)
 const searchQuery = ref('')
 const filterGraph = ref(true)
 const rootTypes = ref(['Entity', 'Term']) // 根节点类型多选: Entity 和/或 Term
-const similarityThreshold = ref(50) // 相似度阈值 (50-100)，低于此值的结果被丢弃
+const similarityThreshold = ref(0) // 相似度阈值 (0-100)，低于此值的结果被丢弃
 
 // 相似度阈值颜色：中=橙，高=绿
 const simValueClass = computed(() => {
@@ -656,7 +652,6 @@ const submitSupplement = async () => {
 const filteredGraphData = computed(() => {
   // Object-first 模式：基于 DFS 遍历路径过滤（与显示结果一一对应）
   if (filteredObjectFirstRows.value.length > 0) {
-    if (!filterGraph.value) return fullGraphData.value
     const resultNodeIds = new Set()
     const resultEdgeIds = new Set()
     filteredObjectFirstRows.value.forEach(row => {
@@ -694,41 +689,42 @@ const filteredGraphData = computed(() => {
     }
   }
 
-  // 传统模式
-  if (!filterGraph.value || !results.value.facts.length) {
-    return fullGraphData.value
-  }
+  // 传统模式：有搜索结果时过滤
+  if (results.value.facts.length > 0) {
+    const resultNodeIds = new Set()
+    const resultEdgeIds = new Set()
 
-  const resultNodeIds = new Set()
-  const resultEdgeIds = new Set()
-
-  results.value.nodes.forEach(n => resultNodeIds.add(n.uuid))
-  results.value.edges.forEach(e => {
-    resultEdgeIds.add(e.uuid)
-    resultNodeIds.add(e.source_node_uuid)
-    resultNodeIds.add(e.target_node_uuid)
-  })
-
-  results.value.facts.forEach(f => {
-    if (f.source_node_uuid) resultNodeIds.add(f.source_node_uuid)
-    if (f.target_node_uuid) resultNodeIds.add(f.target_node_uuid)
-    if (f.uuid) resultNodeIds.add(f.uuid)
-  })
-
-  if (fullGraphData.value.edges) {
-    fullGraphData.value.edges.forEach(e => {
-      if (resultNodeIds.has(e.source_node_uuid) || resultNodeIds.has(e.target_node_uuid)) {
-        resultEdgeIds.add(e.uuid)
-        resultNodeIds.add(e.source_node_uuid)
-        resultNodeIds.add(e.target_node_uuid)
-      }
+    results.value.nodes.forEach(n => resultNodeIds.add(n.uuid))
+    results.value.edges.forEach(e => {
+      resultEdgeIds.add(e.uuid)
+      resultNodeIds.add(e.source_node_uuid)
+      resultNodeIds.add(e.target_node_uuid)
     })
+
+    results.value.facts.forEach(f => {
+      if (f.source_node_uuid) resultNodeIds.add(f.source_node_uuid)
+      if (f.target_node_uuid) resultNodeIds.add(f.target_node_uuid)
+      if (f.uuid) resultNodeIds.add(f.uuid)
+    })
+
+    if (fullGraphData.value.edges) {
+      fullGraphData.value.edges.forEach(e => {
+        if (resultNodeIds.has(e.source_node_uuid) || resultNodeIds.has(e.target_node_uuid)) {
+          resultEdgeIds.add(e.uuid)
+          resultNodeIds.add(e.source_node_uuid)
+          resultNodeIds.add(e.target_node_uuid)
+        }
+      })
+    }
+
+    return {
+      nodes: fullGraphData.value.nodes.filter(n => resultNodeIds.has(n.uuid)),
+      edges: (fullGraphData.value.edges || []).filter(e => resultEdgeIds.has(e.uuid))
+    }
   }
 
-  return {
-    nodes: fullGraphData.value.nodes.filter(n => resultNodeIds.has(n.uuid)),
-    edges: (fullGraphData.value.edges || []).filter(e => resultEdgeIds.has(e.uuid))
-  }
+  // 没有搜索结果：不展示任何图结构
+  return { nodes: [], edges: [] }
 })
 
 // UI Helpers

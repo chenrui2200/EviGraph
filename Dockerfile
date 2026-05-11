@@ -47,6 +47,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx supervisor \
     poppler-utils \
+    libreoffice-writer \
+    fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy backend (site-packages + source)

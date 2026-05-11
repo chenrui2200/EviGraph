@@ -11,6 +11,7 @@ import shutil
 import traceback
 import threading
 import requests
+import base64
 from typing import Dict, Optional, List, Any, Union
 from flask import request, jsonify, current_app, send_from_directory
 
@@ -608,20 +609,34 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
             # 保存分块结果（尝试序列化，失败时用检查点兜底）
             save_success = False
             try:
-                # 从 clauses.metadata["entities"] 提取 elements
+                # 从 clauses.metadata["topics"] 提取 elements（新结构：entities 在 topics 数组中）
                 extracted_elements = []
                 for c in result.clauses:
-                    for ent in c.metadata.get("entities", []):
-                        extracted_elements.append({
-                            "element_type": ent.get("entity_type", "unknown"),
-                            "key": ent.get("name", ""),
-                            "value": ent.get("value", ""),
-                            "unit": ent.get("unit", ""),
-                            "abbreviation": ent.get("abbreviation", ""),
-                            "definition": ent.get("definition", ""),
-                            "source_clause_id": ent.get("clause_id", c.clause_id),
-                            "metadata": ent
-                        })
+                    for tp in c.metadata.get("topics", []):
+                        if isinstance(tp, dict):
+                            for ent in tp.get("entities", []):
+                                if isinstance(ent, str):
+                                    extracted_elements.append({
+                                        "element_type": "unknown",
+                                        "key": ent,
+                                        "value": "",
+                                        "unit": "",
+                                        "abbreviation": "",
+                                        "definition": "",
+                                        "source_clause_id": c.clause_id,
+                                        "metadata": {}
+                                    })
+                                elif isinstance(ent, dict):
+                                    extracted_elements.append({
+                                        "element_type": ent.get("entity_type", "unknown"),
+                                        "key": ent.get("name", ""),
+                                        "value": ent.get("value", ""),
+                                        "unit": ent.get("unit", ""),
+                                        "abbreviation": ent.get("abbreviation", ""),
+                                        "definition": ent.get("definition", ""),
+                                        "source_clause_id": ent.get("clause_id", c.clause_id),
+                                        "metadata": ent
+                                    })
                 chunks_result = {
                     "source": "llm",
                     "sections": [
@@ -645,6 +660,8 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
                             "parent_chapter": c.parent_chapter,
                             "scope_prefix": c.metadata.get("scope_prefix") if c.metadata else None,
                             "chapter": c.metadata.get("chapter") if c.metadata else None,
+                            "referenced_tables": c.metadata.get("referenced_tables", []) if c.metadata else [],
+                            "images": c.metadata.get("images", []) if c.metadata else [],
                             "metadata": c.metadata
                         }
                         for c in result.clauses
@@ -670,17 +687,19 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
                             "clauses": fallback_checkpoint.completed_clauses or [],
                             "elements": [
                                 {
-                                    "element_type": ent.get("entity_type", "unknown"),
-                                    "key": ent.get("name", ""),
-                                    "value": ent.get("value", ""),
-                                    "unit": ent.get("unit", ""),
-                                    "source_clause_id": ent.get("clause_id", clause.get("clause_id")),
+                                    "element_type": "unknown",
+                                    "key": ent,
+                                    "value": "",
+                                    "unit": "",
+                                    "source_clause_id": clause.get("clause_id"),
                                     "scope_prefix": clause.get("scope_prefix") or clause.get("metadata", {}).get("scope_prefix"),
                                     "chapter": clause.get("chapter") or clause.get("metadata", {}).get("chapter"),
-                                    "metadata": ent
+                                    "metadata": {}
                                 }
                                 for clause in (fallback_checkpoint.completed_clauses or [])
-                                for ent in clause.get("metadata", {}).get("entities", [])
+                                for tp in (clause.get("metadata") or {}).get("topics", [])
+                                for ent in (tp.get("entities") if isinstance(tp, dict) else [])
+                                if isinstance(ent, str)
                             ] if fallback_checkpoint.completed_clauses else [],
                             "edges": [],
                         }
@@ -702,8 +721,11 @@ def _start_ontology_recovery_worker(project_id: str, original_task_id: str):
                 project.status = ProjectStatus.GRAPH_CHUNKED
                 ProjectManager.save_project(project)
 
-                # 完成任务（统计从 clauses.metadata["entities"] 提取的实体数量）
-                entity_count = sum(len(c.metadata.get("entities", [])) for c in result.clauses)
+                # 完成任务（统计从 clauses.metadata["topics"] 提取的实体数量）
+                entity_count = sum(
+                    sum(len(tp.get('entities', [])) for tp in c.metadata.get('topics', []) if isinstance(tp, dict))
+                    for c in result.clauses
+                )
                 summary = f"✅ 标注分析完成: {len(result.sections)} 章节, {len(result.clauses)} 条文, {entity_count} 实体"
                 build_logger.info(f"[{recovery_task_id}] {summary}")
 
@@ -1200,7 +1222,7 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str, parse_me
     )
 
     # 使用 JSONL 路径（已按 page_num 排序），而非 mineru_data dict（并发乱序）
-    chunks = _parse_mineru_to_chunks(jsonl_path, filename)
+    chunks = _parse_mineru_to_chunks(jsonl_path, filename, pdf_path)
 
     # === 4. 保存 raw_text.txt ===
     md_content = mineru_data.get('md_content', '')
@@ -1586,7 +1608,53 @@ def _merge_line_bboxes(lines: List[dict], page_idx: int, block_bbox: list = None
     return _merge_bboxes([line.get('bbox', []) for line in lines if len(line.get('bbox', [])) >= 4])
 
 
-def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
+def _extract_bbox_image_from_pdf(pdf_path: str, page_idx: int, bbox: list) -> str:
+    """从 PDF 指定页面和 bbox 截取图片，返回 base64 data URI"""
+    if not pdf_path or not os.path.exists(pdf_path):
+        return ""
+    if not bbox or len(bbox) < 4:
+        return ""
+
+    try:
+        import fitz
+        doc = fitz.open(pdf_path)
+        if page_idx >= len(doc):
+            doc.close()
+            return ""
+
+        page = doc[page_idx]
+        page_rect = page.rect
+
+        x0, y0, x1, y1 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+
+        # MinerU bbox 使用 PDF 坐标（原点左下角，y 向上增长）
+        # fitz 使用相同坐标系，但需要确保 y0 < y1
+        if y0 > y1:
+            y0, y1 = y1, y0
+
+        # 限制在页面范围内
+        x0 = max(0, min(x0, page_rect.width))
+        x1 = max(0, min(x1, page_rect.width))
+        y0 = max(0, min(y0, page_rect.height))
+        y1 = max(0, min(y1, page_rect.height))
+
+        clip_rect = fitz.Rect(x0, y0, x1, y1)
+        if clip_rect.width <= 0 or clip_rect.height <= 0:
+            doc.close()
+            return ""
+
+        pix = page.get_pixmap(clip=clip_rect, dpi=150)
+        img_bytes = pix.tobytes("png")
+        doc.close()
+
+        b64 = base64.b64encode(img_bytes).decode('utf-8')
+        return f"data:image/png;base64,{b64}"
+    except Exception as e:
+        logger.warning(f"[PDF截图] 失败: page={page_idx}, bbox={bbox}, error={e}")
+        return ""
+
+
+def _parse_mineru_jsonl(jsonl_path: str, filename: str, pdf_path: str = '') -> List[Dict[str, Any]]:
     """
     直接从 JSONL 文件读取并解析为 chunks 结构（一次遍历 + 排序）。
 
@@ -1715,6 +1783,19 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                     if len(final_bbox) >= 4 and final_bbox[1] > final_bbox[3]:
                         final_bbox = [final_bbox[0], final_bbox[3], final_bbox[2], final_bbox[1]]
 
+                    # 从 images_base64 提取表格截图 base64
+                    table_image_content = ''
+                    if img_path and img_path in images_base64:
+                        table_image_content = images_base64[img_path]
+
+                    # fallback：MinerU 未提供 base64 时，从 PDF 截图
+                    if not table_image_content and pdf_path and final_bbox:
+                        table_image_content = _extract_bbox_image_from_pdf(
+                            pdf_path, page_num, final_bbox
+                        )
+                        if table_image_content:
+                            logger.info(f"[PDF截图] table chunk {len(chunks)}: 从 PDF 截取表格图片 (page={page_num}, bbox={final_bbox})")
+
                     chunks.append({
                         "chunk_id": f"chunk_{len(chunks)}",
                         "page_idx": page_num,
@@ -1731,6 +1812,7 @@ def _parse_mineru_jsonl(jsonl_path: str, filename: str) -> List[Dict[str, Any]]:
                         "table_img_path": img_path,
                         "table_content": table_html,
                         "table_footnote": table_footnote.rstrip('\n') if table_footnote else '',
+                        "table_image_base64_content": table_image_content,
                     })
 
                 # ---- 图片块 ----
@@ -1810,7 +1892,7 @@ def _parse_mineru_to_chunks(mineru_data_or_jsonl_path: Union[dict, str], filenam
     """
     # 新路径：直接读取 JSONL 文件
     if isinstance(mineru_data_or_jsonl_path, str):
-        return _parse_mineru_jsonl(mineru_data_or_jsonl_path, filename)
+        return _parse_mineru_jsonl(mineru_data_or_jsonl_path, filename, pdf_path)
 
     # 旧路径：向后兼容 mineru_data 字典
     mineru_data = mineru_data_or_jsonl_path
@@ -1913,6 +1995,15 @@ def _parse_mineru_to_chunks(mineru_data_or_jsonl_path: Union[dict, str], filenam
                 if len(final_bbox) >= 4 and final_bbox[1] > final_bbox[3]:
                     final_bbox = [final_bbox[0], final_bbox[3], final_bbox[2], final_bbox[1]]
 
+                # 从 PDF 截取表格图片（旧路径无 MinerU images 字典，直接截图）
+                table_image_content = ''
+                if pdf_path and final_bbox:
+                    table_image_content = _extract_bbox_image_from_pdf(
+                        pdf_path, page_idx, final_bbox
+                    )
+                    if table_image_content:
+                        logger.info(f"[PDF截图] table chunk {len(chunks)}: 从 PDF 截取表格图片 (page={page_idx}, bbox={final_bbox})")
+
                 chunks.append({
                     "chunk_id": f"chunk_{len(chunks)}",
                     "page_idx": page_idx,
@@ -1929,6 +2020,7 @@ def _parse_mineru_to_chunks(mineru_data_or_jsonl_path: Union[dict, str], filenam
                     "table_img_path": img_path,
                     "table_content": table_html,
                     "table_footnote": table_footnote.rstrip('\n') if table_footnote else '',
+                    "table_image_base64_content": table_image_content,
                 })
 
     return chunks

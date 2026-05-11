@@ -36,6 +36,11 @@ class Config:
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'qwen2.5:32b')
     LLM_MAX_RETRIES = int(os.environ.get('LLM_MAX_RETRIES', '3'))
 
+    # VLM configuration (vision-capable model for image analysis)
+    VLM_API_KEY = os.environ.get('VLM_API_KEY')
+    VLM_BASE_URL = os.environ.get('VLM_BASE_URL', 'http://localhost:11434/v1')
+    VLM_MODEL_NAME = os.environ.get('VLM_MODEL_NAME', 'qwen2.5-vl:7b')
+
     # Neo4j configuration
     NEO4J_URI = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
     NEO4J_USER = os.environ.get('NEO4J_USER', 'neo4j')
@@ -61,7 +66,7 @@ class Config:
     # File upload configuration
     MAX_CONTENT_LENGTH = 500 * 1024 * 1024  # 500MB
     UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), '../uploads')
-    ALLOWED_EXTENSIONS = {'pdf', 'md', 'txt', 'markdown'}
+    ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx'}
 
     # Text processing configuration
     DEFAULT_CHUNK_SIZE = 1500  # Increased for engineering standards to keep clauses intact
@@ -74,4 +79,14 @@ class Config:
     REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
     REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
+
+    # Frontend URL (for generating correct client-side links like /chat/{app_id})
+    FRONTEND_URL = os.environ.get('FRONTEND_URL')
+
+    # MinIO configuration
+    MINIO_ENDPOINT = os.environ.get('MINIO_ENDPOINT', 'http://localhost:9000')
+    MINIO_ACCESS_KEY = os.environ.get('MINIO_ACCESS_KEY', 'minioadmin')
+    MINIO_SECRET_KEY = os.environ.get('MINIO_SECRET_KEY', 'minioadmin')
+    MINIO_BUCKET_NAME = os.environ.get('MINIO_BUCKET_NAME', 'knowledge-base')
+    MINIO_SECURE = os.environ.get('MINIO_SECURE', 'False').lower() == 'true'
 

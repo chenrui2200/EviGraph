@@ -38,9 +38,28 @@
       </div>
     </header>
 
-    <!-- Canvas Area -->
+    <!-- Tab Navigation -->
+    <div class="tab-bar">
+      <button
+        class="tab-btn"
+        :class="{ active: activeTab === 'workflow' }"
+        @click="activeTab = 'workflow'"
+      >
+        精确命中
+      </button>
+      <button
+        class="tab-btn"
+        :class="{ active: activeTab === 'intentMatch' }"
+        @click="activeTab = 'intentMatch'"
+      >
+        全量捕获
+      </button>
+    </div>
+
     <div class="main-container">
-      <div class="canvas-area" ref="canvas" @mousemove="handleDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
+      <!-- Workflow Tab -->
+      <template v-if="activeTab === 'workflow'">
+        <div class="canvas-area" ref="canvas" @mousemove="handleDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
         <svg class="connections-svg">
           <path v-for="(conn, idx) in connections" :key="idx" :d="getConnectionPath(conn)" class="conn-path" />
         </svg>
@@ -58,7 +77,7 @@
             <span class="node-icon">{{ node.icon }}</span>
             <span class="node-title">{{ node.title }}</span>
             <div v-if="node.duration" class="node-duration">{{ node.duration }}s</div>
-            <button v-if="node.type === 'output' && results.answer" class="expand-btn" title="全屏查看" @click.stop="toggleFullResult">
+            <button v-if="node.type === 'output' && results.facts.length > 0" class="expand-btn" title="全屏查看" @click.stop="toggleFullResult">
               ⛶
             </button>
             <div v-if="node.status === 'running'" class="node-spinner"></div>
@@ -129,6 +148,7 @@
                   <span v-if="results.rows.length > 0">
                     （Term: {{ results.rows.filter(r => r.object_node?.labels?.includes('Term')).length }},
                     Entity: {{ results.rows.filter(r => r.object_node?.labels?.includes('Entity') && !r.object_node?.labels?.includes('Term')).length }}），
+                    涉及 <strong>{{ new Set(results.rows.flatMap(r => r.traversal_paths?.filter(p => p.labels?.includes('Topic')).map(p => p.uuid))).size }}</strong> 个 Topic，
                     共 <strong>{{ results.rows.reduce((s, r) => s + (r.facts?.length || 0), 0) }}</strong> 条关联事实。
                   </span>
                   <template v-if="results.searchTimings.object_s || results.searchTimings.term_s">
@@ -148,13 +168,25 @@
                   <div class="object-row-header">
                     <div class="object-name">
                       <span class="object-badge" :class="{ term: row.object_node?.labels?.includes('Term') }">
-                        {{ row.object_node?.labels?.find(l => l === 'Term' || l === 'Object') || 'Object' }}
+                        {{ row.object_node?.labels?.find(l => l !== 'Entity' && l !== 'Node') || row.object_node?.labels?.[0] || 'Entity' }}
                       </span>
                       <strong>{{ row.object_node?.name || 'Unknown' }}</strong>
                     </div>
                     <div class="object-score">
                       <span class="score-tag">{{ (row.relevance_score || 0).toFixed(1) }}</span>
                     </div>
+                  </div>
+
+                  <!-- 关联 Topic 标签 -->
+                  <div v-if="row.object_node?.topics?.length" class="object-topics">
+                    <span class="topics-label">关联 Topic:</span>
+                    <span
+                      v-for="(topicName, tIdx) in row.object_node.topics"
+                      :key="tIdx"
+                      class="topic-tag"
+                    >
+                      {{ topicName }}
+                    </span>
                   </div>
 
                   <!-- Object 摘要 -->
@@ -187,7 +219,7 @@
                       <div class="fact-meta">
                         <span class="source-tag">
                           📄 {{ fact.source || 'Unknown' }}
-                          <span v-if="fact.page">(P{{ fact.page }})</span>
+                          <span v-if="getFactPageBboxes(fact).length">({{ formatPageRange(getFactPageBboxes(fact)) }})</span>
                         </span>
                         <span class="depth-tag" v-if="fact.traversal_depth !== undefined">深度{{ fact.traversal_depth }}</span>
                         <button
@@ -263,29 +295,11 @@
               </div>
             </div>
 
-            <!-- LLM Node Content -->
-            <div v-if="node.type === 'llm'" class="llm-content">
-              <div class="form-group">
-                <label>大语言模型 (LLM)</label>
-                <div class="system-config-badge">System Configured</div>
-                <div class="config-hint">使用 .env 配置文件中的模型</div>
-              </div>
-              <div class="form-group">
-                <label>温度: {{ workflowData.temperature }}</label>
-                <input type="range" v-model="workflowData.temperature" min="0" max="1" step="0.1" />
-              </div>
-              <div v-if="results.prompts.user" class="prompt-debug-entry">
-                <button class="debug-btn" @click="showPromptModal = true">
-                  🔍 查看输入信息 (Prompts)
-                </button>
-              </div>
-            </div>
-
             <!-- Output Node Content -->
             <div v-if="node.type === 'output'" class="output-content">
-              <div v-if="!results.answer" class="output-placeholder">等待运行结果...</div>
+              <div v-if="results.facts.length === 0" class="output-placeholder">等待运行结果...</div>
               <div v-else class="qa-result-container">
-                <!-- 1. Knowledge Sources with "Screenshots" -->
+                <!-- 检索依据原文 -->
                 <div class="result-section">
                   <div class="section-header">
                     📚 检索依据原文
@@ -294,38 +308,57 @@
                     暂无有效知识出处
                   </div>
                   <div v-else class="source-evidence-list">
-                    <div v-for="(fact, idx) in results.facts" :key="idx" class="evidence-item">
-                      <div class="evidence-meta">
-                        <span class="source-tag">来源 {{ idx + 1 }}: {{ fact.source }} <template v-if="fact.page">(P{{ fact.page }})</template></span>
-                        <span v-if="fact.relevance_score" class="evidence-score-badge" :style="{ background: getThresholdColor(fact.relevance_score) }">
-                          {{ fact.relevance_score }}分
-                        </span>
+                    <div
+                      v-for="(group, sourceName) in groupedFacts"
+                      :key="sourceName"
+                      class="evidence-section"
+                    >
+                      <!-- Section Header -->
+                      <div class="evidence-section-header" @click="toggleSection(sourceName)">
+                        <span class="section-toggle">{{ isSectionOpen(sourceName) ? '▼' : '▶' }}</span>
+                        <span class="section-title">📄 {{ sourceName }} ({{ group.length }}条)</span>
                       </div>
-                      <!-- The "Screenshot" Canvas -->
-                      <div class="evidence-screenshot-box">
-                        <canvas :ref="el => setEvidenceRef(el, idx, 'node')" class="evidence-canvas"></canvas>
-                        <div v-if="!fact.bbox" class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
+                      <!-- Section Body -->
+                      <div v-show="isSectionOpen(sourceName)" class="evidence-section-body">
+                        <div
+                          v-for="fact in group"
+                          :key="fact._idx"
+                          class="evidence-item"
+                        >
+                          <!-- 文字内容直接显示 -->
+                          <div class="evidence-text-row">
+                            <span v-if="fact.relevance_score" class="evidence-score-badge-small" :style="{ background: getThresholdColor(fact.relevance_score) }">
+                              {{ fact.relevance_score }}分
+                            </span>
+                            <span class="evidence-text">{{ fact.text }}</span>
+                            <span v-if="fact.page" class="evidence-page">P{{ fact.page }}</span>
+                          </div>
+                          <div v-if="fact.topic" class="evidence-topics">
+                            <span class="topics-label">关联 Topic:</span>
+                            <span class="topic-tag">{{ fact.topic }}</span>
+                          </div>
+                          <!-- PDF 位置折叠 -->
+                          <div class="evidence-pdf-fold">
+                            <button class="fold-btn" @click.stop="togglePdf(fact._idx)">
+                              {{ isPdfOpen(fact._idx) ? '收起PDF位置 ▲' : '查看PDF位置 ▼' }}
+                            </button>
+                            <div v-show="isPdfOpen(fact._idx)" class="evidence-pdf-content">
+                              <template v-if="getFactPageBboxes(fact).length">
+                                <div
+                                  v-for="(pb, pi) in getFactPageBboxes(fact)"
+                                  :key="pi"
+                                  class="page-screenshot"
+                                >
+                                  <div class="page-label">第 {{ pb.page }} 页</div>
+                                  <canvas :ref="el => setEvidenceRef(el, fact._idx + '-' + pi, 'node')" class="evidence-canvas"></canvas>
+                                </div>
+                              </template>
+                              <div v-else class="no-bbox-hint">（无位置信息，展示文本）: {{ fact.text }}</div>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </div>
-
-                <!-- 2. Reasoning (Thought) -->
-                <div v-if="parsedResult.thought" class="result-section">
-                  <div class="section-header" @click="showThought = !showThought">
-                    🧠 推理过程 (Thinking Process)
-                    <span class="toggle-icon">{{ showThought ? '▼' : '▶' }}</span>
-                  </div>
-                  <div v-if="showThought" class="thought-content">
-                    {{ parsedResult.thought }}
-                  </div>
-                </div>
-
-                <!-- 3. Final Conclusion -->
-                <div class="result-section">
-                  <div class="section-header">✨ 最终结论</div>
-                  <div class="conclusion-text">
-                    {{ parsedResult.conclusion }}
                   </div>
                 </div>
               </div>
@@ -346,6 +379,21 @@
         :page-height="currentDoc.pageHeight"
         :pdf-bboxes="currentDoc.pdfBboxes"
       />
+      </template>
+
+      <!-- 全量捕获 Tab -->
+      <template v-else>
+        <IntentMatchView
+          :graph-id="workflowData.selectedGraphIds[0] || ''"
+          :topic-limit="workflowData.intentMatch.topicLimit"
+          :entity-limit="workflowData.intentMatch.entityLimit"
+          :rerank-min-score="workflowData.intentMatch.rerankMinScore"
+          :show-header="false"
+          @update:topic-limit="v => workflowData.intentMatch.topicLimit = v"
+          @update:entity-limit="v => workflowData.intentMatch.entityLimit = v"
+          @update:rerank-min-score="v => workflowData.intentMatch.rerankMinScore = v"
+        />
+      </template>
     </div> <!-- End Main Container -->
 
     <!-- Knowledge Base Tools Dialog -->
@@ -398,88 +446,79 @@
       </div>
     </div>
 
-    <!-- Prompt Debug Modal -->
-    <div v-if="showPromptModal" class="modal-overlay" @click.self="showPromptModal = false">
-      <div class="prompt-modal">
-        <div class="modal-header">
-          <h3>大模型输入详情 (Prompts)</h3>
-          <button class="close-btn" @click="showPromptModal = false">×</button>
-        </div>
-        <div class="modal-body prompt-debug-body">
-          <div class="prompt-section">
-            <div class="section-title">System Prompt</div>
-            <pre class="prompt-pre">{{ results.prompts.system }}</pre>
-          </div>
-          <div class="prompt-section">
-            <div class="section-title">User Prompt (Including Context)</div>
-            <pre class="prompt-pre">{{ results.prompts.user }}</pre>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button class="action-btn" @click="showPromptModal = false">关闭</button>
-        </div>
-      </div>
-    </div>
-
     <!-- Full Result Detailed View -->
     <div v-if="showFullResult" class="modal-overlay" @click.self="showFullResult = false">
       <div class="full-result-modal">
         <div class="modal-header">
           <h3>
-            <span class="header-icon">✨</span> 问答结果详情报告
+            <span class="header-icon">✨</span> 检索结果详情报告
           </h3>
           <div class="header-actions">
             <button class="close-btn" @click="showFullResult = false">×</button>
           </div>
         </div>
         <div class="modal-body full-result-body">
-          <!-- 1. Source Evidence Section -->
-          <div class="full-section">
-            <div class="full-section-title">
-              📚 检索知识出处 (Knowledge Evidence)
-            </div>
-            <div v-if="results.facts.length === 0" class="no-evidence-hint full-no-evidence">
-              暂无有效知识出处
-            </div>
-            <div v-else class="full-evidence-grid">
-              <div v-for="(fact, idx) in results.facts" :key="idx" class="full-evidence-card">
-                <div class="evidence-header">
-                  <span class="evidence-idx">#{{ idx + 1 }}</span>
-                  <span class="evidence-source">{{ fact.source }} <template v-if="fact.page">(第 {{ fact.page }} 页)</template></span>
-                  <span v-if="fact.relevance_score" class="full-evidence-score" :style="{ color: getThresholdColor(fact.relevance_score) }">
-                    得分: {{ fact.relevance_score }}
-                  </span>
-                </div>
-                <div class="full-evidence-screenshot">
-                  <canvas :ref="el => setEvidenceRef(el, idx, 'modal')" class="full-evidence-canvas"></canvas>
-                  <div v-if="!fact.bbox" class="full-no-bbox">
+          <!-- 按文档分组展示 -->
+          <div v-if="results.facts.length === 0" class="no-evidence-hint full-no-evidence">
+            暂无有效知识出处
+          </div>
+          <div v-else class="full-evidence-grid">
+            <div
+              v-for="(group, sourceName) in groupedFacts"
+              :key="sourceName"
+              class="full-evidence-card full-evidence-section"
+            >
+              <div class="evidence-header full-evidence-section-header" @click="toggleSection(sourceName)">
+                <span class="evidence-idx">📄</span>
+                <span class="evidence-source">{{ sourceName }} ({{ group.length }}条)</span>
+                <span class="section-toggle">{{ isSectionOpen(sourceName) ? '▼' : '▶' }}</span>
+              </div>
+              <div v-show="isSectionOpen(sourceName)" class="full-evidence-section-body">
+                <div
+                  v-for="fact in group"
+                  :key="fact._idx"
+                  class="full-evidence-item"
+                >
+                  <div class="full-evidence-item-text">
+                    <span v-if="fact.relevance_score" class="full-evidence-score-inline" :style="{ color: getThresholdColor(fact.relevance_score) }">
+                      {{ fact.relevance_score }}分
+                    </span>
+                    <span v-if="fact.page" class="full-evidence-page">P{{ fact.page }}</span>
                     <p class="fact-text-fallback">{{ fact.text }}</p>
+                  </div>
+                  <div v-if="fact.topic" class="evidence-topics">
+                    <span class="topics-label">关联 Topic:</span>
+                    <span class="topic-tag">{{ fact.topic }}</span>
+                  </div>
+                  <div class="full-evidence-item-pdf">
+                    <button class="fold-btn" @click.stop="togglePdf(fact._idx)">
+                      {{ isPdfOpen(fact._idx) ? '收起PDF位置 ▲' : '查看PDF位置 ▼' }}
+                    </button>
+                    <div v-show="isPdfOpen(fact._idx)" class="evidence-pdf-content">
+                      <template v-if="getFactPageBboxes(fact).length">
+                        <div
+                          v-for="(pb, pi) in getFactPageBboxes(fact)"
+                          :key="pi"
+                          class="page-screenshot"
+                        >
+                          <div class="page-label">第 {{ pb.page }} 页</div>
+                          <canvas :ref="el => setEvidenceRef(el, fact._idx + '-' + pi, 'modal')" class="full-evidence-canvas"></canvas>
+                        </div>
+                      </template>
+                      <div v-else class="full-no-bbox">
+                        <p class="fact-text-fallback">{{ fact.text }}</p>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          </div>
-
-          <!-- 2. Thinking Process Section -->
-          <div v-if="parsedResult.thought" class="full-section thought-section">
-            <div class="full-section-title">🧠 深度推理过程 (Thinking Process)</div>
-            <div class="full-thought-box">
-              {{ parsedResult.thought }}
-            </div>
-          </div>
-
-          <!-- 3. Final Conclusion Section -->
-          <div v-if="parsedResult.conclusion" class="full-section conclusion-section">
-            <div class="full-section-title">✨ 最终结论 (Final Conclusion)</div>
-            <div class="full-conclusion-box">
-              {{ parsedResult.conclusion }}
             </div>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- API Publish Details & Mock Test Modal -->
+    <!-- API Publish Details Modal -->
     <div v-if="showApiModal" class="modal-overlay" @click.self="showApiModal = false">
       <div class="api-modal">
         <div class="modal-header">
@@ -503,23 +542,38 @@
             </div>
 
             <div class="api-section">
-              <div class="section-title">方式 2: API 接口调用</div>
+              <div class="section-title">方式 2: API 调用</div>
               <div class="api-info-card">
                 <div class="info-row">
-                  <span class="info-label">接口地址:</span>
-                  <code class="info-value">{{ apiBaseUrl }}</code>
+                  <span class="info-label">Endpoint:</span>
+                  <span class="info-value"><span class="method-tag">POST</span> {{ publicApiEndpoint }}</span>
                 </div>
                 <div class="info-row">
-                  <span class="info-label">请求方法:</span>
-                  <span class="info-value method-tag">POST</span>
+                  <span class="info-label">Content-Type:</span>
+                  <span class="info-value">application/json</span>
                 </div>
               </div>
-
+              <div class="api-info-card playground-card" @click="openPlayground">
+                <div class="playground-link">
+                  <span class="playground-icon">⚡</span>
+                  <div class="playground-text">
+                    <div class="playground-title">在线调试 API</div>
+                    <div class="playground-sub">跳转到 Swagger 风格调试页面，填写参数即可直接发送请求</div>
+                  </div>
+                  <span class="playground-arrow">→</span>
+                </div>
+              </div>
               <div class="code-block-wrapper">
-                <div class="code-header">Curl 调用示例</div>
-                <pre class="code-content">curl -X POST {{ apiBaseUrl }} \
-     -H "Content-Type: application/json" \
-     -d '{"query": "您的问题"}'</pre>
+                <div class="code-header">请求体 (Request Body)</div>
+                <pre class="code-content">{{ apiRequestExample }}</pre>
+              </div>
+              <div class="code-block-wrapper">
+                <div class="code-header">响应示例 (Response)</div>
+                <pre class="code-content">{{ apiResponseExample }}</pre>
+              </div>
+              <div class="code-block-wrapper">
+                <div class="code-header">cURL 命令</div>
+                <pre class="code-content">{{ apiCurlCommand }}</pre>
               </div>
             </div>
           </div>
@@ -535,10 +589,11 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { getProjectList, updateProject, rerankFacts, llmAnswer } from '../api/graph'
+import { getProjectList, updateProject, rerankFacts } from '../api/graph'
 import { hitTestSearch } from '../composables/useHitTestSearch'
-import { saveApp, getApp, publishApp, executeAppApi } from '../api/ai_app'
+import { saveApp, getApp, publishApp } from '../api/ai_app'
 import PdfViewer from '../components/PdfViewer.vue'
+import IntentMatchView from './IntentMatchView.vue'
 
 const props = defineProps({
   id: String
@@ -556,13 +611,13 @@ const showApiModal = ref(false)
 const projectListLoading = ref(false)
 const projects = ref([])
 const activeNodeId = ref(null)
+const activeTab = ref('workflow')
 
 // App State
 const appId = ref(props.id?.startsWith('app_') ? props.id : null)
 const appName = ref('新 AI 知识库应用')
 const isEditingAppName = ref(false)
 const appNameInput = ref(null)
-const showThought = ref(true)
 const showFullResult = ref(false)
 const isPublished = ref(false)
 
@@ -580,103 +635,141 @@ const handleAppNameBlur = () => {
   }
 }
 
-// API Mock Test State
-const mockQuery = ref('')
-const mockResult = ref(null)
-const mockLoading = ref(false)
-
-const apiBaseUrl = computed(() => `${window.location.origin}/api/ai-app/execute/${appId.value}`)
 const publicChatUrl = computed(() => `${window.location.origin}/chat/${appId.value}`)
 const iframeCode = computed(() => `<iframe src="${publicChatUrl.value}" width="100%" height="600px" frameborder="0"></iframe>`)
 
-// Results parsing logic
-const parsedResult = computed(() => {
-  const text = results.value.answer || ''
-  let thought = ''
-  let conclusion = text
+const publicApiEndpoint = computed(() => `${window.location.origin}/api/report/public-query`)
+const playgroundUrl = computed(() => `${window.location.origin}/playground/${appId.value}`)
 
-  // Match <thought> or <think> tags
-  const thoughtMatch = text.match(/<(thought|think)>([\s\S]*?)<\/\1>/i)
-  if (thoughtMatch) {
-    thought = thoughtMatch[2].trim()
-    conclusion = text.replace(thoughtMatch[0], '').trim()
-  } else if (text.includes('思考过程：') || text.includes('Thinking Process:')) {
-    // Fallback for custom markers
-    const parts = text.split(/结论：|Conclusion:/i)
-    if (parts.length > 1) {
-      thought = parts[0].replace(/思考过程：|Thinking Process:/i, '').trim()
-      conclusion = parts[1].trim()
+const apiRequestExample = computed(() => JSON.stringify({
+  app_id: appId.value,
+  query: "输入您的问题"
+}, null, 2))
+
+const apiResponseExample = computed(() => JSON.stringify({
+  success: true,
+  data: {
+    query: "输入您的问题",
+    results: [
+      {
+        text: "条款具体内容...",
+        source: "GB50054.pdf",
+        page: 12,
+        pdf_bboxes: [[12, 100, 200, 300, 400], [13, 50, 150, 250, 350]],
+        bbox: [100, 200, 300, 400],
+        page_width: 595,
+        page_height: 842,
+        relevance_score: 85,
+        pdf_url: `${window.location.origin}/api/graph/project/xxx/document/GB50054.pdf?page=12`,
+        source_link: `${window.location.origin}/preview/${appId.value}?source=GB50054.pdf&page=12&pdf_bboxes=${encodeURIComponent(JSON.stringify([[12,100,200,300,400],[13,50,150,250,350]]))}&graph_id=xxx`
+      }
+    ]
+  }
+}, null, 2))
+
+const apiCurlCommand = computed(() => {
+  const payload = JSON.stringify({ app_id: appId.value, query: "输入您的问题" })
+  return `curl -X POST "${publicApiEndpoint.value}" \\
+  -H "Content-Type: application/json" \\
+  -d '${payload}'`
+})
+
+const openPlayground = () => {
+  window.open(playgroundUrl.value, '_blank')
+}
+
+// 将 fact 的 pdf_bboxes / bbox 统一为 [{ page, bbox }, ...]
+const getFactPageBboxes = (fact) => {
+  if (fact.pdf_bboxes && Array.isArray(fact.pdf_bboxes) && fact.pdf_bboxes.length > 0) {
+    return fact.pdf_bboxes
+      .filter(b => b && b.length >= 5)
+      .map(b => ({ page: b[0], bbox: b.slice(1, 5) }))
+  }
+  if (fact.bbox && fact.bbox.length === 4 && fact.page) {
+    return [{ page: fact.page, bbox: fact.bbox }]
+  }
+  return []
+}
+
+const formatPageRange = (pageBboxes) => {
+  if (!pageBboxes || pageBboxes.length === 0) return ''
+  const pages = pageBboxes.map(pb => pb.page).sort((a, b) => a - b)
+  if (pages.length === 1) return `P${pages[0]}`
+  // 合并连续页码
+  const ranges = []
+  let start = pages[0]
+  let end = pages[0]
+  for (let i = 1; i < pages.length; i++) {
+    if (pages[i] === end + 1) {
+      end = pages[i]
+    } else {
+      ranges.push(start === end ? `P${start}` : `P${start}~P${end}`)
+      start = end = pages[i]
     }
   }
-
-  return { thought, conclusion }
-})
+  ranges.push(start === end ? `P${start}` : `P${start}~P${end}`)
+  return ranges.join(', ')
+}
 
 const renderEvidenceScreenshots = async (type = 'node') => {
   const targetFacts = results.value.facts
-  // 保留索引以便匹配 canvas ref
   const validFacts = targetFacts.reduce((acc, f, idx) => {
-    if (f.bbox && f.bbox.length === 4 && f.graph_id && f.source) {
-      acc.push({ ...f, _renderIdx: idx })
+    const pageBboxes = getFactPageBboxes(f)
+    if (pageBboxes.length > 0 && f.graph_id && f.source) {
+      acc.push({ ...f, _renderIdx: idx, _pageBboxes: pageBboxes })
     }
     return acc
   }, [])
 
   if (validFacts.length === 0) return
 
-  // Ensure PDF.js is ready
   if (!pdfjsLib.value) await initPdfJs()
 
-  // Cache for PDF documents
-  const pdfDocCache = {}
-
+  // 按 PDF 分组：不同 PDF 之间并行，同一 PDF 内串行
+  const factsByPdf = new Map()
   for (const fact of validFacts) {
-    const renderIdx = fact._renderIdx
-    const canvas = evidenceCanvasRefs.value[type][renderIdx]
-    if (!canvas) continue
+    const cacheKey = `${fact.graph_id}:${fact.source}`
+    if (!factsByPdf.has(cacheKey)) factsByPdf.set(cacheKey, [])
+    factsByPdf.get(cacheKey).push(fact)
+  }
+
+  // 渲染单条 fact 的某一页截图
+  const renderSinglePage = async (fact, pageNum, bbox, refKey, pdfDoc) => {
+    const canvas = evidenceCanvasRefs.value[type][refKey]
+    if (!canvas) return
 
     try {
-      const cacheKey = `${fact.graph_id}:${fact.source}`
-      let pdfDoc = pdfDocCache[cacheKey]
-
-      if (!pdfDoc) {
-        const apiUrl = `${window.location.origin}/api/graph/project/${fact.graph_id}/document/${encodeURIComponent(fact.source)}`
-        const response = await fetch(apiUrl)
-        if (!response.ok) continue
-        const blob = await response.blob()
-        const arrayBuffer = await blob.arrayBuffer()
-        pdfDoc = await pdfjsLib.value.getDocument({ data: arrayBuffer }).promise
-        pdfDocCache[cacheKey] = pdfDoc
-      }
-
-      const page = await pdfDoc.getPage(fact.page || 1)
+      const page = await pdfDoc.getPage(pageNum)
       const context = canvas.getContext('2d')
 
-      // Logic: Extract the bbox area + some padding
-      const bbox = fact.bbox
-      const hPadding = type === 'modal' ? 120 : 60
-      const vPadding = type === 'modal' ? 360 : 180
-      const cropX = Math.max(0, bbox[0] - hPadding)
-      const cropY = Math.max(0, bbox[1] - vPadding)
-      const cropW = (bbox[2] - bbox[0]) + hPadding * 2
-      const cropH = (bbox[3] - bbox[1]) + vPadding * 2
+      const unscaledViewport = page.getViewport({ scale: 1 })
+      const pageW = unscaledViewport.width
+      const pageH = unscaledViewport.height
 
-      const scale = type === 'modal' ? 3.0 : 2.0
+      const vPadding = type === 'modal' ? 240 : 180
+      const rawCropY = bbox[1] - vPadding
+      const rawCropH = (bbox[3] - bbox[1]) + vPadding * 2
+
+      const cropX = 0
+      const cropW = pageW
+      const cropY = Math.max(0, Math.min(rawCropY, pageH - rawCropH))
+      const cropH = Math.min(rawCropH, pageH - cropY)
+
+      const scale = type === 'modal' ? 2.5 : 2.0
       const viewport = page.getViewport({ scale })
 
-      const tempCanvas = document.createElement('canvas')
-      tempCanvas.width = viewport.width
-      tempCanvas.height = viewport.height
-      const tempCtx = tempCanvas.getContext('2d')
+      const xRatio = viewport.width / pageW
+      const yRatio = viewport.height / pageH
 
+      const { canvas: tempCanvas, ctx: tempCtx } = _getTempCanvas(viewport.width, viewport.height)
       await page.render({ canvasContext: tempCtx, viewport }).promise
 
-      const sX = cropX * scale
-      const sY = cropY * scale
-      const sW = cropW * scale
-      const sH = cropH * scale
+      const sX = cropX * xRatio
+      const sY = cropY * yRatio
+      const sW = cropW * xRatio
+      const sH = cropH * yRatio
 
-      const targetWidth = type === 'modal' ? 1100 : 480
+      const targetWidth = type === 'modal' ? 800 : 480
       canvas.width = targetWidth
       canvas.height = (sH / sW) * targetWidth
 
@@ -696,9 +789,41 @@ const renderEvidenceScreenshots = async (type = 'node') => {
       context.strokeRect(hX, hY, hW, hH)
 
     } catch (err) {
-      console.error(`Failed to render screenshot for fact ${renderIdx}:`, err)
+      console.error(`Failed to render screenshot for ${refKey}:`, err)
     }
   }
+
+  // 并行处理不同 PDF，同一 PDF 内串行渲染
+  await Promise.all(
+    Array.from(factsByPdf.entries()).map(async ([cacheKey, facts]) => {
+      let pdfDoc = _pdfDocCache[cacheKey]
+      if (!pdfDoc) {
+        const fact = facts[0]
+        const apiUrl = `${window.location.origin}/api/graph/project/${fact.graph_id}/document/${encodeURIComponent(fact.source)}`
+        try {
+          const response = await fetch(apiUrl)
+          if (!response.ok) {
+            console.warn(`[Evidence] PDF fetch failed: ${response.status} ${cacheKey}`)
+            return
+          }
+          const blob = await response.blob()
+          const arrayBuffer = await blob.arrayBuffer()
+          pdfDoc = await pdfjsLib.value.getDocument({ data: arrayBuffer }).promise
+          _pdfDocCache[cacheKey] = pdfDoc
+        } catch (err) {
+          console.error(`[Evidence] Failed to load PDF ${cacheKey}:`, err)
+          return
+        }
+      }
+      for (const fact of facts) {
+        for (let pi = 0; pi < fact._pageBboxes.length; pi++) {
+          const { page: pageNum, bbox } = fact._pageBboxes[pi]
+          const refKey = `${fact._renderIdx}-${pi}`
+          await renderSinglePage(fact, pageNum, bbox, refKey, pdfDoc)
+        }
+      }
+    })
+  )
 }
 
 const toggleFullResult = () => {
@@ -713,6 +838,26 @@ const toggleFullResult = () => {
 // Document Viewer State
 const showDocViewer = ref(false)
 const pdfjsLib = ref(null)
+
+// 组件级 PDF 缓存和 tempCanvas 池（跨 node/modal 复用，避免重复下载和创建）
+const _pdfDocCache = {}
+const _tempCanvasPool = {}
+
+function _getTempCanvas(width, height) {
+  const key = `${width}:${height}`
+  let canvas = _tempCanvasPool[key]
+  if (canvas) {
+    // 复用：清除已有内容
+    const ctx = canvas.getContext('2d')
+    ctx.clearRect(0, 0, width, height)
+    return { canvas, ctx }
+  }
+  canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  _tempCanvasPool[key] = canvas
+  return { canvas, ctx: canvas.getContext('2d') }
+}
 
 const currentDoc = ref({
   filename: '',
@@ -812,10 +957,15 @@ const workflowData = ref({
   query: '',
   selectedGraphIds: [],
   temperature: 0.7,
-  similarityThreshold: 50,   // 相似度阈值：检索后预过滤，减少 reranking 数量
-  topK: 5,                 // top_k：bge-reranker-v2-m3 精排后保留得分最高的 K 条
-  rerankMinScore: 0,        // 重排分数阈值：低于此分数的 facts 会被过滤（默认0）
-  rootTypes: ['Entity', 'Term'],  // 根节点类型（与 hit-test 对齐）
+  similarityThreshold: 0,
+  topK: 5,
+  rerankMinScore: 0,
+  rootTypes: ['Entity', 'Term'],
+  intentMatch: {
+    topicLimit: 50,
+    entityLimit: 50,
+    rerankMinScore: 0,
+  },
 })
 
 const results = ref({
@@ -833,6 +983,42 @@ const results = ref({
   }
 })
 
+// Section / PDF fold state
+const expandedSections = ref(new Set())
+const expandedPdfs = ref(new Set())
+
+const groupedFacts = computed(() => {
+  const groups = {}
+  for (let i = 0; i < results.value.facts.length; i++) {
+    const fact = results.value.facts[i]
+    const key = fact.source || 'Unknown'
+    if (!groups[key]) groups[key] = []
+    groups[key].push({ ...fact, _idx: i })
+  }
+  return groups
+})
+
+const isSectionOpen = (source) => expandedSections.value.has(source)
+const isPdfOpen = (idx) => expandedPdfs.value.has(idx)
+
+const toggleSection = (source) => {
+  const s = expandedSections.value
+  if (s.has(source)) s.delete(source)
+  else s.add(source)
+}
+
+const togglePdf = (idx) => {
+  const s = expandedPdfs.value
+  if (s.has(idx)) s.delete(idx)
+  else {
+    s.add(idx)
+    nextTick(() => {
+      renderEvidenceScreenshots('node')
+      renderEvidenceScreenshots('modal')
+    })
+  }
+}
+
 // Evidence Canvas management
 
 // Evidence Canvas management
@@ -842,22 +1028,18 @@ const setEvidenceRef = (el, factIndex, type = 'node') => {
   if (el) evidenceCanvasRefs.value[type][factIndex] = el
 }
 
-const showPromptModal = ref(false)
-
 // Node Positions and Config
 const nodes = ref([
-  { id: 'n1', type: 'input', title: '用户输入 (Input)', icon: '📝', x: 50, y: 150, status: 'pending' },
-  { id: 'n2', type: 'retrieval', title: '知识库检索 (Retrieval)', icon: '🔍', x: 350, y: 150, status: 'pending' },
-  { id: 'n_rerank', type: 'rerank', title: 'bge-reranker-v2-m3 精排', icon: '🃏', x: 650, y: 150, status: 'pending' },
-  { id: 'n3', type: 'llm', title: '大模型推理 (LLM)', icon: '🧠', x: 950, y: 150, status: 'pending' },
-  { id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 1250, y: 150, status: 'pending' }
+  { id: 'n1', type: 'input', title: '用户输入 (Input)', icon: '📝', x: 60, y: 180, status: 'pending' },
+  { id: 'n2', type: 'retrieval', title: '知识库检索 (Retrieval)', icon: '🔍', x: 460, y: 180, status: 'pending' },
+  { id: 'n_rerank', type: 'rerank', title: 'bge-reranker-v2-m3 精排', icon: '🃏', x: 860, y: 180, status: 'pending' },
+  { id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 1260, y: 180, status: 'pending' }
 ])
 
 const connections = [
   { from: 'n1', to: 'n2' },
   { from: 'n2', to: 'n_rerank' },
-  { from: 'n_rerank', to: 'n3' },
-  { from: 'n3', to: 'n4' }
+  { from: 'n_rerank', to: 'n4' }
 ]
 
 const draggingNode = ref(null)
@@ -888,7 +1070,7 @@ const getConnectionPath = (conn) => {
 
   if (!fromNode || !toNode) return ''
 
-  const x1 = fromNode.x + 280
+  const x1 = fromNode.x + 400
   const y1 = fromNode.y + 40
   const x2 = toNode.x
   const y2 = toNode.y + 40
@@ -945,6 +1127,30 @@ const resetWorkflow = () => {
   nodes.value.forEach(n => {
     n.status = 'pending'
     n.duration = null
+  })
+}
+
+const initNodeLayout = () => {
+  nextTick(() => {
+    const canvasEl = canvas.value
+    if (!canvasEl) return
+    const cw = canvasEl.clientWidth
+    const ch = canvasEl.clientHeight
+    const nodeW = 400
+    const gap = 120
+    const totalW = nodeW * 4 + gap * 3
+    const startX = Math.max(40, (cw - totalW) / 2)
+    const startY = Math.max(60, (ch - 200) / 2)
+    const layout = [
+      { id: 'n1', x: startX, y: startY },
+      { id: 'n2', x: startX + nodeW + gap, y: startY },
+      { id: 'n_rerank', x: startX + (nodeW + gap) * 2, y: startY },
+      { id: 'n4', x: startX + (nodeW + gap) * 3, y: startY }
+    ]
+    layout.forEach(pos => {
+      const node = nodes.value.find(n => n.id === pos.id)
+      if (node) { node.x = pos.x; node.y = pos.y }
+    })
   })
 }
 
@@ -1036,39 +1242,14 @@ const runWorkflow = async () => {
       }
     }
 
-    // ===== Stage 3: LLM 推理 =====
-    const llmNode = nodes.value.find(n => n.type === 'llm')
-    if (llmNode) llmNode.status = 'running'
-
-    const llmStart = Date.now()
-    const llmRes = await llmAnswer({
-      facts: filteredFacts,
-      query: workflowData.value.query,
-      temperature: workflowData.value.temperature,
-    })
-
-    if (llmRes.success && llmRes.data) {
-      const llmDuration = ((Date.now() - llmStart) / 1000).toFixed(2)
-      if (llmNode) {
-        llmNode.status = 'completed'
-        llmNode.duration = llmDuration
-      }
-      results.value.answer = llmRes.data.answer || ''
-      if (llmRes.data.prompts) {
-        results.value.prompts = llmRes.data.prompts
-      }
-    } else {
-      if (llmNode) {
-        llmNode.status = 'completed'
-        llmNode.duration = ((Date.now() - llmStart) / 1000).toFixed(2)
-      }
-    }
-
-    // ===== Stage 4: 输出 =====
+    // ===== Stage 3: 输出 =====
     const outputNode = nodes.value.find(n => n.type === 'output')
     if (outputNode) {
       outputNode.status = 'completed'
       outputNode.duration = ((Date.now() - workflowStart) / 1000).toFixed(2)
+      // 默认展开所有 section
+      const sources = new Set(results.value.facts.map(f => f.source || 'Unknown'))
+      sources.forEach(s => expandedSections.value.add(s))
       nextTick(() => {
         renderEvidenceScreenshots('node')
       })
@@ -1145,24 +1326,6 @@ const handlePublish = async () => {
   }
 }
 
-const runMockTest = async () => {
-  if (!mockQuery.value.trim()) return
-  mockLoading.value = true
-  mockResult.value = null
-  try {
-    const res = await executeAppApi(appId.value, mockQuery.value)
-    if (res.success) {
-      mockResult.value = res.data
-    } else {
-      mockResult.value = { error: res.error }
-    }
-  } catch (err) {
-    mockResult.value = { error: err.message }
-  } finally {
-    mockLoading.value = false
-  }
-}
-
 const loadAppConfig = async (id) => {
   try {
     const res = await getApp(id)
@@ -1171,7 +1334,15 @@ const loadAppConfig = async (id) => {
       appName.value = app.name
       isPublished.value = app.is_published || false
       if (app.nodes && app.nodes.length > 0) {
-        nodes.value = app.nodes
+        // 兼容旧数据：移除已废弃的 LLM 节点
+        const migratedNodes = app.nodes.filter(n => n.type !== 'llm')
+        // 如果旧配置缺少 output 节点（被 LLM 隔开的情况），补上一个
+        const hasOutput = migratedNodes.some(n => n.type === 'output')
+        const hasRerank = migratedNodes.some(n => n.type === 'rerank')
+        if (!hasOutput && hasRerank) {
+          migratedNodes.push({ id: 'n4', type: 'output', title: '结果输出 (Output)', icon: '✨', x: 1260, y: 180, status: 'pending' })
+        }
+        nodes.value = migratedNodes
       }
       if (app.workflow_data) {
         workflowData.value = { ...workflowData.value, ...app.workflow_data }
@@ -1213,6 +1384,8 @@ onMounted(async () => {
   await loadProjects()
   if (appId.value) {
     await loadAppConfig(appId.value)
+  } else {
+    initNodeLayout()
   }
 })
 
@@ -1484,7 +1657,7 @@ onUnmounted(() => {
 
 .flow-node {
   position: absolute;
-  width: 280px;
+  width: 400px;
   background: #fff;
   border-radius: 10px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.1);
@@ -1868,52 +2041,170 @@ onUnmounted(() => {
 .source-evidence-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
-.evidence-item {
+.evidence-section {
   border: 1px solid #e0e0e0;
-  border-radius: 6px;
+  border-radius: 8px;
   overflow: hidden;
   background: #fff;
 }
 
-.evidence-meta {
-  padding: 4px 8px;
-  background: #fafafa;
-  border-bottom: 1px solid #f0f0f0;
+.evidence-section-header {
+  padding: 8px 12px;
+  background: #f5f7fa;
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s;
 }
 
-.evidence-score-badge {
+.evidence-section-header:hover {
+  background: #e8ecf1;
+}
+
+.evidence-section-header .section-toggle {
+  font-size: 10px;
+  color: #909399;
+}
+
+.evidence-section-header .section-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #333;
+}
+
+.evidence-section-body {
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.evidence-item {
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fafafa;
+}
+
+.evidence-text-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.evidence-score-badge-small {
   font-size: 10px;
   color: #fff;
-  padding: 1px 6px;
-  border-radius: 8px;
+  padding: 1px 5px;
+  border-radius: 6px;
   font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
-.source-tag {
+.evidence-text {
+  font-size: 12px;
+  color: #333;
+  line-height: 1.6;
+  flex: 1;
+}
 
+.evidence-page {
+  font-size: 10px;
+  color: #909399;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.evidence-pdf-fold {
+  margin-top: 4px;
+}
+
+.evidence-topics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding-left: 2px;
+}
+
+.evidence-topics .topics-label {
   font-size: 10px;
   color: #909399;
   font-weight: 600;
+  margin-right: 2px;
 }
 
-.evidence-screenshot-box {
-  padding: 5px;
+.evidence-topics .topic-tag {
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #f6ffed;
+  color: #389e0d;
+  border: 1px solid #b7eb8f;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fold-btn {
+  background: #f0f2f5;
+  border: 1px solid #dcdfe6;
+  color: #606266;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.fold-btn:hover {
+  background: #e6f7ff;
+  border-color: #409eff;
+  color: #409eff;
+}
+
+.evidence-pdf-content {
+  margin-top: 6px;
+  padding: 4px;
+  background: #525659;
+  border-radius: 4px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  background: #525659;
 }
 
 .evidence-canvas {
   max-width: 100%;
   box-shadow: 0 2px 8px rgba(0,0,0,0.2);
   background: #fff;
+}
+
+.page-screenshot {
+  margin-bottom: 12px;
+}
+
+.page-screenshot:last-child {
+  margin-bottom: 0;
+}
+
+.page-label {
+  font-size: 12px;
+  color: #666;
+  padding: 4px 8px;
+  background: #f0f0f0;
+  border-radius: 4px 4px 0 0;
+  display: inline-block;
 }
 
 .no-bbox-hint {
@@ -2165,6 +2456,87 @@ onUnmounted(() => {
   white-space: pre-wrap;
 }
 
+.full-evidence-section {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.full-evidence-section-header {
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s;
+}
+
+.full-evidence-section-header:hover {
+  background: #e8ecf1;
+}
+
+.full-evidence-section-header .section-toggle {
+  font-size: 12px;
+  color: #909399;
+}
+
+.full-evidence-section-body {
+  padding: 15px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  background: #f8f9fa;
+}
+
+.full-evidence-item {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.full-evidence-item-text {
+  margin-bottom: 8px;
+}
+
+.full-evidence-score-inline {
+  font-size: 12px;
+  font-weight: 800;
+  background: #f8f9fa;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #dee2e6;
+  margin-right: 8px;
+}
+
+.full-evidence-page {
+  font-size: 11px;
+  color: #909399;
+  margin-right: 8px;
+}
+
+.full-evidence-item-text .fact-text-fallback {
+  margin: 8px 0 0 0;
+  font-size: 14px;
+  line-height: 1.8;
+  color: #4a5568;
+  white-space: pre-wrap;
+}
+
+.full-evidence-item-pdf {
+  margin-top: 8px;
+}
+
+.full-evidence-text {
+  padding: 15px 20px;
+  background: #f8f9fa;
+  border-top: 1px solid #e0e0e0;
+}
+
+.full-evidence-text .fact-text-fallback {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.8;
+  color: #4a5568;
+  white-space: pre-wrap;
+}
+
 /* API Modal Styles */
 .api-modal {
   background: #fff;
@@ -2193,32 +2565,36 @@ onUnmounted(() => {
 }
 
 .api-info-card {
-  background: #f8f9fa;
-  border: 1px solid #e9ecef;
-  border-radius: 8px;
-  padding: 15px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  padding: 16px 24px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
 }
 
 .info-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .info-label {
-  color: #6c757d;
-  font-weight: 600;
-  width: 100px;
+  color: #1a1a1a;
+  font-weight: 700;
+  font-size: 14px;
+  white-space: nowrap;
 }
 
 .info-value {
-  font-family: monospace;
+  font-family: 'Consolas', 'Monaco', monospace;
   color: #333;
   word-break: break-all;
+  font-size: 13px;
 }
 
 .method-tag {
@@ -2226,6 +2602,52 @@ onUnmounted(() => {
   color: #409eff;
   padding: 2px 8px;
   border-radius: 4px;
+  font-weight: 700;
+}
+
+.playground-card {
+  cursor: pointer;
+  transition: all 0.2s;
+  border-color: #409eff;
+  background: #fff;
+}
+
+.playground-card:hover {
+  background: #f0f7ff;
+  box-shadow: 0 2px 8px rgba(64, 158, 255, 0.15);
+}
+
+.playground-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.playground-icon {
+  font-size: 22px;
+}
+
+.playground-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.playground-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #409eff;
+}
+
+.playground-sub {
+  font-size: 12px;
+  color: #909399;
+}
+
+.playground-arrow {
+  font-size: 18px;
+  color: #409eff;
   font-weight: 700;
 }
 
@@ -2254,29 +2676,6 @@ onUnmounted(() => {
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;
-}
-
-.mock-textarea {
-  width: 100%;
-  height: 80px;
-  border: 1px solid #dcdfe6;
-  border-radius: 8px;
-  padding: 12px;
-  font-size: 13px;
-  resize: none;
-  outline: none;
-  transition: border-color 0.2s;
-}
-
-.mock-textarea:focus {
-  border-color: #409eff;
-}
-
-.mock-input-group {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  align-items: flex-end;
 }
 
 .result-pre {
@@ -2613,6 +3012,34 @@ onUnmounted(() => {
   font-weight: 700;
 }
 
+.object-topics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding-left: 4px;
+}
+
+.topics-label {
+  font-size: 10px;
+  color: #909399;
+  font-weight: 600;
+  margin-right: 2px;
+}
+
+.topic-tag {
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #f6ffed;
+  color: #389e0d;
+  border: 1px solid #b7eb8f;
+  cursor: default;
+  white-space: nowrap;
+}
+
 .object-summary {
   font-size: 11px;
   color: #909399;
@@ -2757,5 +3184,36 @@ onUnmounted(() => {
   border-radius: 50%;
   animation: spin 1s linear infinite;
   display: inline-block;
+}
+
+/* Tab Bar */
+.tab-bar {
+  display: flex;
+  background: #fff;
+  border-bottom: 1px solid #e0e0e0;
+  padding: 0 20px;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.tab-btn {
+  padding: 10px 20px;
+  border: none;
+  background: none;
+  font-size: 14px;
+  font-weight: 600;
+  color: #606266;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  color: #000;
+}
+
+.tab-btn.active {
+  color: #000;
+  border-bottom-color: #000;
 }
 </style>

@@ -433,22 +433,80 @@
                       </div>
 
                       <!-- 知识实体 -->
-                      <div class="clause-entities-section" v-if="clause.topic || (clause.entities?.length || clause.related_elements?.length)">
-                        <div v-if="clause.topic" class="clause-topic-row">
-                          <span class="topic-label">📝 摘要</span>
-                          <span class="topic-content">{{ clause.topic }}</span>
+                      <div class="clause-entities-section" v-if="clause.topics?.length || clause.related_elements?.length || clause.images?.length || clause.referenced_tables?.length">
+                        <!-- 多主题分组展示 -->
+                        <template v-if="clause.topics?.length > 1">
+                          <div class="entity-section-label">📝 主题分析</div>
+                          <div v-for="(tp, ti) in clause.topics" :key="'topic-' + ti" class="topic-group">
+                            <div class="topic-group-header">
+                              <span class="topic-group-label">主题 {{ ti + 1 }}</span>
+                              <span class="topic-group-title">{{ tp.topic }}</span>
+                            </div>
+                            <div class="topic-group-entities">
+                              <div class="entity-item-row" v-for="(ent, ei) in tp.entities" :key="'t-ent-' + ti + '-' + ei">
+                                <span class="entity-type-tag">noun</span>
+                                <span class="entity-key">{{ ent }}</span>
+                              </div>
+                              <div v-if="!tp.entities?.length" class="topic-empty">（无实体）</div>
+                            </div>
+                          </div>
+                        </template>
+                        <!-- 单主题展示 -->
+                        <template v-else-if="clause.topics?.length === 1">
+                          <div v-if="clause.topics[0].topic" class="clause-topic-row collapsible" @click.stop="toggleEntityExpand(clause.clause_id)">
+                            <span class="topic-toggle-icon">{{ expandedEntityClauseIds.has(clause.clause_id) ? '▼' : '▶' }}</span>
+                            <span class="topic-label">📝 摘要</span>
+                            <span class="topic-content">{{ clause.topics[0].topic }}</span>
+                          </div>
+                          <div v-show="expandedEntityClauseIds.has(clause.clause_id)" class="entity-expand-panel">
+                            <div v-if="clause.topics[0].entities?.length" class="entity-section-label">📎 知识实体</div>
+                            <div class="entity-item-row" v-for="(elem, ei) in clause.topics[0].entities" :key="'entity-' + ei">
+                              <template v-if="typeof elem === 'string'">
+                                <span class="entity-type-tag">noun</span>
+                                <span class="entity-key">{{ elem }}</span>
+                              </template>
+                              <template v-else>
+                                <span class="entity-type-tag">{{ elem.element_type || 'noun_entity' }}</span>
+                                <span class="entity-key">{{ elem.key }}</span>
+                                <span v-if="elem.value" class="entity-value">= {{ elem.value }}</span>
+                                <span v-if="elem.unit" class="entity-unit">{{ elem.unit }}</span>
+                              </template>
+                            </div>
+                          </div>
+                        </template>
+                        <!-- 图片及 VLM 分析结果 -->
+                        <div v-if="clause.images?.length" class="clause-images-section">
+                          <div class="entity-section-label">🖼️ 图片分析</div>
+                          <div v-for="(img, ii) in clause.images" :key="'img-' + ii" class="clause-image-item">
+                            <div class="media-type-badge media-type-image">图片</div>
+                            <div v-if="img.caption" class="image-caption">{{ img.caption }}</div>
+                            <div v-if="img.content" class="image-preview">
+                              <img :src="img.content" :alt="img.caption || '图片'" style="max-width: 200px; max-height: 150px; object-fit: contain; border: 1px solid #ddd; border-radius: 4px;" />
+                            </div>
+                            <div v-if="img.img_vlm_content" class="vlm-content">
+                              <span class="vlm-label">VLM 描述：</span>
+                              <span class="vlm-text">{{ img.img_vlm_content }}</span>
+                            </div>
+                            <div v-else-if="img.vlm_status && img.vlm_status !== 'ok'" class="vlm-status-error">
+                              <span class="vlm-label">VLM 状态：</span>
+                              <span class="vlm-error">{{ img.vlm_status }}</span>
+                            </div>
+                          </div>
                         </div>
-                        <div v-if="clause.entities?.length" class="entity-section-label">📎 知识实体</div>
-                        <div class="entity-item-row" v-for="(elem, ei) in clause.entities" :key="'entity-' + ei">
-                          <template v-if="typeof elem === 'string'">
-                            <span class="entity-type-tag">noun</span>
-                            <span class="entity-key">{{ elem }}</span>
-                          </template>
-                          <template v-else>
-                            <span class="entity-type-tag">{{ elem.element_type || 'noun_entity' }}</span>
-                            <span class="entity-key">{{ elem.key }}</span>
-                            <span v-if="elem.value" class="entity-value">= {{ elem.value }}</span>
-                            <span v-if="elem.unit" class="entity-unit">{{ elem.unit }}</span>
+                        <!-- 引用表格图片 -->
+                        <div v-if="clause.referenced_tables?.length" class="clause-tables-section">
+                          <div class="entity-section-label">📊 引用表格</div>
+                          <template v-for="(tb, ti2) in clause.referenced_tables" :key="'tb-' + ti2">
+                            <div v-if="tb && typeof tb === 'object' && (tb.table_image_base64_content || tb.table_id || tb.caption)" class="clause-image-item">
+                              <div class="media-type-badge media-type-table">表格</div>
+                              <div v-if="tb.table_id || tb.caption" class="image-caption">
+                                <span v-if="tb.table_id" class="table-id">{{ tb.table_id }}</span>
+                                <span v-if="tb.caption"> {{ tb.caption }}</span>
+                              </div>
+                              <div v-if="tb.table_image_base64_content" class="image-preview">
+                                <img :src="tb.table_image_base64_content" :alt="tb.table_id || tb.caption || '表格'" style="max-width: 240px; max-height: 180px; object-fit: contain; border: 1px solid #ddd; border-radius: 4px;" />
+                              </div>
+                            </div>
                           </template>
                         </div>
                       </div>
@@ -471,10 +529,17 @@
                               第 {{ getClauseById(chapter, childId)?.page }} 页
                             </span>
                           </div>
-                          <div v-if="getClauseById(chapter, childId)?.entities?.length" class="entity-section-label">📎 知识实体</div>
-                          <div class="entity-item-row" v-for="(elem, ei) in getClauseById(chapter, childId)?.entities" :key="'child-entity-' + ei">
-                            <span class="entity-type-tag">{{ elem.element_type || 'noun' }}</span>
-                            <span class="entity-key">{{ typeof elem === 'string' ? elem : elem.key }}</span>
+                          <div v-if="getClauseById(chapter, childId)?.topics?.[0]?.topic" class="clause-topic-row collapsible child-topic" @click.stop="toggleEntityExpand(childId)">
+                            <span class="topic-toggle-icon">{{ expandedEntityClauseIds.has(childId) ? '▼' : '▶' }}</span>
+                            <span class="topic-label">📝 摘要</span>
+                            <span class="topic-content">{{ getClauseById(chapter, childId)?.topics?.[0]?.topic }}</span>
+                          </div>
+                          <div v-show="expandedEntityClauseIds.has(childId)" class="entity-expand-panel">
+                            <div v-if="getClauseById(chapter, childId)?.topics?.[0]?.entities?.length" class="entity-section-label">📎 知识实体</div>
+                            <div class="entity-item-row" v-for="(elem, ei) in getClauseById(chapter, childId)?.topics?.[0]?.entities" :key="'child-entity-' + ei">
+                              <span class="entity-type-tag">{{ elem.element_type || 'noun' }}</span>
+                              <span class="entity-key">{{ typeof elem === 'string' ? elem : elem.key }}</span>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -523,88 +588,82 @@
     </div>
 
     <!-- 章节匹配模式选择弹窗 -->
-    <div v-if="showChapterPatternModal" class="modal-overlay" @click.self="showChapterPatternModal = false">
-      <div class="modal-card" style="min-width: 480px;">
-        <div class="modal-header">
-          <h3>重新分析 - 章节模式选择</h3>
-          <button class="modal-close" @click="showChapterPatternModal = false">×</button>
-        </div>
-        <div class="modal-body">
-          <p class="modal-desc">重新分析将清除已有数据。请选择章节锚点和最小条款容器锚点：</p>
+    <template v-if="showChapterPatternModal">
+      <div class="modal-backdrop" @click="showChapterPatternModal = false"></div>
+      <div class="modal-wrapper" @keydown.esc="showChapterPatternModal = false" tabindex="-1">
+        <div class="modal-card anchor-modal">
+          <div class="modal-header">
+            <h3>智能分析 - 章节模式选择</h3>
+            <button class="modal-close" @click="showChapterPatternModal = false">×</button>
+          </div>
+          <div class="modal-body">
+          <div v-if="anchorAutoRecommended" class="anchor-recommendation">
+            <div class="anchor-rec-title">🎯 自动推荐结果</div>
+            <div class="anchor-rec-body">
+              章节 <strong>{{ chapterAnchor }}</strong>
+              <span class="anchor-rec-sep">·</span>
+              容器 <strong>{{ clauseContainer }}</strong>
+            </div>
+            <div v-if="anchorReason" class="anchor-rec-reason">{{ anchorReason }}</div>
+            <div v-if="useMineruTitles" class="anchor-title-mode-hint">
+              📄 检测到文档无标准条款层级（x.x.x），已自动切换为 <strong>MinerU Title 分段模式</strong>，将以文档标题作为章节切分。
+            </div>
+          </div>
 
           <div class="pattern-section">
-            <div class="pattern-section-title">章节锚点（一级父节点）：</div>
+            <div class="pattern-section-title">章节锚点（一级父节点）</div>
             <div class="pattern-options">
               <label class="pattern-option" :class="{ active: chapterAnchor === 'x' }">
                 <input type="radio" v-model="chapterAnchor" value="x" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x</span>
-                  <span class="pattern-desc">如 "2 术语"</span>
-                </div>
+                <span class="pattern-name">x</span>
+                <span class="pattern-desc">2 术语</span>
               </label>
               <label class="pattern-option" :class="{ active: chapterAnchor === 'x.x' }">
                 <input type="radio" v-model="chapterAnchor" value="x.x" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x</span>
-                  <span class="pattern-desc">如 "2.1 配电"</span>
-                </div>
+                <span class="pattern-name">x.x</span>
+                <span class="pattern-desc">2.1 配电</span>
               </label>
               <label class="pattern-option" :class="{ active: chapterAnchor === 'x.x.x' }">
                 <input type="radio" v-model="chapterAnchor" value="x.x.x" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x.x</span>
-                  <span class="pattern-desc">如 "2.1.1 导体"</span>
-                </div>
+                <span class="pattern-name">x.x.x</span>
+                <span class="pattern-desc">2.1.1 导体</span>
               </label>
               <label class="pattern-option" :class="{ active: chapterAnchor === 'x.x.x.x' }">
                 <input type="radio" v-model="chapterAnchor" value="x.x.x.x" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x.x.x</span>
-                  <span class="pattern-desc">如 "2.1.1.1 子导体"</span>
-                </div>
+                <span class="pattern-name">x.x.x.x</span>
+                <span class="pattern-desc">2.1.1.1</span>
               </label>
             </div>
           </div>
 
           <div class="pattern-section">
-            <div class="pattern-section-title">最小条款容器锚点（二级）：</div>
+            <div class="pattern-section-title">最小条款容器锚点（二级）</div>
             <div class="pattern-options">
               <label class="pattern-option" :class="{ active: clauseContainer === 'x.x', disabled: anchorDepth > 2 }">
                 <input type="radio" v-model="clauseContainer" value="x.x" :disabled="anchorDepth > 2" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x</span>
-                  <span class="pattern-desc">如 "2.0.1"</span>
-                </div>
+                <span class="pattern-name">x.x</span>
+                <span class="pattern-desc">2.1</span>
               </label>
               <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x', disabled: anchorDepth > 3 }">
                 <input type="radio" v-model="clauseContainer" value="x.x.x" :disabled="anchorDepth > 3" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x.x</span>
-                  <span class="pattern-desc">如 "2.0.1"</span>
-                </div>
+                <span class="pattern-name">x.x.x</span>
+                <span class="pattern-desc">2.1.1</span>
               </label>
               <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x.x', disabled: anchorDepth > 4 }">
                 <input type="radio" v-model="clauseContainer" value="x.x.x.x" :disabled="anchorDepth > 4" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x.x.x</span>
-                  <span class="pattern-desc">如 "2.0.1.1"</span>
-                </div>
+                <span class="pattern-name">x.x.x.x</span>
+                <span class="pattern-desc">2.1.1.1</span>
               </label>
               <label class="pattern-option" :class="{ active: clauseContainer === 'x.x.x.x.x', disabled: anchorDepth > 5 }">
                 <input type="radio" v-model="clauseContainer" value="x.x.x.x.x" :disabled="anchorDepth > 5" />
-                <div class="pattern-content">
-                  <span class="pattern-name">x.x.x.x.x</span>
-                  <span class="pattern-desc">如 "2.0.1.1.1"</span>
-                </div>
+                <span class="pattern-name">x.x.x.x.x</span>
+                <span class="pattern-desc">2.1.1.1.1</span>
               </label>
             </div>
           </div>
 
           <div class="pattern-hint">
-            <div>说明：</div>
-            <div>· 章节锚点作为章节树的父节点（一级）</div>
-            <div>· 最小条款容器锚点在两个章节锚点之间作为二级容器</div>
-            <div>· 二级容器下的条款合并后挂在一级节点下</div>
+            章节锚点决定一级节点，容器锚点决定二级分组；无匹配容器时条款直接挂载到章节下。
           </div>
         </div>
         <div class="modal-footer">
@@ -613,6 +672,7 @@
         </div>
       </div>
     </div>
+    </template>
 
     <!-- 实时日志抽屉 -->
     <div class="log-drawer" :class="{ open: logDrawerOpen }">
@@ -658,6 +718,7 @@ import {
   getChunkAnalysis,
   getChunkProgress,
   startChunking,
+  inferChunkAnchors,
   updateClauseEntity,
   getTaskStatus,
   getMineruChunks,
@@ -703,6 +764,7 @@ const highlightedClauseId = ref(null)
 // UI 状态
 const expandedChapters = ref({})
 const expandedClauseId = ref(null)
+const expandedEntityClauseIds = ref(new Set())  // 控制摘要-知识实体的折叠展开
 const allExpanded = ref(false)
 const logDrawerOpen = ref(true)
 const realtimeLogs = ref([])
@@ -724,6 +786,10 @@ const selectedParseMethod = ref('auto')
 const showChapterPatternModal = ref(false)
 const chapterAnchor = ref('x.x')  // 章节锚点（一级父节点）
 const clauseContainer = ref('x.x.x')  // 最小条款容器锚点（二级）
+const anchorAutoRecommended = ref(false)
+const anchorReason = ref('')
+const useMineruTitles = ref(false)  // 为 true 时切换为 MinerU title 分段模式
+const isResetChunking = ref(false)  // 标记当前是首次分析(false)还是重置分析(true)
 
 const anchorDepth = computed(() => {
   const depthMap = { 'x': 1, 'x.x': 2, 'x.x.x': 3, 'x.x.x.x': 4, 'x.x.x.x.x': 5 }
@@ -998,8 +1064,13 @@ async function loadMineruResults() {
   }
 }
 
-function toggleMineruMode() {
-  mineruMode.value = !mineruMode.value
+async function toggleMineruMode() {
+  const turningOn = !mineruMode.value
+  if (turningOn && mineruChunks.value.length === 0) {
+    await loadMineruResults()
+  } else {
+    mineruMode.value = !mineruMode.value
+  }
   mineruSelectedChunk.value = null
 }
 
@@ -1140,30 +1211,42 @@ async function renderAllPages(pdf) {
 // 智能分析控制
 // ============================================================================
 
-async function handleStartChunking() {
-  if (starting.value) return
+async function openAnchorModal(reset) {
   starting.value = true
-  showStartButton.value = false
-  realtimeLogs.value.push('🚀 启动智能Chunks标注分析...')
+  isResetChunking.value = reset
+  anchorAutoRecommended.value = false
+  anchorReason.value = ''
+  useMineruTitles.value = false
 
   try {
-    const res = await startChunking({ project_id: currentProjectId.value, reset: false })
+    const res = await inferChunkAnchors(currentProjectId.value)
     if (res.success) {
-      taskId.value = res.data.task_id
-      analysisStatus.value = 'graph_chunking'
-      realtimeLogs.value.push(`任务已启动: ${res.data.message}`)
-      startTaskSSE()
-      startProgressPolling()
+      chapterAnchor.value = res.data.chapter_anchor || 'x.x'
+      clauseContainer.value = res.data.clause_container || 'x.x.x'
+      anchorReason.value = res.data.reason || ''
+      useMineruTitles.value = res.data.use_mineru_titles || false
+      anchorAutoRecommended.value = true
     } else {
-      realtimeLogs.value.push(`❌ 启动失败: ${res.error}`)
-      showStartButton.value = true
+      chapterAnchor.value = 'x.x'
+      clauseContainer.value = 'x.x.x'
     }
   } catch (err) {
-    realtimeLogs.value.push(`❌ 异常: ${err.message}`)
-    showStartButton.value = true
+    chapterAnchor.value = 'x.x'
+    clauseContainer.value = 'x.x.x'
   } finally {
     starting.value = false
+    showChapterPatternModal.value = true
   }
+}
+
+async function handleStartChunking() {
+  if (starting.value) return
+  await openAnchorModal(false)
+}
+
+async function handleResetChunking() {
+  if (starting.value) return
+  await openAnchorModal(true)
 }
 
 async function handleReAnnotate() {
@@ -1197,42 +1280,43 @@ async function doReAnnotate(parseMethod) {
   }
 }
 
-async function handleResetChunking() {
-  if (starting.value) return
-  // 弹出章节匹配模式选择框
-  chapterAnchor.value = 'x.x'  // 默认值
-  clauseContainer.value = 'x.x.x'  // 默认值
-  showChapterPatternModal.value = true
-}
-
 async function confirmChapterPattern() {
   showChapterPatternModal.value = false
   starting.value = true
+  showStartButton.value = false
   hasAutoExpanded.value = false
-  realtimeLogs.value.push(`🔄 重置并重新分析 (章节锚点: ${chapterAnchor.value}, 条款容器: ${clauseContainer.value})...`)
+
+  const actionLabel = isResetChunking.value ? '重置并重新分析' : '开始智能分析'
+  realtimeLogs.value.push(`${isResetChunking.value ? '🔄' : '🚀'} ${actionLabel} (章节锚点: ${chapterAnchor.value}, 条款容器: ${clauseContainer.value})...`)
 
   try {
     const res = await startChunking({
       project_id: currentProjectId.value,
-      reset: true,
+      reset: isResetChunking.value,
       chapter_anchor: chapterAnchor.value,
-      clause_container: clauseContainer.value
+      clause_container: clauseContainer.value,
+      use_mineru_titles: useMineruTitles.value
     })
     if (res.success) {
       taskId.value = res.data.task_id
       analysisStatus.value = 'graph_chunking'
-      analysisData.value = null
-      allAnnotations.value = []
-      expandedChapters.value = {}
-      expandedClauseId.value = null
-      highlightedClauseId.value = null
+      if (isResetChunking.value) {
+        analysisData.value = null
+        allAnnotations.value = []
+        expandedChapters.value = {}
+        expandedClauseId.value = null
+        highlightedClauseId.value = null
+      }
+      realtimeLogs.value.push(`任务已启动: ${res.data.message}`)
       startTaskSSE()
       startProgressPolling()
     } else {
-      realtimeLogs.value.push(`❌ 重置失败: ${res.error}`)
+      realtimeLogs.value.push(`❌ 启动失败: ${res.error}`)
+      showStartButton.value = true
     }
   } catch (err) {
     realtimeLogs.value.push(`❌ 异常: ${err.message}`)
+    showStartButton.value = true
   } finally {
     starting.value = false
   }
@@ -1509,6 +1593,15 @@ function toggleAllChapters() {
     expandedChapters.value = all
   }
   allExpanded.value = !allExpanded.value
+}
+
+function toggleEntityExpand(clauseId) {
+  const s = expandedEntityClauseIds.value
+  if (s.has(clauseId)) {
+    s.delete(clauseId)
+  } else {
+    s.add(clauseId)
+  }
 }
 
 function getClauseById(chapter, clauseId) {
@@ -2074,9 +2167,37 @@ header.ca-header {
 
 .clause-entities-section { margin: 6px 0; }
 .clause-topic-row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 6px; padding: 6px 8px; background: #f0f9ff; border: 1px solid #e0f2fe; border-radius: 6px; }
+.clause-topic-row.collapsible { cursor: pointer; user-select: none; transition: background 0.15s; }
+.clause-topic-row.collapsible:hover { background: #e0f2fe; }
+.clause-topic-row.collapsible .topic-toggle-icon { font-size: 10px; color: #0369a1; flex-shrink: 0; width: 14px; text-align: center; }
 .topic-label { font-size: 11px; font-weight: 600; color: #0369a1; flex-shrink: 0; }
 .topic-content { font-size: 12px; color: #1e40af; line-height: 1.4; }
 .entity-section-label { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
+.entity-expand-panel { padding: 4px 8px 8px 28px; background: #fafafa; border: 1px solid #f0f0f0; border-top: none; border-radius: 0 0 6px 6px; }
+.child-topic { margin-top: 4px; background: #f8fafc; border-color: #e2e8f0; }
+.child-topic:hover { background: #f1f5f9; }
+
+/* 多主题分组 */
+.topic-group { margin-bottom: 8px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fafafa; overflow: hidden; }
+.topic-group-header { display: flex; align-items: center; gap: 6px; padding: 5px 8px; background: #f0f7ff; border-bottom: 1px solid #dbeafe; }
+.topic-group-label { font-size: 10px; font-weight: 600; color: #4f46e5; background: #eef2ff; padding: 1px 6px; border-radius: 4px; }
+.topic-group-title { font-size: 12px; font-weight: 600; color: #1e3a8a; }
+.topic-group-entities { padding: 6px 8px; }
+.topic-empty { font-size: 11px; color: #9ca3af; font-style: italic; padding: 2px 0; }
+
+/* 媒体（图片/表格）展示 */
+.clause-images-section, .clause-tables-section { margin-top: 8px; }
+.clause-image-item { position: relative; margin: 6px 0 10px; padding: 6px 8px 8px; background: #fafafa; border: 1px solid #f0f0f0; border-radius: 6px; }
+.media-type-badge { display: inline-block; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px; margin-bottom: 4px; }
+.media-type-image { color: #0369a1; background: #e0f2fe; border: 1px solid #bae6fd; }
+.media-type-table { color: #b45309; background: #fef3c7; border: 1px solid #fde68a; }
+.image-caption { font-size: 11px; color: #4b5563; margin-bottom: 6px; line-height: 1.4; }
+.image-caption .table-id { color: #b45309; font-weight: 600; margin-right: 4px; }
+.image-preview { display: flex; align-items: flex-start; }
+.vlm-content { font-size: 11px; color: #374151; margin-top: 4px; line-height: 1.5; }
+.vlm-label { color: #6b7280; margin-right: 4px; }
+.vlm-status-error { font-size: 11px; color: #b91c1c; margin-top: 4px; }
+.vlm-error { color: #b91c1c; }
 .entity-item-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 11px; }
 .entity-type-tag { padding: 1px 6px; border-radius: 4px; font-size: 10px; background: #e5e7eb; color: #6b7280; font-weight: 600; }
 .entity-key { color: #1a1a2e; font-weight: 500; }
@@ -2134,6 +2255,18 @@ header.ca-header {
   display: flex; align-items: center; justify-content: center;
   z-index: 1000;
 }
+.modal-backdrop {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 1000;
+}
+.modal-wrapper {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1001;
+  pointer-events: none;
+}
+.modal-wrapper > .modal-card { pointer-events: auto; }
 .modal-card {
   background: #ffffff; border-radius: 12px;
   padding: 0; min-width: 360px; max-width: 420px;
@@ -2176,23 +2309,60 @@ header.ca-header {
 .modal-btn.cancel:hover { background: #f0f0f0; }
 .modal-btn.confirm { background: #667eea; border: none; color: white; }
 .modal-btn.confirm:hover { background: #5a67e8; }
-.pattern-section { margin-bottom: 20px; }
-.pattern-section-title { font-size: 13px; font-weight: 600; color: #1a1a2e; margin-bottom: 10px; }
-.pattern-options { display: flex; flex-direction: column; gap: 8px; }
+.anchor-modal { width: 420px; max-width: 92vw; }
+.anchor-modal .modal-header { padding: 14px 16px; }
+.anchor-modal .modal-body { padding: 14px 16px 16px; }
+.anchor-modal .modal-footer { padding: 12px 16px; }
+.anchor-recommendation {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, #e6f7ff 0%, #f0faff 100%);
+  border: 1px solid #91d5ff;
+  border-radius: 8px;
+}
+.anchor-rec-title { font-weight: 600; color: #096dd9; margin-bottom: 4px; font-size: 13px; }
+.anchor-rec-body { color: #262626; font-size: 13px; }
+.anchor-rec-body strong { color: #1890ff; font-weight: 700; }
+.anchor-rec-sep { margin: 0 6px; color: #bfbfbf; }
+.anchor-rec-reason { color: #595959; font-size: 11px; margin-top: 4px; line-height: 1.4; }
+.anchor-title-mode-hint {
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #ad6800;
+  margin-top: 8px;
+  line-height: 1.5;
+}
+.anchor-title-mode-hint strong { color: #d46b08; }
+
+.pattern-section { margin-bottom: 16px; }
+.pattern-section-title { font-size: 12px; font-weight: 600; color: #4b5563; margin-bottom: 8px; }
+.pattern-options { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .pattern-option {
-  display: flex; align-items: center; gap: 12px;
-  padding: 10px 14px;
-  border: 2px solid #e5e7eb; border-radius: 8px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px;
+  padding: 8px 4px;
+  border: 1.5px solid #e5e7eb; border-radius: 8px;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.15s;
+  min-height: 56px;
 }
 .pattern-option:hover { border-color: #667eea; background: #f9fafb; }
-.pattern-option.active { border-color: #667eea; background: #eef2ff; }
-.pattern-option.disabled { opacity: 0.5; cursor: not-allowed; }
-.pattern-option.disabled:hover { border-color: #e5e7eb; background: transparent; }
+.pattern-option.active { border-color: #667eea; background: #eef2ff; box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.15); }
+.pattern-option.disabled { opacity: 0.45; cursor: not-allowed; background: #f5f5f5; }
+.pattern-option.disabled:hover { border-color: #e5e7eb; background: #f5f5f5; }
 .pattern-option input[type="radio"] { display: none; }
-.pattern-content { display: flex; flex-direction: column; gap: 2px; }
-.pattern-name { font-size: 13px; font-weight: 600; color: #1a1a2e; }
-.pattern-desc { font-size: 11px; color: #6b7280; }
-.pattern-hint { margin-top: 16px; padding: 12px; background: #f9fafb; border-radius: 8px; font-size: 12px; color: #6b7280; line-height: 1.6; }
+.pattern-option .pattern-name { font-size: 14px; font-weight: 700; color: #1a1a2e; }
+.pattern-option .pattern-desc { font-size: 10px; color: #6b7280; }
+.pattern-hint {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #f6f7f9;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #6b7280;
+  line-height: 1.5;
+}
 </style>

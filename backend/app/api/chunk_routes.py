@@ -37,6 +37,72 @@ def _stop_chunk_thread(project_id: str):
                 logger.warning(f"[{project_id}] 旧分块线程未能在3秒内退出")
 
 
+def _generate_kb_words_pool(project_id: str, chunks_result: dict, pdf_name: str = "") -> str:
+    """
+    从智能分析结果中提取 Topic 摘要和知识实体，生成 kb_words_pool.json。
+
+    输出结构：
+      {
+        "pdf名称.pdf": {
+          "topics": [
+            {"topic": "主题1", "entities": ["实体1", "实体2"]},
+            ...
+          ]
+        }
+      }
+    """
+    from datetime import datetime
+
+    clauses = chunks_result.get("clauses", [])
+    if not clauses:
+        return ""
+
+    # 按 topic 去重收集，每个 topic 下挂对应的实体集合
+    topic_entities_map: dict = {}  # topic_text -> set(entity_names)
+
+    for clause in clauses:
+        for topic in clause.get("topics", []):
+            topic_text = topic.get("topic", "").strip()
+            if not topic_text:
+                continue
+            if topic_text not in topic_entities_map:
+                topic_entities_map[topic_text] = set()
+            for ent in topic.get("entities", []):
+                ent_name = ent.strip() if isinstance(ent, str) else str(ent).strip()
+                if ent_name:
+                    topic_entities_map[topic_text].add(ent_name)
+
+    # 组装 topics 数组，按 topic 名称排序
+    topics_list = []
+    for topic_text in sorted(topic_entities_map.keys()):
+        topics_list.append({
+            "topic": topic_text,
+            "entities": sorted(topic_entities_map[topic_text])
+        })
+
+    # PDF 名称兜底
+    pdf_key = pdf_name if pdf_name else "unknown.pdf"
+
+    pool_data = {
+        pdf_key: {
+            "topics": topics_list
+        },
+        "_meta": {
+            "project_id": project_id,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total_clauses": len(clauses),
+            "total_topics": len(topics_list),
+            "total_entities": sum(len(t["entities"]) for t in topics_list)
+        }
+    }
+
+    project_dir = ProjectManager._get_project_dir(project_id)
+    json_path = os.path.join(project_dir, "kb_words_pool.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(pool_data, f, ensure_ascii=False, indent=2)
+    return json_path
+
+
 # ============== Intelligent Chunking ==============
 
 @graph_bp.route('/chunk/intelligent', methods=['POST'])
@@ -62,6 +128,7 @@ def intelligent_chunk():
         reset = data.get('reset', False)
         chapter_anchor = data.get('chapter_anchor', 'x.x')  # 章节锚点（一级父节点）
         clause_container = data.get('clause_container', 'x.x.x')  # 最小条款容器锚点（二级）
+        use_mineru_titles = data.get('use_mineru_titles')  # None 表示由 infer_anchor_patterns 自动推断
 
         if not project_id:
             return jsonify({"success": False, "error": "请提供 project_id"}), 400
@@ -119,6 +186,19 @@ def intelligent_chunk():
                 if os.path.exists(task_file):
                     os.remove(task_file)
             existing_task_id = None
+
+            # 清理 Neo4j 旧图谱数据（防止重新分析后数据叠加）
+            if project.graph_id:
+                try:
+                    from flask import current_app
+                    from ..services.graph_builder import GraphBuilderService
+                    storage = current_app.extensions.get('neo4j_storage')
+                    if storage:
+                        builder = GraphBuilderService(storage=storage)
+                        builder.delete_graph(project.graph_id)
+                        logger.info(f"[{project_id}] Neo4j 旧图谱已清理: {project.graph_id}")
+                except Exception as neo_err:
+                    logger.warning(f"[{project_id}] Neo4j 旧图谱清理失败（可能已不存在）: {neo_err}")
 
         if not reset and project.status == ProjectStatus.GRAPH_CHUNKED:
             task = TaskManager().get_task(existing_task_id) if existing_task_id else None
@@ -182,10 +262,27 @@ def intelligent_chunk():
                     return
 
                 chunker_logger.info(f"[{task_id}] chunks_data 条数: {len(chunks_data)}, checkpoint: {checkpoint is not None}")
+
+                # 使用局部副本避免 Python 闭包作用域陷阱（UnboundLocalError）
+                local_use_mineru_titles = use_mineru_titles
+                local_chapter_anchor = chapter_anchor
+                local_clause_container = clause_container
+                # 自动推断章节模式（当 use_mineru_titles 未显式指定时）
+                if local_use_mineru_titles is None:
+                    from ..services.llm_driven_chunker import infer_anchor_patterns
+                    anchor_result = infer_anchor_patterns(chunks_data)
+                    local_use_mineru_titles = anchor_result.get('use_mineru_titles', False)
+                    # 如果显式传了 anchor 参数，优先使用传入值（保持向后兼容）
+                    if data.get('chapter_anchor'):
+                        local_chapter_anchor = anchor_result.get('chapter_anchor', 'x.x')
+                    if data.get('clause_container'):
+                        local_clause_container = anchor_result.get('clause_container', 'x.x.x')
+                    chunker_logger.info(f"[{task_id}] 自动推断章节模式: use_mineru_titles={local_use_mineru_titles}, reason={anchor_result.get('reason', '')}")
+
                 task_mgr.update_task(task_id, status=TaskStatus.PROCESSING, progress=0, message="🚀 开始 LLM 语义分块...")
 
                 chunker = LLMDrivenChunker(progress_callback=progress_callback, stop_event=stop_event)
-                result = chunker.chunk(text_chunks, progress_callback, checkpoint=checkpoint, project_id=project_id, md_content=md_content, chunks_data=chunks_data, pdf_path=pdf_path, chapter_anchor=chapter_anchor, clause_container=clause_container)
+                result = chunker.chunk(text_chunks, progress_callback, checkpoint=checkpoint, project_id=project_id, md_content=md_content, chunks_data=chunks_data, pdf_path=pdf_path, chapter_anchor=local_chapter_anchor, clause_container=local_clause_container, use_mineru_titles=local_use_mineru_titles)
 
                 # 防御性检查：result 不为空
                 if not result:
@@ -226,6 +323,15 @@ def intelligent_chunk():
                         chunker_logger.error(f"[{task_id}] 兜底失败: {fb_err}")
 
                 if save_success and chunks_result:
+                    # 生成 kb_words_pool.json 供 LLM 读取
+                    try:
+                        project = ProjectManager.get_project(project_id)
+                        pdf_name = _get_project_pdf_filename(project) or "unknown.pdf"
+                        json_path = _generate_kb_words_pool(project_id, chunks_result, pdf_name)
+                        chunker_logger.info(f"[{task_id}] kb_words_pool.json 已生成: {json_path}")
+                    except Exception as md_err:
+                        chunker_logger.warning(f"[{task_id}] 生成 kb_words_pool.json 失败: {md_err}")
+
                     ProjectManager.delete_chunk_checkpoint_v2(project_id)
                     project = ProjectManager.get_project(project_id)
                     project.status = ProjectStatus.GRAPH_CHUNKED
@@ -269,6 +375,33 @@ def intelligent_chunk():
     except Exception as e:
         logger.error(f"API Error: {str(e)}\n{traceback.format_exc()}")
         return jsonify({"success": False, "error": str(e), "traceback": traceback.format_exc()}), 500
+
+
+@graph_bp.route('/chunk/<project_id>/infer-anchors', methods=['POST'])
+@api_handler
+def infer_chunk_anchors(project_id: str):
+    """
+    基于 chunks.json 自动推断推荐的章节锚点和最小条款容器锚点。
+    """
+    try:
+        project = ProjectManager.get_project(project_id)
+        if not project:
+            return jsonify({"success": False, "error": f"项目不存在: {project_id}"}), 404
+
+        chunks_data = ProjectManager.get_chunks(project_id)
+        if not chunks_data:
+            return jsonify({"success": False, "error": "未找到 chunks.json，请先完成 MinerU 解析"}), 400
+
+        from ..services.llm_driven_chunker import infer_anchor_patterns
+        result = infer_anchor_patterns(chunks_data)
+
+        return jsonify({
+            "success": True,
+            "data": result
+        })
+    except Exception as e:
+        logger.error(f"推断章节锚点失败: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @graph_bp.route('/chunk/<project_id>/progress', methods=['GET'])
@@ -370,21 +503,6 @@ def get_chunk_progress(project_id: str):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@graph_bp.route('/chunk/<project_id>', methods=['GET'])
-@api_handler
-def get_intelligent_chunks(project_id: str):
-    """获取项目的 LLM 智能分块结果"""
-    project = ProjectManager.get_project(project_id)
-    if not project:
-        return jsonify({"success": False, "error": f"项目不存在: {project_id}"}), 404
-
-    chunks = ProjectManager.get_intelligent_chunks(project_id)
-    if not chunks:
-        return jsonify({"success": False, "error": "尚未执行 LLM 分块"}), 200
-
-    return jsonify({"success": True, "data": chunks})
-
-
 @graph_bp.route('/chunk/<project_id>/has_intelligent_chunks', methods=['GET'])
 @api_handler
 def check_has_intelligent_chunks(project_id: str):
@@ -453,7 +571,12 @@ def get_chunk_analysis(project_id: str):
     sorted_chapters = sorted(chapter_tree.items(), key=_chapter_sort_key)
 
     total_terms = sum(len(c.get('terms', [])) for c in clauses)
-    total_entities = sum(len(c.get('entities', [])) for c in clauses)
+    # 从 topics 数组统计 entities（每 topic 的 entities 独立计数）
+    total_entities = 0
+    for c in clauses:
+        for tp in c.get('topics', []):
+            if isinstance(tp, dict):
+                total_entities += len(tp.get('entities', []))
 
     element_stats = {}
     for element in elements:

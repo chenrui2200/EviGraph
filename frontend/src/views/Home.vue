@@ -86,7 +86,7 @@
             <div :style="s.consoleSection">
               <div class="console-header" :style="s.consoleHeader">
                 <span>01 / 现实种子</span>
-                <span>支持格式: PDF, MD, TXT</span>
+                <span>支持格式: PDF, WORD</span>
               </div>
               <div
                 :style="s.uploadZone"
@@ -95,7 +95,7 @@
                 @drop.prevent="handleDrop"
                 @click="triggerFileInput"
               >
-                <input ref="fileInput" type="file" accept=".pdf,.md,.txt" @change="handleFileSelect" style="display: none" :disabled="loading" />
+                <input ref="fileInput" type="file" accept=".pdf,.doc,.docx" @change="handleFileSelect" style="display: none" :disabled="loading" />
                 <div v-if="files.length === 0" :style="s.uploadPlaceholder">
                   <div :style="s.uploadIcon">↑</div>
                   <div :style="s.uploadTitle">将文件拖放到此处</div>
@@ -142,7 +142,21 @@
 
             <div :style="s.consoleSection">
               <div class="console-header" :style="s.consoleHeader">
-                <span>>_ 03 / 创建AI应用</span>
+                <span>>_ 03 / KB Pipeline</span>
+              </div>
+
+              <button
+                :style="s.aiAppBtn"
+                @click="goToKbPipeline"
+              >
+                <span>启动知识库流水线</span>
+                <span>➝</span>
+              </button>
+            </div>
+
+            <div :style="s.consoleSection">
+              <div class="console-header" :style="s.consoleHeader">
+                <span>>_ 04 / 创建AI应用</span>
               </div>
 
               <button
@@ -157,6 +171,7 @@
         </div>
       </section>
 
+      <KbPipelineList />
       <ProjectList />
       <AiAppList />
     </div>
@@ -168,6 +183,7 @@ import { ref, computed, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import ProjectList from '../components/ProjectList.vue'
 import AiAppList from '../components/AiAppList.vue'
+import KbPipelineList from '../components/KbPipelineList.vue'
 import { getHealth } from '../api/graph'
 
 const mono = 'JetBrains Mono, monospace'
@@ -267,6 +283,10 @@ const goToAiApp = () => {
   router.push({ name: 'AiQa', params: { id: 'new' } })
 }
 
+const goToKbPipeline = () => {
+  router.push({ name: 'KbPipelineLaunch' })
+}
+
 const formData = ref({ simulationRequirement: '' })
 const files = ref([])
 const loading = ref(false)
@@ -285,7 +305,7 @@ const handleDragLeave = (e) => { isDragOver.value = false }
 const handleDrop = (e) => { isDragOver.value = false; addFiles(Array.from(e.dataTransfer.files)) }
 
 const addFiles = (newFiles) => {
-  const allowed = ['.pdf', '.md', '.txt']
+  const allowed = ['.pdf', '.doc', '.docx']
   const valid = newFiles.filter(f => allowed.some(ext => f.name.toLowerCase().endsWith(ext)))
   // 只保留第一个有效文件
   if (valid.length > 0) {

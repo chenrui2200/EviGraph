@@ -505,7 +505,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, searchGraph, updateProject, getTaskEventsURL } from '../api/graph'
+import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData, searchObjectFirst, updateProject, getTaskEventsURL } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 import { select } from 'd3-selection'
 import { scaleOrdinal } from 'd3-scale'
@@ -633,7 +633,7 @@ const runHitTest = async () => {
 
   hitTestLoading.value = true
   try {
-    const response = await searchGraph({
+    const response = await searchObjectFirst({
       graph_id: projectData.value.graph_id,
       query: hitTestQuery.value,
       limit: 10
