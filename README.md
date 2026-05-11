@@ -109,8 +109,16 @@ npm run dev          # 同时启动后端 5001 和前端 Vite dev server
 ![graph_search.png](images/graph_search.png)
 
 - **图谱检索测试页面** (`/graph-search/:projectId`)：节点类型多选 + 名称模糊搜索，动态加载 1 跳邻域，节点详情面板
-- **AI 问答页面** (`/ai-qa`)：意图匹配 + 全量捕获 + 报告生成
+- **AI 问答页面** (`/ai-qa`)：意图匹配 + 全量捕获
 - **Chunk 分析页面**：展示条款关联实体、表格、图片的 base64 内容
+
+### 4. 问答系统集成使用
+- **知识问答系统** 这是商务单内容，使用Evi Graph的检索功能和pdf定位功能
+
+![chatbot.png](images/chatbot.png)
+- 开发不易，欢迎打赏
+
+![QRcode.jpg](images/QRcode.jpg)
 
 ## 项目结构
 
