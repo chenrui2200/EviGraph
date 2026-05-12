@@ -3,6 +3,7 @@ KB Pipeline 后台执行器
 
 串行执行 6 个阶段，每个阶段完成后才进入下一个。
 对于产生后台任务（Task）的阶段，采用轮询方式等待完成。
+每阶段完成后触发外部回调通知。
 """
 
 import os
@@ -19,6 +20,7 @@ from ..models.ai_app import AiAppManager
 from ..config import Config
 from ..utils.minio_client import download_object
 from ..utils.logger import get_logger
+from . import kb_pipeline_callback
 
 logger = get_logger('mirofish.kb_pipeline')
 
@@ -52,6 +54,9 @@ class KbPipelineRunner:
                 stage.started_at = self._now()
                 KbPipelineManager.save(self.pipeline)
 
+                # 阶段开始前回调
+                self._invoke_stage_callback(stage, "started")
+
                 try:
                     if stage.name == "project_creation":
                         self._run_project_creation()
@@ -68,13 +73,17 @@ class KbPipelineRunner:
 
                     stage.status = PipelineStageStatus.COMPLETED
                     stage.completed_at = self._now()
-                    stage.message = "完成"
+                    stage.message = stage.message or "完成"
+                    # 阶段成功完成后回调
+                    self._invoke_stage_callback(stage, "completed")
                 except Exception as e:
                     stage.status = PipelineStageStatus.FAILED
                     stage.message = str(e)
                     self.pipeline.status = PipelineStageStatus.FAILED
                     self.pipeline.error = f"阶段 [{stage.label}] 失败: {str(e)}"
                     KbPipelineManager.save(self.pipeline)
+                    # 阶段失败后回调
+                    self._invoke_stage_callback(stage, "failed", message=str(e))
                     logger.error(f"Pipeline {self.pipeline.pipeline_id} failed at {stage.name}: {e}\n{traceback.format_exc()}")
                     return
 
@@ -87,6 +96,29 @@ class KbPipelineRunner:
             self.pipeline.error = str(e)
             KbPipelineManager.save(self.pipeline)
             logger.error(f"Pipeline {self.pipeline.pipeline_id} fatal error: {e}\n{traceback.format_exc()}")
+
+    def _invoke_stage_callback(self, stage, event_type: str, message: Optional[str] = None):
+        """触发阶段回调"""
+        try:
+            payload = {
+                "stage_label": stage.label,
+                "event_type": event_type,
+                "stage_index": self.pipeline.current_stage_index,
+                "project_id": self.pipeline.project_id,
+                "graph_id": self.pipeline.graph_id,
+                "app_id": self.pipeline.app_id,
+                "target_app_id": self.pipeline.target_app_id,
+                "result": stage.result,
+            }
+            kb_pipeline_callback.invoke_callback(
+                pipeline_id=self.pipeline.pipeline_id,
+                stage_name=stage.name,
+                stage_status=stage.status.value,
+                message=message or stage.message or f"{stage.label} {event_type}",
+                payload=payload
+            )
+        except Exception as e:
+            logger.warning(f"Pipeline {self.pipeline.pipeline_id} 阶段回调异常: {e}")
 
     def _update_pipeline_status(self, status: PipelineStageStatus):
         self.pipeline.status = status
@@ -327,7 +359,7 @@ class KbPipelineRunner:
         stage.message = "图谱构建完成"
 
     # ========================================================================
-    # Stage 6: 应用创建
+    # Stage 6: 应用创建 / 应用关联
     # ========================================================================
     def _run_app_creation(self):
         stage = self._get_stage("app_creation")
@@ -337,25 +369,51 @@ class KbPipelineRunner:
         if not graph_id:
             raise ValueError("图谱尚未构建，无法创建应用")
 
-        app_name = f"Auto_{project.name}"
-        app_data = {
-            "name": app_name,
-            "description": f"知识库应用 - {project.name}",
-            "workflow_data": {
-                "selectedGraphIds": [graph_id],
-                "temperature": 0.7,
-                "similarityThreshold": 0,
-                "topK": 10,
-                "rerankMinScore": 0,
-                "maxDepth": 3,
-                "rootTypes": ["Entity", "Term"],
-            },
-            "nodes": []
-        }
-        app = AiAppManager.save_app(app_data)
-        self.pipeline.app_id = app.app_id
-        stage.result = {"app_id": app.app_id, "app_name": app_name}
-        stage.message = f"应用 {app_name} 创建完成"
+        target_app_id = self.pipeline.target_app_id
+
+        if target_app_id:
+            # 关联到已有 App
+            app = AiAppManager.get_app(target_app_id)
+            if not app:
+                raise ValueError(f"目标应用 {target_app_id} 不存在")
+
+            workflow_data = app.workflow_data or {}
+            selected_graph_ids = workflow_data.get("selectedGraphIds", [])
+            if not isinstance(selected_graph_ids, list):
+                selected_graph_ids = []
+
+            if graph_id not in selected_graph_ids:
+                selected_graph_ids.append(graph_id)
+                workflow_data["selectedGraphIds"] = selected_graph_ids
+
+            update_data = app.to_dict()
+            update_data["workflow_data"] = workflow_data
+            updated_app = AiAppManager.save_app(update_data)
+
+            self.pipeline.app_id = updated_app.app_id
+            stage.result = {"app_id": updated_app.app_id, "app_name": updated_app.name, "mode": "attach"}
+            stage.message = f"已关联到应用 {updated_app.name}"
+        else:
+            # 自动创建新 App（原有逻辑）
+            app_name = f"Auto_{project.name}"
+            app_data = {
+                "name": app_name,
+                "description": f"知识库应用 - {project.name}",
+                "workflow_data": {
+                    "selectedGraphIds": [graph_id],
+                    "temperature": 0.7,
+                    "similarityThreshold": 0,
+                    "topK": 10,
+                    "rerankMinScore": 0,
+                    "maxDepth": 3,
+                    "rootTypes": ["Entity", "Term"],
+                },
+                "nodes": []
+            }
+            app = AiAppManager.save_app(app_data)
+            self.pipeline.app_id = app.app_id
+            stage.result = {"app_id": app.app_id, "app_name": app_name, "mode": "create"}
+            stage.message = f"应用 {app_name} 创建完成"
 
     # ========================================================================
     # 工具方法

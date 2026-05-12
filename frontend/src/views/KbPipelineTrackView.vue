@@ -75,47 +75,59 @@
                 重置构建
               </button>
 
-              <!-- App Creation Actions -->
+              <!-- App Creation / Attach Actions -->
               <div v-if="stage.name === 'app_creation' && stage.status === 'completed' && pipeline?.app_id" class="app-actions">
-
-                <button
-                  v-if="!publishedMap[pipeline.app_id]"
-                  class="btn-publish"
-                  :disabled="publishLoading[pipeline.app_id]"
-                  @click="handlePublish(pipeline.app_id)"
-                >
-                  <span v-if="publishLoading[pipeline.app_id]">发布中...</span>
-                  <span v-else>🚀 发布 Web 访问</span>
-                </button>
-                <div v-else class="published-card">
-                  <div class="published-header">
-                    <div class="published-icon">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                        <polyline points="20 6 9 17 4 12"></polyline>
-                      </svg>
-                    </div>
-                    <div class="published-info">
-                      <div class="published-title">应用已发布</div>
-                      <div class="published-desc">任何人都可以通过下方链接访问</div>
-                    </div>
+                <!-- attach 模式：只显示打开应用 -->
+                <div v-if="stage.result?.mode === 'attach'" class="attach-info">
+                  <div class="attach-badge">
+                    <span class="attach-icon">🔗</span>
+                    <span>已关联到现有应用</span>
                   </div>
-                  <div class="public-url-box">
-                    <span class="url-text">{{ getPublicUrl(pipeline.app_id) }}</span>
-                    <button class="url-btn" @click="copyUrl(pipeline.app_id)" title="复制链接">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                      </svg>
-                    </button>
-                    <a class="url-btn open" :href="getPublicUrl(pipeline.app_id)" target="_blank" title="在新窗口打开">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                        <polyline points="15 3 21 3 21 9"></polyline>
-                        <line x1="10" y1="14" x2="21" y2="3"></line>
-                      </svg>
-                    </a>
-                  </div>
+                  <button class="btn-aiqa" @click="goApp">
+                    打开应用 →
+                  </button>
                 </div>
+                <!-- create 模式：显示发布按钮 -->
+                <template v-else>
+                  <button
+                    v-if="!publishedMap[pipeline.app_id]"
+                    class="btn-publish"
+                    :disabled="publishLoading[pipeline.app_id]"
+                    @click="handlePublish(pipeline.app_id)"
+                  >
+                    <span v-if="publishLoading[pipeline.app_id]">发布中...</span>
+                    <span v-else>🚀 发布 Web 访问</span>
+                  </button>
+                  <div v-else class="published-card">
+                    <div class="published-header">
+                      <div class="published-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                          <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                      </div>
+                      <div class="published-info">
+                        <div class="published-title">应用已发布</div>
+                        <div class="published-desc">任何人都可以通过下方链接访问</div>
+                      </div>
+                    </div>
+                    <div class="public-url-box">
+                      <span class="url-text">{{ getPublicUrl(pipeline.app_id) }}</span>
+                      <button class="url-btn" @click="copyUrl(pipeline.app_id)" title="复制链接">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                      </button>
+                      <a class="url-btn open" :href="getPublicUrl(pipeline.app_id)" target="_blank" title="在新窗口打开">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                          <polyline points="15 3 21 3 21 9"></polyline>
+                          <line x1="10" y1="14" x2="21" y2="3"></line>
+                        </svg>
+                      </a>
+                    </div>
+                  </div>
+                </template>
               </div>
             </div>
 
@@ -912,6 +924,27 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 10px;
   margin-top: 10px;
+}
+.attach-info {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.attach-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.08) 0%, rgba(118, 75, 162, 0.04) 100%);
+  border: 1px solid rgba(102, 126, 234, 0.2);
+  border-radius: 10px;
+  font-size: 0.85rem;
+  color: #667eea;
+  font-weight: 500;
+  width: fit-content;
+}
+.attach-icon {
+  font-size: 1rem;
 }
 
 .btn-aiqa {

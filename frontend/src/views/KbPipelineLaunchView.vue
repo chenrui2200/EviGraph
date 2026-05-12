@@ -65,10 +65,71 @@
           </div>
         </div>
 
+        <!-- App 选择区域 -->
+        <div class="app-select-section">
+          <div class="app-select-header">
+            <div class="app-select-icon">⚙️</div>
+            <div>
+              <h3 class="app-select-title">应用配置</h3>
+              <p class="app-select-desc">选择流水线完成后图谱的归属方式</p>
+            </div>
+          </div>
+
+          <div class="app-mode-options">
+            <div
+              class="app-mode-option"
+              :class="{ selected: appMode === 'auto' }"
+              @click="appMode = 'auto'"
+            >
+              <div class="mode-radio">
+                <div class="radio-inner" v-if="appMode === 'auto'"></div>
+              </div>
+              <div class="mode-content">
+                <div class="mode-label">自动创建新应用</div>
+                <div class="mode-desc">流水线完成后自动创建一个全新的 AI 应用</div>
+              </div>
+            </div>
+
+            <div
+              class="app-mode-option"
+              :class="{ selected: appMode === 'attach' }"
+              @click="appMode = 'attach'"
+            >
+              <div class="mode-radio">
+                <div class="radio-inner" v-if="appMode === 'attach'"></div>
+              </div>
+              <div class="mode-content">
+                <div class="mode-label">关联到已有应用</div>
+                <div class="mode-desc">将构建完成的图谱添加到现有 AI 应用中</div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="appMode === 'attach'" class="app-dropdown-wrapper">
+            <div v-if="appLoading" class="app-loading">
+              <div class="spinner-small"></div>
+              <span>加载应用列表...</span>
+            </div>
+            <div v-else-if="appList.length === 0" class="app-empty">
+              暂无现有应用，请先创建应用或选择"自动创建新应用"
+            </div>
+            <select
+              v-else
+              v-model="selectedAppId"
+              class="app-dropdown"
+            >
+              <option :value="null" disabled>请选择应用</option>
+              <option v-for="app in appList" :key="app.app_id" :value="app.app_id">
+                {{ app.name }}
+              </option>
+            </select>
+          </div>
+        </div>
+
         <div class="kpl-actions">
           <button
             class="btn-start"
-            :disabled="!selectedFile || starting"
+            :disabled="!selectedFile || starting || (appMode === 'attach' && !selectedAppId)"
             @click="handleStart"
           >
             <span v-if="starting" class="btn-spinner"></span>
@@ -91,12 +152,19 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getKbPipelineMinioFiles, startKbPipeline } from '../api/graph'
+import { getAppList } from '../api/ai_app'
 
 const router = useRouter()
 const files = ref([])
 const loading = ref(false)
 const selectedFile = ref(null)
 const starting = ref(false)
+
+// App 选择相关
+const appList = ref([])
+const appLoading = ref(false)
+const appMode = ref('auto') // 'auto' | 'attach'
+const selectedAppId = ref(null)
 
 const fetchFiles = async () => {
   loading.value = true
@@ -108,6 +176,19 @@ const fetchFiles = async () => {
     files.value = []
   } finally {
     loading.value = false
+  }
+}
+
+const fetchApps = async () => {
+  appLoading.value = true
+  try {
+    const res = await getAppList()
+    appList.value = res.data || []
+  } catch (e) {
+    console.error('获取 App 列表失败:', e)
+    appList.value = []
+  } finally {
+    appLoading.value = false
   }
 }
 
@@ -128,7 +209,8 @@ const handleStart = async () => {
   if (!selectedFile.value || starting.value) return
   starting.value = true
   try {
-    const res = await startKbPipeline(selectedFile.value)
+    const targetAppId = appMode.value === 'attach' ? selectedAppId.value : null
+    const res = await startKbPipeline(selectedFile.value, targetAppId)
     const pipelineId = res.data?.pipeline_id
     if (pipelineId) {
       router.push({ name: 'KbPipelineTrack', params: { pipelineId } })
@@ -143,6 +225,7 @@ const handleStart = async () => {
 
 onMounted(() => {
   fetchFiles()
+  fetchApps()
 })
 </script>
 
@@ -519,6 +602,148 @@ onMounted(() => {
   font-size: 1.1rem;
 }
 
+.app-select-section {
+  margin-top: 32px;
+  padding-top: 32px;
+  border-top: 1px solid #e2e8f0;
+}
+.app-select-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.app-select-icon {
+  width: 52px;
+  height: 52px;
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.6rem;
+  box-shadow: 0 8px 20px rgba(240, 147, 251, 0.3);
+  flex-shrink: 0;
+}
+.app-select-title {
+  font-size: 1.35rem;
+  font-weight: 700;
+  margin: 0 0 6px;
+  color: #1a202c;
+}
+.app-select-desc {
+  color: #718096;
+  margin: 0;
+  font-size: 0.95rem;
+}
+.app-mode-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.app-mode-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px 20px;
+  background: #fff;
+  border: 2px solid #edf2f7;
+  border-radius: 16px;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.app-mode-option:hover {
+  border-color: #cbd5e0;
+}
+.app-mode-option.selected {
+  border-color: #667eea;
+  background: linear-gradient(135deg, rgba(102,126,234,0.06) 0%, rgba(118,75,162,0.06) 100%);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.1);
+}
+.mode-radio {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid #cbd5e0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.app-mode-option.selected .mode-radio {
+  border-color: #667eea;
+  background: #667eea;
+}
+.radio-inner {
+  width: 8px;
+  height: 8px;
+  background: #fff;
+  border-radius: 50%;
+}
+.mode-content {
+  flex: 1;
+  min-width: 0;
+}
+.mode-label {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #2d3748;
+  margin-bottom: 4px;
+}
+.mode-desc {
+  font-size: 0.85rem;
+  color: #a0aec0;
+}
+.app-dropdown-wrapper {
+  margin-left: 36px;
+}
+.app-dropdown {
+  width: 100%;
+  padding: 12px 16px;
+  font-size: 0.95rem;
+  color: #2d3748;
+  background: #fff;
+  border: 2px solid #e2e8f0;
+  border-radius: 12px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
+  font-family: inherit;
+}
+.app-dropdown:focus {
+  border-color: #667eea;
+}
+.app-dropdown option {
+  padding: 8px;
+}
+.app-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  color: #718096;
+  font-size: 0.9rem;
+}
+.spinner-small {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #e2e8f0;
+  border-top-color: #667eea;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+.app-empty {
+  padding: 12px 16px;
+  color: #a0aec0;
+  font-size: 0.9rem;
+  background: #f8fafc;
+  border-radius: 12px;
+  border: 1px dashed #e2e8f0;
+}
+
 @media (max-width: 640px) {
   .kpl-header { padding: 0 24px; height: 64px; }
   .kpl-main { padding: 28px 16px 48px; }
@@ -527,5 +752,7 @@ onMounted(() => {
   .card-icon { width: 44px; height: 44px; font-size: 1.3rem; }
   .file-item { padding: 14px 16px; }
   .btn-start { width: 100%; justify-content: center; }
+  .app-dropdown-wrapper { margin-left: 0; margin-top: 12px; }
+  .app-select-icon { width: 44px; height: 44px; font-size: 1.3rem; }
 }
 </style>

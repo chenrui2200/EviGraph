@@ -95,11 +95,12 @@ def start_kb_pipeline():
     if not minio_object:
         return jsonify({"success": False, "error": "缺少 minio_object 参数"}), 400
 
-    pipeline = KbPipeline.create_default(minio_object=minio_object)
+    target_app_id = data.get('target_app_id')
+    pipeline = KbPipeline.create_default(minio_object=minio_object, target_app_id=target_app_id)
     KbPipelineManager.save(pipeline)
 
     start_pipeline_runner(pipeline)
-    logger.info(f"KB Pipeline started: {pipeline.pipeline_id} for {minio_object}")
+    logger.info(f"KB Pipeline started: {pipeline.pipeline_id} for {minio_object}, target_app_id={target_app_id}")
     return success_response(data=pipeline.to_dict())
 
 

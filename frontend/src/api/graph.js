@@ -308,13 +308,14 @@ export function getKbPipelineMinioFiles(prefix = '') {
 /**
  * 启动 KB Pipeline
  * @param {String} minio_object - MinIO 对象名称
+ * @param {String|null} target_app_id - 关联的已有 App ID（为 null 则自动创建新 App）
  * @returns {Promise}
  */
-export function startKbPipeline(minio_object) {
+export function startKbPipeline(minio_object, target_app_id = null) {
   return service({
     url: '/api/graph/kb-pipeline/start',
     method: 'post',
-    data: { minio_object }
+    data: { minio_object, target_app_id }
   })
 }
 

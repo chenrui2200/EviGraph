@@ -72,6 +72,7 @@ class KbPipeline:
     project_id: Optional[str] = None
     graph_id: Optional[str] = None
     app_id: Optional[str] = None
+    target_app_id: Optional[str] = None  # 用户指定的已有 App（非自动创建）
     status: PipelineStageStatus = PipelineStageStatus.PENDING
     current_stage_index: int = 0
     stages: List[PipelineStage] = field(default_factory=list)
@@ -86,6 +87,7 @@ class KbPipeline:
             "project_id": self.project_id,
             "graph_id": self.graph_id,
             "app_id": self.app_id,
+            "target_app_id": self.target_app_id,
             "status": self.status.value,
             "current_stage_index": self.current_stage_index,
             "stages": [s.to_dict() for s in self.stages],
@@ -102,6 +104,7 @@ class KbPipeline:
             project_id=data.get("project_id"),
             graph_id=data.get("graph_id"),
             app_id=data.get("app_id"),
+            target_app_id=data.get("target_app_id"),
             status=PipelineStageStatus(data.get("status", "pending")),
             current_stage_index=data.get("current_stage_index", 0),
             stages=[PipelineStage.from_dict(s) for s in data.get("stages", [])],
@@ -111,19 +114,22 @@ class KbPipeline:
         )
 
     @classmethod
-    def create_default(cls, minio_object: str) -> "KbPipeline":
+    def create_default(cls, minio_object: str, target_app_id: Optional[str] = None) -> "KbPipeline":
         now = datetime.now().isoformat()
         pipeline_id = f"kbpipe_{uuid.uuid4().hex[:12]}"
+        # 根据是否有 target_app_id 决定最后阶段标签
+        app_stage_label = "应用关联" if target_app_id else "应用创建"
         return cls(
             pipeline_id=pipeline_id,
             minio_object=minio_object,
+            target_app_id=target_app_id,
             stages=[
                 PipelineStage(name="project_creation", label="项目创建"),
                 PipelineStage(name="mineru_annotation", label="MinerU 标注"),
                 PipelineStage(name="chapter_analysis", label="章节模式分析"),
                 PipelineStage(name="intelligent_analysis", label="智能分析"),
                 PipelineStage(name="graph_building", label="图谱构建"),
-                PipelineStage(name="app_creation", label="应用创建"),
+                PipelineStage(name="app_creation", label=app_stage_label),
             ],
             created_at=now,
             updated_at=now,

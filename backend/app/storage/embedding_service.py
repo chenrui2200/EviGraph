@@ -40,7 +40,7 @@ class EmbeddingService:
         elif "11434" in self.base_url or "ollama" in self.base_url.lower():
             self.provider = "ollama"
             self._embed_url = f"{self.base_url}/api/embed"
-        elif "3020" in self.base_url or "/embed" in self.base_url:
+        elif "3020" in self.base_url or self.base_url.rstrip('/').endswith('/embed'):
             self.provider = "custom_embed"
             self._embed_url = f"{self.base_url.rstrip('/')}/embed"
         else:

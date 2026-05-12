@@ -556,12 +556,10 @@ class GraphToolsService:
                 "query": query,
                 "documents": documents,
                 "top_n": len(documents),
-                "return_documents": False,
             }
-            headers = {
-                "Authorization": f"Bearer {Config.RERANKER_API_KEY}",
-                "Content-Type": "application/json",
-            }
+            headers = {"Content-Type": "application/json"}
+            if Config.RERANKER_API_KEY:
+                headers["Authorization"] = f"Bearer {Config.RERANKER_API_KEY}"
 
             resp = _requests.post(
                 Config.RERANKER_BASE_URL,
@@ -643,12 +641,10 @@ class GraphToolsService:
                 "query": query,
                 "documents": documents,
                 "top_n": len(documents),
-                "return_documents": False,
             }
-            headers = {
-                "Authorization": f"Bearer {Config.RERANKER_API_KEY}",
-                "Content-Type": "application/json",
-            }
+            headers = {"Content-Type": "application/json"}
+            if Config.RERANKER_API_KEY:
+                headers["Authorization"] = f"Bearer {Config.RERANKER_API_KEY}"
             resp = _requests.post(Config.RERANKER_BASE_URL, json=payload, headers=headers, timeout=60)
             resp.raise_for_status()
             result = resp.json()
