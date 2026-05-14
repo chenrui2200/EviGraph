@@ -22,26 +22,69 @@ logger = get_logger('mirofish.api')
 @api_handler
 def build_graph():
     """
-    Interface 2: Build graph based on project_id
-
-    Request (JSON):
-        {
-            "project_id": "proj_xxxx",  // Required
-            "graph_name": "Graph name",    // Optional
-            "chunk_size": 500,          // Optional
-            "chunk_overlap": 50,        // Optional
-            "entity_label": "Term"       // Optional
-        }
-
-    Response:
-        {
-            "success": true,
-            "data": {
-                "project_id": "proj_xxxx",
-                "task_id": "task_xxxx",
-                "message": "Graph build task started"
-            }
-        }
+    ---
+    post:
+      summary: 构建知识图谱（异步任务）
+      description: |
+        基于项目 ID 启动图谱构建异步任务。
+        系统会自动解析项目中的文档，提取实体和关系，写入 Neo4j。
+      tags:
+        - Graph / 图谱操作
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - project_id
+            properties:
+              project_id:
+                type: string
+                description: 项目ID（必填）
+              graph_name:
+                type: string
+                description: 图谱名称（可选，默认使用项目名称）
+              chunk_size:
+                type: integer
+                default: 500
+                description: 文本块大小
+              chunk_overlap:
+                type: integer
+                default: 50
+                description: 文本块重叠大小
+              entity_label:
+                type: string
+                description: 实体标签（可选）
+              semantic:
+                type: boolean
+                default: false
+                description: 是否启用语义分块
+              force:
+                type: boolean
+                default: false
+                description: 是否强制重新构建
+      responses:
+        200:
+          description: 构建任务已启动
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              data:
+                type: object
+                properties:
+                  project_id:
+                    type: string
+                  task_id:
+                    type: string
+                  message:
+                    type: string
+        400:
+          description: 缺少 project_id
+        404:
+          description: 项目不存在
     """
     from .graph import _get_storage, _start_build_worker
 

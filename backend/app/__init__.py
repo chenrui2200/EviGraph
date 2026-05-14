@@ -74,10 +74,59 @@ def create_app(config_class=Config):
     app.register_blueprint(ai_app_bp, url_prefix='/api/ai-app')
     app.register_blueprint(report_bp, url_prefix='/api/report')
 
+    # Initialize Swagger (auto-generates API docs from docstrings)
+    from flasgger import Swagger
+    Swagger(app, template={
+        "info": {
+            "title": "Knowledge EviGraph API",
+            "description": "基于 Neo4j 和 LLM 的知识图谱构建与管理系统 API",
+            "version": "1.0.0",
+            "contact": {
+                "name": "EviGraph Team",
+                "url": "https://github.com/chenrui2200/EviGraph"
+            }
+        },
+        "basePath": "/api",
+        "swagger_ui_config": {
+            "deepLinking": True,
+            "displayOperationId": False,
+            "docExpansion": "list"
+        }
+    })
+
     # Health check
     @app.route('/health')
     @app.route('/api/health')
     def health():
+        """
+        ---
+        get:
+          summary: 服务健康检查
+          description: |
+            检查后端服务及其依赖（Neo4j、Embedding、LLM）的运行状态。
+          tags:
+            - System / 系统
+          responses:
+            200:
+              description: 服务正常（依赖状态在响应体中）
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                  dependencies:
+                    type: object
+                    properties:
+                      neo4j:
+                        type: object
+                      embedding:
+                        type: object
+                      llm:
+                        type: object
+        """
         from .storage.embedding_service import EmbeddingService
 
         # Check Neo4j

@@ -16,10 +16,56 @@ report_bp = Blueprint('report', __name__)
 @report_bp.route('/tools/search-object-first', methods=['POST'])
 def search_object_first():
     """
-    Root-node-first DFS search for hit-test view.
-
-    POST body:
-        graph_id, query, limit, max_depth, root_type
+    ---
+    post:
+      summary: Root-node-first DFS search for hit-test view
+      description: |
+        以根节点优先的 DFS 搜索，用于 Hit-Test 视图。
+        根据 query 在指定图谱中搜索最匹配的根节点，然后沿关系逐层展开。
+      tags:
+        - Report / 检索工具
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - graph_id
+              - query
+            properties:
+              graph_id:
+                type: string
+                description: 图谱ID
+              query:
+                type: string
+                description: 搜索查询
+              limit:
+                type: integer
+                default: 10
+                description: 返回结果数量上限
+              max_depth:
+                type: integer
+                default: 3
+                description: 最大搜索深度
+              root_type:
+                type: string
+                default: Entity
+                description: 根节点类型（Entity / Term / Clause）
+      responses:
+        200:
+          description: 搜索成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              data:
+                type: object
+        400:
+          description: 参数错误（缺少 graph_id 或 query）
+        503:
+          description: 存储服务不可用
     """
     data = request.get_json() or {}
     graph_id = data.get('graph_id')
@@ -61,19 +107,70 @@ def search_object_first():
 @report_bp.route('/query-topic', methods=['POST'])
 def query_intent_match():
     """
-    问题意图摘要匹配：
-    1. hybrid 检索 Topic 节点（向量 + BM25）
-    2. bge-reranker 对 Topic 按用户问题相关性重排
-    3. 获取每个 Top Topic 关联的 Entity / Term
-    4. bge-reranker 对 Entity / Term 重排
-    5. 返回 Topic + 关联 Entity 的全量图谱信息与分数
-
-    POST body:
-        app_id: str (preferred) - 应用ID，自动解析出关联图谱
-        graph_id: str (legacy) - 直接指定图谱ID（向后兼容）
-        query: str (required)
-        topic_limit: int (default 10)
-        entity_limit: int (default 10)
+    ---
+    post:
+      summary: 问题意图摘要匹配（Topic 检索 + 重排）
+      description: |
+        1. hybrid 检索 Topic 节点（向量 + BM25）
+        2. bge-reranker 对 Topic 按用户问题相关性重排
+        3. 获取每个 Top Topic 关联的 Entity / Term
+        4. bge-reranker 对 Entity / Term 重排
+        5. 返回 Topic + 关联 Entity 的全量图谱信息与分数
+      tags:
+        - Report / 检索工具
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - query
+            properties:
+              app_id:
+                type: string
+                description: 应用ID（优先，自动解析关联图谱）
+              graph_id:
+                type: string
+                description: 图谱ID（向后兼容，未传 app_id 时使用）
+              query:
+                type: string
+                description: 用户查询（必填）
+              topic_limit:
+                type: integer
+                default: 10
+                description: 返回 Topic 数量上限
+              entity_limit:
+                type: integer
+                default: 10
+                description: 每个 Topic 下返回 Entity 数量上限
+              rerank_min_score:
+                type: number
+                default: 0
+                description: 重排最低分数阈值
+      responses:
+        200:
+          description: 检索成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              data:
+                type: object
+                properties:
+                  query:
+                    type: string
+                  topics:
+                    type: array
+                  total_topics:
+                    type: integer
+        400:
+          description: 参数错误（缺少 query 或 app_id/graph_id）
+        404:
+          description: 应用不存在
+        503:
+          description: 存储服务不可用
     """
     data = request.get_json() or {}
     app_id = data.get('app_id', '')
