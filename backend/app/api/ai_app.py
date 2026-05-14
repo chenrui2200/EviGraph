@@ -19,7 +19,52 @@ def _get_storage():
 
 @ai_app_bp.route('/save', methods=['POST'])
 def save_app():
-    """Save or update an AI application"""
+    """
+    ---
+    post:
+      summary: 保存或更新 AI Application
+      description: |
+        保存或更新一个 AI 应用配置。如果传入的 app_id 已存在则更新，
+        否则自动生成新的 app_id 并创建。
+      tags:
+        - AI App / 应用管理
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            properties:
+              app_id:
+                type: string
+                description: 应用 ID（为空时自动创建）
+              name:
+                type: string
+                description: 应用名称（必填）
+              description:
+                type: string
+                description: 应用描述
+              workflow_data:
+                type: object
+                description: 工作流配置
+              nodes:
+                type: array
+                description: 节点配置列表
+      responses:
+        200:
+          description: 保存成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              data:
+                type: object
+        400:
+          description: 缺少应用名称
+        500:
+          description: 服务器错误
+    """
     try:
         data = request.get_json() or {}
         if not data.get('name'):
@@ -37,7 +82,34 @@ def save_app():
 
 @ai_app_bp.route('/list', methods=['GET'])
 def list_apps():
-    """List all AI applications"""
+    """
+    ---
+    get:
+      summary: 获取 AI Application 列表
+      description: 列出所有已创建的 AI 应用配置。
+      tags:
+        - AI App / 应用管理
+      parameters:
+        - name: limit
+          in: query
+          type: integer
+          default: 50
+          description: 返回数量上限
+      responses:
+        200:
+          description: 列表获取成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              data:
+                type: array
+              count:
+                type: integer
+        500:
+          description: 服务器错误
+    """
     try:
         limit = request.args.get('limit', 50, type=int)
         apps = AiAppManager.list_apps(limit=limit)
@@ -52,7 +124,32 @@ def list_apps():
 
 @ai_app_bp.route('/<app_id>', methods=['GET'])
 def get_app(app_id: str):
-    """Get a specific AI application"""
+    """
+    ---
+    get:
+      summary: 获取指定 AI Application
+      description: 根据 app_id 获取单个 AI 应用的完整配置。
+      tags:
+        - AI App / 应用管理
+      parameters:
+        - name: app_id
+          in: path
+          type: string
+          required: true
+          description: 应用 ID
+      responses:
+        200:
+          description: 获取成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              data:
+                type: object
+        404:
+          description: 应用不存在
+    """
     app = AiAppManager.get_app(app_id)
     if not app:
         return jsonify({"success": False, "error": "Application not found"}), 404
@@ -64,14 +161,78 @@ def get_app(app_id: str):
 
 @ai_app_bp.route('/<app_id>', methods=['DELETE'])
 def delete_app(app_id: str):
-    """Delete an AI application"""
+    """
+    ---
+    delete:
+      summary: 删除 AI Application
+      description: 根据 app_id 删除指定的 AI 应用。
+      tags:
+        - AI App / 应用管理
+      parameters:
+        - name: app_id
+          in: path
+          type: string
+          required: true
+          description: 应用 ID
+      responses:
+        200:
+          description: 删除成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              message:
+                type: string
+        404:
+          description: 应用不存在
+    """
     if AiAppManager.delete_app(app_id):
         return jsonify({"success": True, "message": "Application deleted"})
     return jsonify({"success": False, "error": "Application not found"}), 404
 
 @ai_app_bp.route('/publish/<app_id>', methods=['POST'])
 def publish_app(app_id: str):
-    """Toggle publish status of an AI application"""
+    """
+    ---
+    post:
+      summary: 发布/取消发布 AI Application
+      description: 切换 AI 应用的发布状态。
+      tags:
+        - AI App / 应用管理
+      parameters:
+        - name: app_id
+          in: path
+          type: string
+          required: true
+          description: 应用 ID
+        - name: body
+          in: body
+          required: false
+          schema:
+            type: object
+            properties:
+              published:
+                type: boolean
+                default: true
+                description: 是否发布（true=发布，false=取消发布）
+      responses:
+        200:
+          description: 状态切换成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              message:
+                type: string
+              data:
+                type: object
+        404:
+          description: 应用不存在
+        500:
+          description: 服务器错误
+    """
     try:
         data = request.get_json() or {}
         published = data.get('published', True)
@@ -92,7 +253,47 @@ def publish_app(app_id: str):
 
 @ai_app_bp.route('/create', methods=['POST'])
 def create_app():
-    """创建一个新的空 AI Application"""
+    """
+    ---
+    post:
+      summary: 创建空的 AI Application
+      description: |
+        创建一个新的空 AI 应用，自动填充默认工作流配置。
+        包括 selectedGraphIds、temperature、topK、rerankMinScore 等参数。
+      tags:
+        - AI App / 应用管理
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - name
+            properties:
+              name:
+                type: string
+                description: 应用名称（必填）
+              description:
+                type: string
+                description: 应用描述
+      responses:
+        200:
+          description: 创建成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              message:
+                type: string
+              data:
+                type: object
+        400:
+          description: 缺少应用名称
+        500:
+          description: 服务器错误
+    """
     try:
         data = request.get_json() or {}
         name = data.get('name')
@@ -126,7 +327,51 @@ def create_app():
 
 @ai_app_bp.route('/<app_id>/add-project', methods=['POST'])
 def add_project_to_app(app_id: str):
-    """将现有 Project 的 graph_id 添加到指定 App 的 selectedGraphIds 中"""
+    """
+    ---
+    post:
+      summary: 将项目关联到 AI Application
+      description: |
+        将现有 Project 的 graph_id 添加到指定 App 的 selectedGraphIds 中。
+        自动去重，如果 graph_id 已存在则不会重复添加。
+      tags:
+        - AI App / 应用管理
+      parameters:
+        - name: app_id
+          in: path
+          type: string
+          required: true
+          description: 应用 ID
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - project_id
+            properties:
+              project_id:
+                type: string
+                description: 项目 ID（必填）
+      responses:
+        200:
+          description: 关联成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              message:
+                type: string
+              data:
+                type: object
+        400:
+          description: 缺少 project_id 或项目无 graph_id
+        404:
+          description: 应用或项目不存在
+        500:
+          description: 服务器错误
+    """
     try:
         data = request.get_json() or {}
         project_id = data.get('project_id')

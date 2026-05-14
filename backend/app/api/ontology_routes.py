@@ -25,12 +25,53 @@ logger = get_logger('mirofish.api')
 @api_handler
 def generate_ontology():
     """
-    Interface 1: Upload files and extract text (Asynchronous)
-
-    流程：
-    1. 提取 PDF 文本块（chunks.json）
-    2. 保存原始文本
-    3. 设置状态为 ontology_generated
+    ---
+    post:
+      summary: 上传文件并提取文本（异步）
+      description: |
+        上传 PDF/Word 文档，自动解析并提取文本块。
+        流程：
+        1. 上传文件并保存到项目目录
+        2. Word 文件自动转换为 PDF
+        3. MinerU 解析 PDF 为文本块（chunks.json）
+        4. 保存规范本体定义
+        5. 设置项目状态为 ontology_generated
+      tags:
+        - Ontology / 本体管理
+      consumes:
+        - multipart/form-data
+      parameters:
+        - name: files
+          in: formData
+          type: file
+          required: true
+          description: 上传的文档文件（PDF 或 Word）
+        - name: project_name
+          in: formData
+          type: string
+          required: false
+          description: 项目名称（默认使用第一个文件名）
+      responses:
+        200:
+          description: 文本提取任务已启动
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              data:
+                type: object
+                properties:
+                  project_id:
+                    type: string
+                  task_id:
+                    type: string
+                  message:
+                    type: string
+        400:
+          description: 未上传有效文件
+        500:
+          description: 服务器错误
     """
     from .graph import allowed_file, _call_mineru_api, _parse_mineru_jsonl
 

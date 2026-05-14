@@ -109,14 +109,55 @@ def _generate_kb_words_pool(project_id: str, chunks_result: dict, pdf_name: str 
 @api_handler
 def intelligent_chunk():
     """
-    Phase 2.2: LLM 驱动的智能语义分析
-
-    读取 MinerU 解析产生的 chunks.json，在其基础上：
-    1. LLM 提取目录（章节结构）
-    2. 逐章 LLM 提取条文 + 语义三元组
-    3. 逐章 LLM 提取技术要素
-    4. 建立关联关系
-    5. 保存到 intelligent_chunks.json
+    ---
+    post:
+      summary: LLM 智能语义分析分块
+      description: |
+        Phase 2.2: 读取 MinerU 解析产生的 chunks.json，在其基础上：
+        1. LLM 提取目录（章节结构）
+        2. 逐章 LLM 提取条文 + 语义三元组
+        3. 逐章 LLM 提取技术要素
+        4. 建立关联关系
+        5. 保存到 intelligent_chunks.json
+        支持断点续传（checkpoint）和重置（reset）。
+      tags:
+        - Chunk / 智能分块
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - project_id
+            properties:
+              project_id:
+                type: string
+                description: 项目 ID
+              reset:
+                type: boolean
+                default: false
+                description: 是否重置并重新开始分析
+              chapter_anchor:
+                type: string
+                default: x.x
+                description: 章节锚点（一级父节点格式）
+              clause_container:
+                type: string
+                default: x.x.x
+                description: 最小条款容器锚点（二级格式）
+              use_mineru_titles:
+                type: boolean
+                description: 是否使用 MinerU 标题（默认自动推断）
+      responses:
+        200:
+          description: 分析任务已启动
+          schema:
+            type: object
+        400:
+          description: 缺少 project_id 或 chunks 数据
+        404:
+          description: 项目不存在
     """
     from .graph import _resolve_pdf_path
 
@@ -381,7 +422,27 @@ def intelligent_chunk():
 @api_handler
 def infer_chunk_anchors(project_id: str):
     """
-    基于 chunks.json 自动推断推荐的章节锚点和最小条款容器锚点。
+    ---
+    post:
+      summary: 推断章节锚点模式
+      description: 基于 chunks.json 自动推断推荐的章节锚点和最小条款容器锚点格式。
+      tags:
+        - Chunk / 智能分块
+      parameters:
+        - name: project_id
+          in: path
+          type: string
+          required: true
+          description: 项目 ID
+      responses:
+        200:
+          description: 推断成功
+          schema:
+            type: object
+        400:
+          description: 未找到 chunks.json
+        404:
+          description: 项目不存在
     """
     try:
         project = ProjectManager.get_project(project_id)
@@ -407,7 +468,27 @@ def infer_chunk_anchors(project_id: str):
 @graph_bp.route('/chunk/<project_id>/progress', methods=['GET'])
 @api_handler
 def get_chunk_progress(project_id: str):
-    """获取章节处理进度详情"""
+    """
+    ---
+    get:
+      summary: 获取章节处理进度
+      description: 获取智能分块任务的章节处理进度详情。
+      tags:
+        - Chunk / 智能分块
+      parameters:
+        - name: project_id
+          in: path
+          type: string
+          required: true
+          description: 项目 ID
+      responses:
+        200:
+          description: 进度获取成功
+          schema:
+            type: object
+        404:
+          description: 项目不存在
+    """
     try:
         project = ProjectManager.get_project(project_id)
         if not project:
@@ -506,7 +587,27 @@ def get_chunk_progress(project_id: str):
 @graph_bp.route('/chunk/<project_id>/has_intelligent_chunks', methods=['GET'])
 @api_handler
 def check_has_intelligent_chunks(project_id: str):
-    """检查项目是否存在 intelligent_chunks.json 文件"""
+    """
+    ---
+    get:
+      summary: 检查智能分块是否完成
+      description: 检查项目是否存在 intelligent_chunks.json 文件。
+      tags:
+        - Chunk / 智能分块
+      parameters:
+        - name: project_id
+          in: path
+          type: string
+          required: true
+          description: 项目 ID
+      responses:
+        200:
+          description: 检查结果
+          schema:
+            type: object
+        404:
+          description: 项目不存在
+    """
     project = ProjectManager.get_project(project_id)
     if not project:
         return error_response(error="NOT_FOUND", message=f"项目不存在: {project_id}", status_code=404)
@@ -518,7 +619,29 @@ def check_has_intelligent_chunks(project_id: str):
 @graph_bp.route('/chunk/<project_id>/analysis', methods=['GET'])
 @api_handler
 def get_chunk_analysis(project_id: str):
-    """获取智能Chunks标注分析的格式化展示数据"""
+    """
+    ---
+    get:
+      summary: 获取智能分析展示数据
+      description: 获取智能Chunks标注分析的格式化展示数据，包含章节树、条款列表和技术要素。
+      tags:
+        - Chunk / 智能分块
+      parameters:
+        - name: project_id
+          in: path
+          type: string
+          required: true
+          description: 项目 ID
+      responses:
+        200:
+          description: 分析数据获取成功
+          schema:
+            type: object
+        200:
+          description: 尚未执行 LLM 分块
+        404:
+          description: 项目不存在
+    """
     project = ProjectManager.get_project(project_id)
     if not project:
         return jsonify({"success": False, "error": f"项目不存在: {project_id}"}), 404
@@ -644,7 +767,49 @@ def get_chunk_analysis(project_id: str):
 @graph_bp.route('/chunk/<project_id>/entity', methods=['PATCH'])
 @api_handler
 def update_clause_entity(project_id: str):
-    """更新单个 clause 的知识实体"""
+    """
+    ---
+    patch:
+      summary: 更新条款知识实体
+      description: 更新单个 clause 的知识实体（术语、实体等），同步到 Neo4j 并保存回 intelligent_chunks.json。
+      tags:
+        - Chunk / 智能分块
+      parameters:
+        - name: project_id
+          in: path
+          type: string
+          required: true
+          description: 项目 ID
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - clause_id
+            properties:
+              clause_id:
+                type: string
+                description: 条款 ID
+              terms:
+                type: array
+                description: 术语列表
+              entities:
+                type: array
+                description: 实体列表
+              topics:
+                type: array
+                description: 主题列表
+      responses:
+        200:
+          description: 更新成功
+          schema:
+            type: object
+        400:
+          description: 缺少 clause_id
+        404:
+          description: 项目或条款不存在
+    """
     from .graph import _get_storage
 
     try:

@@ -267,14 +267,33 @@ def query_intent_match():
 @report_bp.route('/kb-words-pool', methods=['GET'])
 def kb_words_pool():
     """
-    返回知识实体词池 (kb_words_pool.json) 的 JSON 内容。
-
-    当传入 app_id 时，自动聚合该应用关联的**所有**项目词池数据。
-    相同 topic 下的 entities 会自动去重合并。
-
-    Query params:
-        app_id: str (preferred) - 应用ID，自动解析关联所有项目并聚合
-        project_id: str (alternative) - 直接指定单个项目ID
+    ---
+    get:
+      summary: 获取知识实体词池
+      description: |
+        返回 kb_words_pool.json 的聚合内容。
+        当传入 app_id 时，自动聚合该应用关联的所有项目词池数据，
+        相同 topic 下的 entities 会自动去重合并。
+      tags:
+        - Report / 检索工具
+      parameters:
+        - name: app_id
+          in: query
+          type: string
+          description: 应用 ID（优先）
+        - name: project_id
+          in: query
+          type: string
+          description: 项目 ID（备选）
+      responses:
+        200:
+          description: 词池数据获取成功
+          schema:
+            type: object
+        400:
+          description: 缺少 app_id 或 project_id
+        404:
+          description: 应用或项目不存在
     """
     app_id = request.args.get('app_id', '')
     project_id = request.args.get('project_id', '')
@@ -423,14 +442,57 @@ def kb_words_pool():
 @report_bp.route('/tools/search-entity-topic-clause', methods=['POST'])
 def search_entity_topic_clause():
     """
-    专用路径检索：Entity/Term → Topic → Clause。
-    用于 Hit-Test 视图，固定 2 跳路径，不走通用 DFS。
-
-    POST body:
-        graph_id, query, limit, root_type (str, 兼容旧接口)
-        或 root_types (list[str], 批量搜索多种根节点类型)
-
-    当 root_types 提供时，一次性计算 embedding 并并行搜索所有类型。
+    ---
+    post:
+      summary: 实体-主题-条款路径检索
+      description: |
+        Entity/Term → Topic → Clause 专用路径检索。
+        用于 Hit-Test 视图，固定 2 跳路径，不走通用 DFS。
+        支持 root_types 批量搜索多种根节点类型。
+      tags:
+        - Report / 检索工具
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - graph_id
+              - query
+            properties:
+              graph_id:
+                type: string
+                description: 图谱 ID
+              query:
+                type: string
+                description: 搜索查询
+              limit:
+                type: integer
+                default: 10
+                description: 返回数量上限
+              root_type:
+                type: string
+                default: Entity
+                description: 根节点类型（单选，兼容旧接口）
+              root_types:
+                type: array
+                items:
+                  type: string
+                description: 根节点类型数组（批量搜索）
+              similarity_threshold:
+                type: number
+                default: 0
+                description: 相似度阈值（0-100）
+      responses:
+        200:
+          description: 检索成功
+          schema:
+            type: object
+        400:
+          description: 缺少 graph_id 或 query
+        503:
+          description: 存储服务不可用
     """
     data = request.get_json() or {}
     graph_id = data.get('graph_id')
@@ -479,13 +541,47 @@ def search_entity_topic_clause():
 @report_bp.route('/tools/rerank', methods=['POST'])
 def rerank_facts():
     """
-    相关性重排：接收检索结果 rows，调用 bge-reranker-v2-m3 打分 + 分数过滤 + top_k 截取。
-
-    POST body:
-        rows: List[ObjectFirstRow] (序列化后的 dict)
-        query: str
-        top_k: int (保留得分最高的 k 个样本，默认 10)
-        rerank_min_score: int (0-100，最低分阈值，默认 0 不过滤)
+    ---
+    post:
+      summary: 检索结果重排
+      description: |
+        接收检索结果 rows，调用 bge-reranker-v2-m3 打分，
+        执行分数过滤和 top_k 截取。
+        同时为结果附加关联的 Table / Image 节点。
+      tags:
+        - Report / 检索工具
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - query
+            properties:
+              rows:
+                type: array
+                description: 检索结果行（ObjectFirstRow 序列化）
+              query:
+                type: string
+                description: 查询语句
+              top_k:
+                type: integer
+                default: 10
+                description: 保留 top_k 个结果
+              rerank_min_score:
+                type: integer
+                default: 0
+                description: 最低分阈值（0-100）
+      responses:
+        200:
+          description: 重排成功
+          schema:
+            type: object
+        400:
+          description: 缺少 query
+        503:
+          description: 存储服务不可用
     """
     from ..services.graph_tools import ObjectFirstRow, ObjectPathNode, ObjectPathEdge
 
@@ -651,12 +747,42 @@ def rerank_facts():
 @report_bp.route('/tools/llm-answer', methods=['POST'])
 def llm_answer():
     """
-    LLM 推理问答：接收过滤后的 facts + query，构建 prompt 并调用 LLM 生成回答。
-
-    POST body:
-        facts: List[Dict] - 过滤后的 fact 列表（含 text, source, page, bbox, graph_id 等）
-        query: str - 用户问题
-        temperature: float (default 0.7)
+    ---
+    post:
+      summary: LLM 推理问答
+      description: |
+        接收过滤后的 facts 和用户 query，构建 prompt 并调用 LLM 生成回答。
+        回答严格基于提供的知识参考，禁止编造或推断。
+      tags:
+        - Report / 检索工具
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - query
+            properties:
+              facts:
+                type: array
+                description: 过滤后的 fact 列表（含 text, source, page, bbox 等）
+              query:
+                type: string
+                description: 用户问题
+              temperature:
+                type: number
+                default: 0.7
+                description: LLM 温度参数
+      responses:
+        200:
+          description: 回答生成成功
+          schema:
+            type: object
+        400:
+          description: 缺少 query
+        500:
+          description: LLM 调用失败
     """
     data = request.get_json() or {}
     facts = data.get('facts', [])
@@ -744,34 +870,44 @@ def llm_answer():
 @report_bp.route('/public-query', methods=['POST'])
 def public_query():
     """
-    公共查询接口：无需认证，通过 app_id 获取应用配置并执行检索。
-
-    POST body:
-        app_id: str - 应用ID
-        query: str - 查询问题
-
-    返回格式：
-        {
-            "success": true,
-            "data": {
-                "query": "...",
-                "results": [
-                    {
-                        "text": "条款内容",
-                        "clause_id": "3.2.1",
-                        "source": "GB50054.pdf",
-                        "page": 12,
-                        "pdf_bboxes": [[12, 100, 200, 300, 400]],
-                        "bbox": [100, 200, 300, 400],
-                        "page_width": 595,
-                        "page_height": 842,
-                        "relevance_score": 85,
-                        "pdf_url": "http://.../api/graph/project/xxx/document/GB50054.pdf?page=12",
-                        "source_link": "http://.../chat/app_xxx?source=GB50054.pdf&page=12&bbox=100,200,300,400"
-                    }
-                ]
-            }
-        }
+    ---
+    post:
+      summary: 公共查询接口
+      description: |
+        无需认证，通过 app_id 获取已发布的应用配置并执行检索。
+        自动使用应用配置中的 selectedGraphIds、rootTypes、similarityThreshold 等参数。
+        返回结果包含 PDF 定位信息和可访问链接。
+      tags:
+        - Report / 检索工具
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - app_id
+              - query
+            properties:
+              app_id:
+                type: string
+                description: 应用 ID
+              query:
+                type: string
+                description: 查询问题
+      responses:
+        200:
+          description: 查询成功
+          schema:
+            type: object
+        400:
+          description: 缺少 app_id 或 query
+        403:
+          description: 应用未发布
+        404:
+          description: 应用不存在
+        503:
+          description: 存储服务不可用
     """
     data = request.get_json() or {}
     app_id = data.get('app_id', '')

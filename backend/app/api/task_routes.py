@@ -19,7 +19,30 @@ logger = get_logger('mirofish.api')
 @api_handler
 def get_task(task_id: str):
     """
-    Query task status
+    ---
+    get:
+      summary: 查询任务状态
+      description: 获取指定任务的当前状态、进度和日志信息。
+      tags:
+        - Task / 任务管理
+      parameters:
+        - name: task_id
+          in: path
+          type: string
+          required: true
+          description: 任务 ID
+      responses:
+        200:
+          description: 任务状态获取成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              data:
+                type: object
+        404:
+          description: 任务不存在
     """
     task = TaskManager().get_task(task_id)
 
@@ -38,8 +61,27 @@ def get_task(task_id: str):
 @graph_bp.route('/task/<task_id>/events', methods=['GET'])
 def task_events(task_id: str):
     """
-    Server-Sent Events (SSE) for real-time task updates.
-    Provides incremental logs and status changes without polling full JSON.
+    ---
+    get:
+      summary: 任务实时事件流 (SSE)
+      description: |
+        Server-Sent Events 实时推送任务进度更新。
+        无需轮询，连接后自动推送增量日志和状态变更。
+      tags:
+        - Task / 任务管理
+      parameters:
+        - name: task_id
+          in: path
+          type: string
+          required: true
+          description: 任务 ID
+      produces:
+        - text/event-stream
+      responses:
+        200:
+          description: SSE 事件流
+        404:
+          description: 任务不存在
     """
     task_manager = TaskManager()
     task = task_manager.get_task(task_id)
@@ -70,5 +112,3 @@ def task_events(task_id: str):
             task_manager.unsubscribe(task_id, q)
 
     return Response(event_stream(), mimetype='text/event-stream')
-
-

@@ -201,7 +201,32 @@ def build_graph():
 @graph_bp.route('/data/<graph_id>', methods=['GET'])
 @api_handler
 def get_graph_data(graph_id: str):
-    """Get graph data (nodes and edges)"""
+    """
+    ---
+    get:
+      summary: 获取图谱数据
+      description: 获取指定图谱的所有节点和边数据。
+      tags:
+        - Graph / 图谱操作
+      parameters:
+        - name: graph_id
+          in: path
+          type: string
+          required: true
+          description: 图谱 ID
+      responses:
+        200:
+          description: 数据获取成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              data:
+                type: object
+        500:
+          description: 服务器错误
+    """
     from .graph import _get_storage
 
     try:
@@ -219,16 +244,56 @@ def get_graph_data(graph_id: str):
 @api_handler
 def search_nodes():
     """
-    按节点名称模糊搜索 + 类型过滤。
-
-    Request:
-        {
-            "graph_id": "proj_xxx",
-            "query": "导体",
-            "node_types": ["Entity", "Term"],  // 可选: 多选类型数组
-            "node_type": "Entity",              // 向后兼容: 单类型字符串
-            "limit": 20
-        }
+    ---
+    post:
+      summary: 按名称模糊搜索图谱节点
+      description: |
+        在指定图谱中按节点名称模糊搜索，支持多类型过滤。
+        可选 node_types 数组或向后兼容的 node_type 单字符串。
+      tags:
+        - Graph / 图谱操作
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - graph_id
+              - query
+            properties:
+              graph_id:
+                type: string
+                description: 图谱 ID
+              query:
+                type: string
+                description: 搜索关键词
+              node_types:
+                type: array
+                items:
+                  type: string
+                description: 节点类型数组（多选）
+              node_type:
+                type: string
+                description: 节点类型（单选，向后兼容）
+              limit:
+                type: integer
+                default: 20
+                description: 返回数量上限
+      responses:
+        200:
+          description: 搜索成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              data:
+                type: object
+        400:
+          description: 缺少 graph_id 或 query
+        500:
+          description: 服务器错误
     """
     from .graph import _get_storage
 
@@ -260,13 +325,44 @@ def search_nodes():
 @api_handler
 def node_neighborhood():
     """
-    获取节点的 1 跳邻域（中心节点 + 邻接节点 + 邻边）。
-
-    Request:
-        {
-            "graph_id": "proj_xxx",
-            "node_uuid": "uuid"
-        }
+    ---
+    post:
+      summary: 获取节点 1 跳邻域
+      description: 获取指定节点的 1 跳邻域（中心节点 + 邻接节点 + 邻边）。
+      tags:
+        - Graph / 图谱操作
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - graph_id
+              - node_uuid
+            properties:
+              graph_id:
+                type: string
+                description: 图谱 ID
+              node_uuid:
+                type: string
+                description: 节点 UUID
+      responses:
+        200:
+          description: 获取成功
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              data:
+                type: object
+        400:
+          description: 缺少 graph_id 或 node_uuid
+        404:
+          description: 节点不存在
+        500:
+          description: 服务器错误
     """
     from .graph import _get_storage
 

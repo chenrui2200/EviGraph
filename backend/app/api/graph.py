@@ -869,19 +869,43 @@ def _convert_analysis_to_chunks(chunk_result, text_chunks, project_id):
 @graph_bp.route('/pdf/mineru-parse', methods=['POST'])
 def mineru_parse():
     """
-    MinerU PDF 解析接口（异步任务，通过 SSE 推送进度）
-
-    请求: JSON { "project_id": "xxx", "filename": "xxx.pdf", "parse_method": "auto|ocr" }
-    流程:
-      1. 创建任务，立即返回 task_id
-      2. 后台线程执行：逐页调用 MinerU API → 解析 → 保存 chunks.json
-      3. 通过 SSE 将每一步日志推送到前端
-
-    Response:
-        {
-            "success": true,
-            "data": { "project_id": "xxx", "task_id": "xxx" }
-        }
+    ---
+    post:
+      summary: MinerU PDF 解析（异步）
+      description: |
+        上传 PDF 并调用 MinerU API 进行解析（异步任务）。
+        创建任务后立即返回 task_id，后台线程逐页调用 MinerU API，
+        解析完成后保存为 chunks.json。通过 SSE 推送进度日志。
+      tags:
+        - PDF / 文档解析
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - project_id
+              - filename
+            properties:
+              project_id:
+                type: string
+                description: 项目 ID
+              filename:
+                type: string
+                description: PDF 文件名
+              parse_method:
+                type: string
+                enum: [auto, ocr]
+                default: auto
+                description: 解析方法
+      responses:
+        200:
+          description: 解析任务已启动
+          schema:
+            type: object
+        400:
+          description: 缺少 project_id 或 filename
     """
     data = request.get_json() or {}
     project_id = data.get('project_id')
@@ -1265,19 +1289,39 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str, parse_me
 @graph_bp.route('/pdf/re-annotate', methods=['POST'])
 def re_annotate():
     """
-    重新标注：从 mineru_parsed.json 重新生成 chunks.json（异步任务）
-
-    请求: JSON { "project_id": "xxx", "parse_method": "auto|ocr" }
-    流程:
-      1. 创建任务，立即返回 task_id
-      2. 后台线程执行：读取/调用 MinerU → 解析 → 保存 chunks.json
-      3. 通过 SSE 将每一步日志推送到前端
-
-    Response:
-        {
-            "success": true,
-            "data": { "project_id": "xxx", "task_id": "xxx" }
-        }
+    ---
+    post:
+      summary: 重新标注 PDF（异步）
+      description: |
+        从 mineru_parsed.json 重新生成 chunks.json（异步任务）。
+        创建任务后立即返回 task_id，后台线程读取/调用 MinerU 重新解析，
+        通过 SSE 推送进度日志。
+      tags:
+        - PDF / 文档解析
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required:
+              - project_id
+            properties:
+              project_id:
+                type: string
+                description: 项目 ID
+              parse_method:
+                type: string
+                enum: [auto, ocr]
+                default: auto
+                description: 解析方法
+      responses:
+        200:
+          description: 重新标注任务已启动
+          schema:
+            type: object
+        400:
+          description: 缺少 project_id 或 parse_method 无效
     """
     data = request.get_json() or {}
     project_id = data.get('project_id')
@@ -2107,20 +2151,25 @@ def _build_clauses_from_chunks(chunks: list) -> list:
 @graph_bp.route('/pdf/mineru-parse/<project_id>', methods=['GET'])
 def get_mineru_chunks(project_id: str):
     """
-    获取 MinerU 解析结果（从 chunks.json）
-
-    chunks.json 由 mineru_parse 产生，
-    包含 MinerU 的 layout + content + bbox + nouns 数据。
-
-    Returns:
-        {
-            "success": true,
-            "data": {
-                "project_id": "xxx",
-                "chunks": [...],
-                "summary": {...}
-            }
-        }
+    ---
+    get:
+      summary: 获取 MinerU 解析结果
+      description: 从 chunks.json 获取 MinerU 解析结果，包含 layout、content、bbox 等数据。
+      tags:
+        - PDF / 文档解析
+      parameters:
+        - name: project_id
+          in: path
+          type: string
+          required: true
+          description: 项目 ID
+      responses:
+        200:
+          description: 解析结果获取成功
+          schema:
+            type: object
+        404:
+          description: 项目不存在或尚未执行 MinerU 解析
     """
     try:
         project = ProjectManager.get_project(project_id)
