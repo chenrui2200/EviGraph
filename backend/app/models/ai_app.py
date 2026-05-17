@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import threading
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
@@ -46,6 +47,7 @@ class AiApp:
 class AiAppManager:
     """Manager for AI Knowledge Base Applications"""
     APPS_DIR = os.path.join(Config.UPLOAD_FOLDER, 'ai_apps')
+    _file_lock = threading.RLock()
 
     @classmethod
     def _ensure_apps_dir(cls):
@@ -56,34 +58,47 @@ class AiAppManager:
         return os.path.join(cls.APPS_DIR, f"{app_id}.json")
 
     @classmethod
+    def _save_atomic(cls, app_id: str, data: Dict[str, Any]) -> None:
+        """原子写入：先写临时文件再替换，避免并发读半写文件。"""
+        path = cls._get_app_path(app_id)
+        temp_path = path + ".tmp"
+        try:
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(temp_path, path)
+        except Exception:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+    @classmethod
     def save_app(cls, app_data: Dict[str, Any]) -> AiApp:
         cls._ensure_apps_dir()
 
         app_id = app_data.get('app_id')
         now = datetime.now().isoformat()
 
-        # If existing app, try to preserve its original created_at
-        existing_app = None
-        if app_id:
-            existing_app = cls.get_app(app_id)
+        with cls._file_lock:
+            # If existing app, try to preserve its original created_at
+            existing_app = None
+            if app_id:
+                existing_app = cls.get_app(app_id)
 
-        if not app_id:
-            app_id = f"app_{uuid.uuid4().hex[:12]}"
-            app_data['app_id'] = app_id
-            app_data['created_at'] = now
-        elif existing_app:
-            # Preserve original creation date
-            app_data['created_at'] = existing_app.created_at
-        else:
-            # New ID provided but not found, use current time
-            app_data['created_at'] = now
+            if not app_id:
+                app_id = f"app_{uuid.uuid4().hex[:12]}"
+                app_data['app_id'] = app_id
+                app_data['created_at'] = now
+            elif existing_app:
+                # Preserve original creation date
+                app_data['created_at'] = existing_app.created_at
+            else:
+                # New ID provided but not found, use current time
+                app_data['created_at'] = now
 
-        app_data['updated_at'] = now
-        app = AiApp.from_dict(app_data)
+            app_data['updated_at'] = now
+            app = AiApp.from_dict(app_data)
 
-        path = cls._get_app_path(app_id)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(app.to_dict(), f, ensure_ascii=False, indent=2)
+            cls._save_atomic(app_id, app.to_dict())
 
         return app
 
@@ -119,15 +134,13 @@ class AiAppManager:
 
     @classmethod
     def publish_app(cls, app_id: str, published: bool = True) -> Optional[AiApp]:
-        app = cls.get_app(app_id)
-        if not app:
-            return None
+        with cls._file_lock:
+            app = cls.get_app(app_id)
+            if not app:
+                return None
 
-        app.is_published = published
-        app.updated_at = datetime.now().isoformat()
-
-        path = cls._get_app_path(app_id)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(app.to_dict(), f, ensure_ascii=False, indent=2)
+            app.is_published = published
+            app.updated_at = datetime.now().isoformat()
+            cls._save_atomic(app_id, app.to_dict())
 
         return app

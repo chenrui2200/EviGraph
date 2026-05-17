@@ -425,7 +425,7 @@ const loadApp = async () => {
       appName.value = data.name
       const wf = data.workflow_data || {}
 
-      // Resolve selectedGraphIds from selectedProjectIds (like AiQaView)
+      // Resolve selectedGraphIds from selectedProjectIds (source of truth)
       // This ensures we use the latest graph_id for each project
       const savedProjectIds = wf.selectedProjectIds || []
       let resolvedGraphIds = []
@@ -439,8 +439,14 @@ const loadApp = async () => {
           })
           .filter(Boolean)
       } else {
-        // Backward compatibility: use selectedGraphIds directly
-        resolvedGraphIds = wf.selectedGraphIds || []
+        // Backward compatibility: migrate from selectedGraphIds
+        const legacyGraphIds = wf.selectedGraphIds || []
+        resolvedGraphIds = legacyGraphIds
+          .map(gid => {
+            const proj = projects.value.find(p => p.graph_id === gid)
+            return proj?.graph_id
+          })
+          .filter(Boolean)
       }
 
       appConfig.value = {

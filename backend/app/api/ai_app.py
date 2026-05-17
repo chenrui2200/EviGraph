@@ -300,19 +300,34 @@ def create_app():
         if not name:
             return jsonify({"success": False, "error": "Application name is required"}), 400
 
+        # 默认 workflow_data，支持请求体传入自定义值合并覆盖
+        default_workflow = {
+            "selectedGraphIds": [],
+            "temperature": 0.7,
+            "similarityThreshold": 50,
+            "topK": 10,
+            "rerankMinScore": 50,
+            "maxDepth": 3,
+            "rootTypes": ["Entity", "Term"],
+            "intentMatch": {
+                "topicLimit": 50,
+                "entityLimit": 50,
+                "rerankMinScore": 0
+            }
+        }
+        user_workflow = data.get('workflow_data') or {}
+        # 深度合并：保留默认值，用户传入的覆盖
+        for key, value in user_workflow.items():
+            if isinstance(value, dict) and key in default_workflow and isinstance(default_workflow[key], dict):
+                default_workflow[key].update(value)
+            else:
+                default_workflow[key] = value
+
         app_data = {
             "name": name,
             "description": data.get('description', ''),
-            "workflow_data": {
-                "selectedGraphIds": [],
-                "temperature": 0.7,
-                "similarityThreshold": 0,
-                "topK": 10,
-                "rerankMinScore": 0,
-                "maxDepth": 3,
-                "rootTypes": ["Entity", "Term"],
-            },
-            "nodes": []
+            "workflow_data": default_workflow,
+            "nodes": data.get('nodes', [])
         }
         app = AiAppManager.save_app(app_data)
         return jsonify({

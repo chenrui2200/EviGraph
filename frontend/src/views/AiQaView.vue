@@ -96,12 +96,12 @@
                 <button class="kb-tools-btn" @click="showKbTools = true">
                   ⚙️ 知识库配置
                 </button>
-                <span class="kb-count">已选 {{ workflowData.selectedGraphIds.length }} 个库</span>
+                <span class="kb-count">已选 {{ workflowData.selectedProjectIds.length }} 个库</span>
               </div>
 
               <div class="selected-kbs">
-                <span v-for="id in workflowData.selectedGraphIds" :key="id" class="kb-tag">
-                  {{ getProjectName(id) }}
+                <span v-for="pid in workflowData.selectedProjectIds" :key="pid" class="kb-tag">
+                  {{ getProjectNameById(pid) }}
                 </span>
               </div>
 
@@ -384,7 +384,7 @@
       <!-- 全量捕获 Tab -->
       <template v-else>
         <IntentMatchView
-          :graph-id="workflowData.selectedGraphIds[0] || ''"
+          :graph-id="firstSelectedGraphId"
           :topic-limit="workflowData.intentMatch.topicLimit"
           :entity-limit="workflowData.intentMatch.entityLimit"
           :rerank-min-score="workflowData.intentMatch.rerankMinScore"
@@ -411,11 +411,11 @@
               v-for="project in projects"
               :key="project.project_id"
               class="project-select-item"
-              :class="{ 'selected': workflowData.selectedGraphIds.includes(project.graph_id), 'disabled': !project.graph_id && !isEditing(project.project_id) }"
+              :class="{ 'selected': workflowData.selectedProjectIds.includes(project.project_id), 'disabled': !project.graph_id && !isEditing(project.project_id) }"
               @click="!isEditing(project.project_id) && toggleProject(project)"
             >
               <div class="project-check">
-                <span v-if="workflowData.selectedGraphIds.includes(project.graph_id)">✓</span>
+                <span v-if="workflowData.selectedProjectIds.includes(project.project_id)">✓</span>
               </div>
               <div class="project-info">
                 <div v-if="isEditing(project.project_id)" class="edit-input-group" @click.stop>
@@ -955,6 +955,7 @@ const saveProjectName = async (projectId) => {
 
 const workflowData = ref({
   query: '',
+  selectedProjectIds: [],
   selectedGraphIds: [],
   temperature: 0.7,
   similarityThreshold: 0,
@@ -1088,8 +1089,8 @@ const loadProjects = async () => {
       const projectId = (!props.id?.startsWith('app_') && props.id !== 'default' && props.id !== 'new') ? props.id : null
       if (projectId) {
         const currentProj = projects.value.find(p => p.project_id === projectId)
-        if (currentProj && currentProj.graph_id && !workflowData.value.selectedGraphIds.includes(currentProj.graph_id)) {
-          workflowData.value.selectedGraphIds.push(currentProj.graph_id)
+        if (currentProj && currentProj.graph_id && !workflowData.value.selectedProjectIds.includes(currentProj.project_id)) {
+          workflowData.value.selectedProjectIds.push(currentProj.project_id)
         }
       }
     }
@@ -1102,17 +1103,22 @@ const loadProjects = async () => {
 
 const toggleProject = (project) => {
   if (!project.graph_id) return
-  const idx = workflowData.value.selectedGraphIds.indexOf(project.graph_id)
+  const idx = workflowData.value.selectedProjectIds.indexOf(project.project_id)
   if (idx > -1) {
-    workflowData.value.selectedGraphIds.splice(idx, 1)
+    workflowData.value.selectedProjectIds.splice(idx, 1)
   } else {
-    workflowData.value.selectedGraphIds.push(project.graph_id)
+    workflowData.value.selectedProjectIds.push(project.project_id)
   }
 }
 
 const getProjectName = (graphId) => {
   const p = projects.value.find(p => p.graph_id === graphId)
   return p ? p.name : graphId
+}
+
+const getProjectNameById = (projectId) => {
+  const p = projects.value.find(p => p.project_id === projectId)
+  return p ? p.name : projectId
 }
 
 const resetWorkflow = () => {
@@ -1172,13 +1178,33 @@ const simValueClass = computed(() => {
   return 'mid'
 })
 
+// 从 selectedProjectIds 动态计算第一个可用的 graph_id（用于 IntentMatchView）
+const firstSelectedGraphId = computed(() => {
+  const pid = workflowData.value.selectedProjectIds[0]
+  if (!pid) return ''
+  const proj = projects.value.find(p => p.project_id === pid)
+  return proj?.graph_id || ''
+})
+
 const runWorkflow = async () => {
   if (!workflowData.value.query.trim()) {
     alert('请输入问题')
     return
   }
-  if (workflowData.value.selectedGraphIds.length === 0) {
+  if (workflowData.value.selectedProjectIds.length === 0) {
     alert('请选择至少一个知识库')
+    return
+  }
+
+  // 运行时从 selectedProjectIds 动态计算最新的 selectedGraphIds
+  const graphIds = workflowData.value.selectedProjectIds
+    .map(pid => {
+      const proj = projects.value.find(p => p.project_id === pid)
+      return proj?.graph_id
+    })
+    .filter(Boolean)
+  if (graphIds.length === 0) {
+    alert('所选项目暂无可用图谱')
     return
   }
 
@@ -1192,7 +1218,7 @@ const runWorkflow = async () => {
     if (retrievalNode) retrievalNode.status = 'running'
 
     const { rows, durationMs } = await hitTestSearch({
-      graphId: workflowData.value.selectedGraphIds,
+      graphId: graphIds,
       query: workflowData.value.query,
       limit: 15,
       similarityThreshold: workflowData.value.similarityThreshold,
@@ -1266,11 +1292,12 @@ const runWorkflow = async () => {
 const saveWorkflowApp = async () => {
   saving.value = true
   try {
-    // 保存时同步 selectedProjectIds（用于加载时映射最新 graph_id）
-    const selectedProjectIds = workflowData.value.selectedGraphIds
-      .map(gid => {
-        const p = projects.value.find(p => p.graph_id === gid)
-        return p?.project_id
+    // selectedProjectIds 是 source of truth
+    // 动态计算当前最新的 selectedGraphIds 作为附加字段（向后兼容）
+    const selectedGraphIds = workflowData.value.selectedProjectIds
+      .map(pid => {
+        const p = projects.value.find(p => p.project_id === pid)
+        return p?.graph_id
       })
       .filter(Boolean)
     const payload = {
@@ -1279,7 +1306,7 @@ const saveWorkflowApp = async () => {
       nodes: nodes.value,
       workflow_data: {
         ...workflowData.value,
-        selectedProjectIds,
+        selectedGraphIds,
       },
       is_published: isPublished.value
     }
@@ -1347,31 +1374,24 @@ const loadAppConfig = async (id) => {
       if (app.workflow_data) {
         workflowData.value = { ...workflowData.value, ...app.workflow_data }
       }
-      // 同步 selectedGraphIds：优先用 selectedProjectIds 映射最新 graph_id
+      // selectedProjectIds 是 source of truth
+      // 兼容旧数据：没有 selectedProjectIds 时，从 selectedGraphIds 反向迁移一次
       const savedProjectIds = workflowData.value.selectedProjectIds || []
-      if (savedProjectIds.length > 0) {
-        // 用保存的 project_id 查找当前最新 graph_id
-        const syncedGraphIds = savedProjectIds
-          .map(pid => {
-            const proj = projects.value.find(p => p.project_id === pid)
-            return proj?.graph_id
+      if (savedProjectIds.length === 0) {
+        const savedGraphIds = workflowData.value.selectedGraphIds || []
+        workflowData.value.selectedProjectIds = savedGraphIds
+          .map(gid => {
+            const proj = projects.value.find(p => p.graph_id === gid)
+            return proj?.project_id
           })
           .filter(Boolean)
-        workflowData.value.selectedGraphIds = syncedGraphIds
-      } else {
-        // 兼容旧数据：没有 selectedProjectIds，移除已失效的 graph_id
-        const savedGraphIds = workflowData.value.selectedGraphIds || []
-        workflowData.value.selectedGraphIds = savedGraphIds.filter(gid =>
-          projects.value.some(p => p.graph_id === gid)
-        )
       }
 
-      // 额外检查：如果路由带了 projectId，确保该项目最新 graph_id 被选中
+      // 额外检查：如果路由带了 projectId，自动加入 selectedProjectIds
       const projectId = (!props.id?.startsWith('app_') && props.id !== 'default' && props.id !== 'new') ? props.id : null
       if (projectId) {
-        const proj = projects.value.find(p => p.project_id === projectId)
-        if (proj?.graph_id && !workflowData.value.selectedGraphIds.includes(proj.graph_id)) {
-          workflowData.value.selectedGraphIds.push(proj.graph_id)
+        if (!workflowData.value.selectedProjectIds.includes(projectId)) {
+          workflowData.value.selectedProjectIds.push(projectId)
         }
       }
     }

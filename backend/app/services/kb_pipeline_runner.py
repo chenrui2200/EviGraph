@@ -30,6 +30,11 @@ def _get_app():
     return create_app()
 
 
+# 全局并发控制：最多同时运行 2 个 Pipeline，防止外部资源过载
+_MAX_CONCURRENT_PIPELINES = 2
+_pipeline_semaphore = threading.Semaphore(_MAX_CONCURRENT_PIPELINES)
+
+
 class KbPipelineRunner:
     """KB Pipeline 运行器"""
 
@@ -39,6 +44,15 @@ class KbPipelineRunner:
 
     def run(self):
         """启动执行（应在后台线程中调用）"""
+        # 获取全局并发许可，避免同时运行过多 Pipeline 压垮外部服务
+        acquired = _pipeline_semaphore.acquire(timeout=5)
+        if not acquired:
+            logger.error(f"Pipeline {self.pipeline.pipeline_id} 无法启动：并发 Pipeline 数量已达上限 ({_MAX_CONCURRENT_PIPELINES})")
+            self.pipeline.status = PipelineStageStatus.FAILED
+            self.pipeline.error = f"系统并发限制：最多同时运行 {_MAX_CONCURRENT_PIPELINES} 个 Pipeline"
+            KbPipelineManager.save(self.pipeline)
+            return
+
         try:
             self._update_pipeline_status(PipelineStageStatus.PROCESSING)
             stages = self.pipeline.stages
@@ -96,6 +110,8 @@ class KbPipelineRunner:
             self.pipeline.error = str(e)
             KbPipelineManager.save(self.pipeline)
             logger.error(f"Pipeline {self.pipeline.pipeline_id} fatal error: {e}\n{traceback.format_exc()}")
+        finally:
+            _pipeline_semaphore.release()
 
     def _invoke_stage_callback(self, stage, event_type: str, message: Optional[str] = None):
         """触发阶段回调"""
@@ -372,23 +388,24 @@ class KbPipelineRunner:
         target_app_id = self.pipeline.target_app_id
 
         if target_app_id:
-            # 关联到已有 App
-            app = AiAppManager.get_app(target_app_id)
-            if not app:
-                raise ValueError(f"目标应用 {target_app_id} 不存在")
+            # 关联到已有 App：必须加锁防止多 Pipeline 同时修改同一 App 的竞态条件
+            with AiAppManager._file_lock:
+                app = AiAppManager.get_app(target_app_id)
+                if not app:
+                    raise ValueError(f"目标应用 {target_app_id} 不存在")
 
-            workflow_data = app.workflow_data or {}
-            selected_graph_ids = workflow_data.get("selectedGraphIds", [])
-            if not isinstance(selected_graph_ids, list):
-                selected_graph_ids = []
+                workflow_data = app.workflow_data or {}
+                selected_graph_ids = workflow_data.get("selectedGraphIds", [])
+                if not isinstance(selected_graph_ids, list):
+                    selected_graph_ids = []
 
-            if graph_id not in selected_graph_ids:
-                selected_graph_ids.append(graph_id)
-                workflow_data["selectedGraphIds"] = selected_graph_ids
+                if graph_id not in selected_graph_ids:
+                    selected_graph_ids.append(graph_id)
+                    workflow_data["selectedGraphIds"] = selected_graph_ids
 
-            update_data = app.to_dict()
-            update_data["workflow_data"] = workflow_data
-            updated_app = AiAppManager.save_app(update_data)
+                update_data = app.to_dict()
+                update_data["workflow_data"] = workflow_data
+                updated_app = AiAppManager.save_app(update_data)
 
             self.pipeline.app_id = updated_app.app_id
             stage.result = {"app_id": updated_app.app_id, "app_name": updated_app.name, "mode": "attach"}
