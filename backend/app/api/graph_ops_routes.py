@@ -22,69 +22,67 @@ logger = get_logger('mirofish.api')
 @api_handler
 def build_graph():
     """
+    构建知识图谱（异步任务）
+    基于项目 ID 启动图谱构建异步任务。
+    系统会自动解析项目中的文档，提取实体和关系，写入 Neo4j。
     ---
-    post:
-      summary: 构建知识图谱（异步任务）
-      description: |
-        基于项目 ID 启动图谱构建异步任务。
-        系统会自动解析项目中的文档，提取实体和关系，写入 Neo4j。
-      tags:
-        - Graph / 图谱操作
-      parameters:
-        - name: body
-          in: body
-          required: true
-          schema:
-            type: object
-            required:
-              - project_id
-            properties:
-              project_id:
-                type: string
-                description: 项目ID（必填）
-              graph_name:
-                type: string
-                description: 图谱名称（可选，默认使用项目名称）
-              chunk_size:
-                type: integer
-                default: 500
-                description: 文本块大小
-              chunk_overlap:
-                type: integer
-                default: 50
-                description: 文本块重叠大小
-              entity_label:
-                type: string
-                description: 实体标签（可选）
-              semantic:
-                type: boolean
-                default: false
-                description: 是否启用语义分块
-              force:
-                type: boolean
-                default: false
-                description: 是否强制重新构建
-      responses:
-        200:
-          description: 构建任务已启动
-          schema:
-            type: object
-            properties:
-              success:
-                type: boolean
-              data:
-                type: object
-                properties:
-                  project_id:
-                    type: string
-                  task_id:
-                    type: string
-                  message:
-                    type: string
-        400:
-          description: 缺少 project_id
-        404:
-          description: 项目不存在
+    tags:
+      - Graph / 图谱操作
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - project_id
+          properties:
+            project_id:
+              type: string
+              description: 项目ID（必填）
+            graph_name:
+              type: string
+              description: 图谱名称（可选，默认使用项目名称）
+            chunk_size:
+              type: integer
+              default: 500
+              description: 文本块大小
+            chunk_overlap:
+              type: integer
+              default: 50
+              description: 文本块重叠大小
+            entity_label:
+              type: string
+              description: 实体标签（可选）
+            semantic:
+              type: boolean
+              default: false
+              description: 是否启用语义分块
+            force:
+              type: boolean
+              default: false
+              description: 是否强制重新构建
+    responses:
+      200:
+        description: 构建任务已启动
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            data:
+              type: object
+              properties:
+                project_id:
+                  type: string
+                task_id:
+                  type: string
+                message:
+                  type: string
+      400:
+        description: 缺少 project_id
+      404:
+        description: 项目不存在
     """
     from .graph import _get_storage, _start_build_worker
 
@@ -202,30 +200,29 @@ def build_graph():
 @api_handler
 def get_graph_data(graph_id: str):
     """
+    获取图谱数据
+    获取指定图谱的所有节点和边数据。
     ---
-    get:
-      summary: 获取图谱数据
-      description: 获取指定图谱的所有节点和边数据。
-      tags:
-        - Graph / 图谱操作
-      parameters:
-        - name: graph_id
-          in: path
-          type: string
-          required: true
-          description: 图谱 ID
-      responses:
-        200:
-          description: 数据获取成功
-          schema:
-            type: object
-            properties:
-              success:
-                type: boolean
-              data:
-                type: object
-        500:
-          description: 服务器错误
+    tags:
+      - Graph / 图谱操作
+    parameters:
+      - name: graph_id
+        in: path
+        type: string
+        required: true
+        description: 图谱 ID
+    responses:
+      200:
+        description: 数据获取成功
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            data:
+              type: object
+      500:
+        description: 服务器错误
     """
     from .graph import _get_storage
 
@@ -244,56 +241,54 @@ def get_graph_data(graph_id: str):
 @api_handler
 def search_nodes():
     """
+    按名称模糊搜索图谱节点
+    在指定图谱中按节点名称模糊搜索，支持多类型过滤。
+    可选 node_types 数组或向后兼容的 node_type 单字符串。
     ---
-    post:
-      summary: 按名称模糊搜索图谱节点
-      description: |
-        在指定图谱中按节点名称模糊搜索，支持多类型过滤。
-        可选 node_types 数组或向后兼容的 node_type 单字符串。
-      tags:
-        - Graph / 图谱操作
-      parameters:
-        - name: body
-          in: body
-          required: true
-          schema:
-            type: object
-            required:
-              - graph_id
-              - query
-            properties:
-              graph_id:
+    tags:
+      - Graph / 图谱操作
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - graph_id
+            - query
+          properties:
+            graph_id:
+              type: string
+              description: 图谱 ID
+            query:
+              type: string
+              description: 搜索关键词
+            node_types:
+              type: array
+              items:
                 type: string
-                description: 图谱 ID
-              query:
-                type: string
-                description: 搜索关键词
-              node_types:
-                type: array
-                items:
-                  type: string
-                description: 节点类型数组（多选）
-              node_type:
-                type: string
-                description: 节点类型（单选，向后兼容）
-              limit:
-                type: integer
-                default: 20
-                description: 返回数量上限
-      responses:
-        200:
-          description: 搜索成功
-          schema:
-            type: object
-            properties:
-              success:
-                type: boolean
-              data:
-                type: object
-        400:
-          description: 缺少 graph_id 或 query
-        500:
-          description: 服务器错误
+              description: 节点类型数组（多选）
+            node_type:
+              type: string
+              description: 节点类型（单选，向后兼容）
+            limit:
+              type: integer
+              default: 20
+              description: 返回数量上限
+    responses:
+      200:
+        description: 搜索成功
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            data:
+              type: object
+      400:
+        description: 缺少 graph_id 或 query
+      500:
+        description: 服务器错误
     """
     from .graph import _get_storage
 
@@ -325,44 +320,43 @@ def search_nodes():
 @api_handler
 def node_neighborhood():
     """
+    获取节点 1 跳邻域
+    获取指定节点的 1 跳邻域（中心节点 + 邻接节点 + 邻边）。
     ---
-    post:
-      summary: 获取节点 1 跳邻域
-      description: 获取指定节点的 1 跳邻域（中心节点 + 邻接节点 + 邻边）。
-      tags:
-        - Graph / 图谱操作
-      parameters:
-        - name: body
-          in: body
-          required: true
-          schema:
-            type: object
-            required:
-              - graph_id
-              - node_uuid
-            properties:
-              graph_id:
-                type: string
-                description: 图谱 ID
-              node_uuid:
-                type: string
-                description: 节点 UUID
-      responses:
-        200:
-          description: 获取成功
-          schema:
-            type: object
-            properties:
-              success:
-                type: boolean
-              data:
-                type: object
-        400:
-          description: 缺少 graph_id 或 node_uuid
-        404:
-          description: 节点不存在
-        500:
-          description: 服务器错误
+    tags:
+      - Graph / 图谱操作
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - graph_id
+            - node_uuid
+          properties:
+            graph_id:
+              type: string
+              description: 图谱 ID
+            node_uuid:
+              type: string
+              description: 节点 UUID
+    responses:
+      200:
+        description: 获取成功
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            data:
+              type: object
+      400:
+        description: 缺少 graph_id 或 node_uuid
+      404:
+        description: 节点不存在
+      500:
+        description: 服务器错误
     """
     from .graph import _get_storage
 

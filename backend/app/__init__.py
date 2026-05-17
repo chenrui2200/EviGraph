@@ -99,33 +99,31 @@ def create_app(config_class=Config):
     @app.route('/api/health')
     def health():
         """
+        服务健康检查
+        检查后端服务及其依赖（Neo4j、Embedding、LLM）的运行状态。
         ---
-        get:
-          summary: 服务健康检查
-          description: |
-            检查后端服务及其依赖（Neo4j、Embedding、LLM）的运行状态。
-          tags:
-            - System / 系统
-          responses:
-            200:
-              description: 服务正常（依赖状态在响应体中）
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: ok
-                  service:
-                    type: string
-                  dependencies:
-                    type: object
-                    properties:
-                      neo4j:
-                        type: object
-                      embedding:
-                        type: object
-                      llm:
-                        type: object
+        tags:
+          - System / 系统
+        responses:
+          200:
+            description: 服务正常（依赖状态在响应体中）
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  example: ok
+                service:
+                  type: string
+                dependencies:
+                  type: object
+                  properties:
+                    neo4j:
+                      type: object
+                    embedding:
+                      type: object
+                    llm:
+                      type: object
         """
         from .storage.embedding_service import EmbeddingService
 

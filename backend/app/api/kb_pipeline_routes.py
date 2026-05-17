@@ -23,27 +23,26 @@ logger = get_logger('mirofish.api')
 @api_handler
 def retry_graph_building(pipeline_id: str):
     """
+    重试图谱构建阶段
+    重新执行指定 Pipeline 的图谱构建阶段，重置后续阶段为 pending。
     ---
-    post:
-      summary: 重试图谱构建阶段
-      description: 重新执行指定 Pipeline 的图谱构建阶段，重置后续阶段为 pending。
-      tags:
-        - KB Pipeline / 知识库流水线
-      parameters:
-        - name: pipeline_id
-          in: path
-          type: string
-          required: true
-          description: Pipeline ID
-      responses:
-        200:
-          description: 重试成功，返回更新后的 Pipeline 状态
-          schema:
-            type: object
-        400:
-          description: Project 尚未创建
-        404:
-          description: Pipeline 不存在
+    tags:
+      - KB Pipeline / 知识库流水线
+    parameters:
+      - name: pipeline_id
+        in: path
+        type: string
+        required: true
+        description: Pipeline ID
+    responses:
+      200:
+        description: 重试成功，返回更新后的 Pipeline 状态
+        schema:
+          type: object
+      400:
+        description: Project 尚未创建
+      404:
+        description: Pipeline 不存在
     """
     pipeline = KbPipelineManager.get(pipeline_id)
     if not pipeline:
@@ -103,28 +102,27 @@ def retry_graph_building(pipeline_id: str):
 @api_handler
 def get_minio_files():
     """
+    列出 MinIO 中的 PDF 文件
+    获取 MinIO 存储桶中所有 PDF 文件列表，支持前缀过滤。
     ---
-    get:
-      summary: 列出 MinIO 中的 PDF 文件
-      description: 获取 MinIO 存储桶中所有 PDF 文件列表，支持前缀过滤。
-      tags:
-        - KB Pipeline / 知识库流水线
-      parameters:
-        - name: prefix
-          in: query
-          type: string
-          default: ""
-          description: 文件前缀过滤
-      responses:
-        200:
-          description: 文件列表获取成功
-          schema:
-            type: object
-            properties:
-              success:
-                type: boolean
-              data:
-                type: array
+    tags:
+      - KB Pipeline / 知识库流水线
+    parameters:
+      - name: prefix
+        in: query
+        type: string
+        default: ""
+        description: 文件前缀过滤
+    responses:
+      200:
+        description: 文件列表获取成功
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            data:
+              type: array
     """
     prefix = request.args.get('prefix', '')
     files = list_pdf_objects(prefix=prefix, recursive=True)
@@ -135,34 +133,33 @@ def get_minio_files():
 @api_handler
 def start_kb_pipeline():
     """
+    启动 KB Pipeline
+    基于 MinIO 中的 PDF 文件启动自动化知识库构建流水线。
     ---
-    post:
-      summary: 启动 KB Pipeline
-      description: 基于 MinIO 中的 PDF 文件启动自动化知识库构建流水线。
-      tags:
-        - KB Pipeline / 知识库流水线
-      parameters:
-        - name: body
-          in: body
-          required: true
-          schema:
-            type: object
-            required:
-              - minio_object
-            properties:
-              minio_object:
-                type: string
-                description: MinIO 文件路径
-              target_app_id:
-                type: string
-                description: 目标 AI 应用 ID（可选）
-      responses:
-        200:
-          description: Pipeline 启动成功
-          schema:
-            type: object
-        400:
-          description: 缺少 minio_object 参数
+    tags:
+      - KB Pipeline / 知识库流水线
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - minio_object
+          properties:
+            minio_object:
+              type: string
+              description: MinIO 文件路径
+            target_app_id:
+              type: string
+              description: 目标 AI 应用 ID（可选）
+    responses:
+      200:
+        description: Pipeline 启动成功
+        schema:
+          type: object
+      400:
+        description: 缺少 minio_object 参数
     """
     data = request.get_json(silent=True) or {}
     minio_object = data.get('minio_object')
@@ -182,28 +179,27 @@ def start_kb_pipeline():
 @api_handler
 def list_kb_pipelines():
     """
+    获取 KB Pipeline 列表
+    列出所有已创建的 KB Pipeline。
     ---
-    get:
-      summary: 获取 KB Pipeline 列表
-      description: 列出所有已创建的 KB Pipeline。
-      tags:
-        - KB Pipeline / 知识库流水线
-      parameters:
-        - name: limit
-          in: query
-          type: integer
-          default: 100
-          description: 返回数量上限
-      responses:
-        200:
-          description: 列表获取成功
-          schema:
-            type: object
-            properties:
-              success:
-                type: boolean
-              data:
-                type: array
+    tags:
+      - KB Pipeline / 知识库流水线
+    parameters:
+      - name: limit
+        in: query
+        type: integer
+        default: 100
+        description: 返回数量上限
+    responses:
+      200:
+        description: 列表获取成功
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            data:
+              type: array
     """
     limit = request.args.get('limit', 100, type=int)
     pipelines = KbPipelineManager.list_all(limit=limit)
@@ -214,25 +210,24 @@ def list_kb_pipelines():
 @api_handler
 def get_kb_pipeline(pipeline_id: str):
     """
+    获取指定 Pipeline 状态
+    获取单个 KB Pipeline 的完整状态和各阶段进度。
     ---
-    get:
-      summary: 获取指定 Pipeline 状态
-      description: 获取单个 KB Pipeline 的完整状态和各阶段进度。
-      tags:
-        - KB Pipeline / 知识库流水线
-      parameters:
-        - name: pipeline_id
-          in: path
-          type: string
-          required: true
-          description: Pipeline ID
-      responses:
-        200:
-          description: 获取成功
-          schema:
-            type: object
-        404:
-          description: Pipeline 不存在
+    tags:
+      - KB Pipeline / 知识库流水线
+    parameters:
+      - name: pipeline_id
+        in: path
+        type: string
+        required: true
+        description: Pipeline ID
+    responses:
+      200:
+        description: 获取成功
+        schema:
+          type: object
+      404:
+        description: Pipeline 不存在
     """
     pipeline = KbPipelineManager.get(pipeline_id)
     if not pipeline:
@@ -243,27 +238,23 @@ def get_kb_pipeline(pipeline_id: str):
 @graph_bp.route('/kb-pipeline/<pipeline_id>/events', methods=['GET'])
 def kb_pipeline_events(pipeline_id: str):
     """
+    Pipeline 实时事件流 (SSE)
+    Server-Sent Events 实时推送 Pipeline 阶段更新。
+    轮询文件变更，直到 Pipeline 完成或失败。
     ---
-    get:
-      summary: Pipeline 实时事件流 (SSE)
-      description: |
-        Server-Sent Events 实时推送 Pipeline 阶段更新。
-        轮询文件变更，直到 Pipeline 完成或失败。
-      tags:
-        - KB Pipeline / 知识库流水线
-      parameters:
-        - name: pipeline_id
-          in: path
-          type: string
-          required: true
-          description: Pipeline ID
-      produces:
-        - text/event-stream
-      responses:
-        200:
-          description: SSE 事件流
-        404:
-          description: Pipeline 不存在
+    tags:
+      - KB Pipeline / 知识库流水线
+    parameters:
+      - name: pipeline_id
+        in: path
+        type: string
+        required: true
+        description: Pipeline ID
+    responses:
+      200:
+        description: SSE 事件流
+      404:
+        description: Pipeline 不存在
     """
     pipeline = KbPipelineManager.get(pipeline_id)
     if not pipeline:

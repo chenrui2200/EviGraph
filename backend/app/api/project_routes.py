@@ -24,33 +24,31 @@ logger = get_logger('mirofish.api')
 @api_handler
 def get_project(project_id: str):
     """
+    获取项目详情
+    获取项目详细信息，包含自动恢复逻辑：
+    - 如果本体任务丢失，自动从检查点恢复
+    - 如果图谱构建任务丢失，自动创建新任务恢复
     ---
-    get:
-      summary: 获取项目详情
-      description: |
-        获取项目详细信息，包含自动恢复逻辑：
-        - 如果本体任务丢失，自动从检查点恢复
-        - 如果图谱构建任务丢失，自动创建新任务恢复
-      tags:
-        - Project / 项目管理
-      parameters:
-        - name: project_id
-          in: path
-          type: string
-          required: true
-          description: 项目 ID
-      responses:
-        200:
-          description: 获取成功
-          schema:
-            type: object
-            properties:
-              success:
-                type: boolean
-              data:
-                type: object
-        404:
-          description: 项目不存在
+    tags:
+      - Project / 项目管理
+    parameters:
+      - name: project_id
+        in: path
+        type: string
+        required: true
+        description: 项目 ID
+    responses:
+      200:
+        description: 获取成功
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            data:
+              type: object
+      404:
+        description: 项目不存在
     """
     project = ProjectManager.get_project(project_id)
 
@@ -123,33 +121,32 @@ def get_project(project_id: str):
 @api_handler
 def list_projects():
     """
+    获取项目列表
+    列出所有项目，并附带引用该项目的 AI 应用信息。
     ---
-    get:
-      summary: 获取项目列表
-      description: 列出所有项目，并附带引用该项目的 AI 应用信息。
-      tags:
-        - Project / 项目管理
-      parameters:
-        - name: limit
-          in: query
-          type: integer
-          default: 50
-          description: 返回数量上限
-      responses:
-        200:
-          description: 列表获取成功
-          schema:
-            type: object
-            properties:
-              success:
-                type: boolean
-              data:
-                type: object
-                properties:
-                  projects:
-                    type: array
-                  count:
-                    type: integer
+    tags:
+      - Project / 项目管理
+    parameters:
+      - name: limit
+        in: query
+        type: integer
+        default: 50
+        description: 返回数量上限
+    responses:
+      200:
+        description: 列表获取成功
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            data:
+              type: object
+              properties:
+                projects:
+                  type: array
+                count:
+                  type: integer
     """
     limit = request.args.get('limit', 50, type=int)
     projects = ProjectManager.list_projects(limit=limit)
@@ -186,36 +183,34 @@ def list_projects():
 @api_handler
 def delete_project(project_id: str):
     """
+    删除项目
+    删除指定项目。如果该项目关联的 graph_id 被 AI 应用引用，
+    则返回 409 冲突错误，并列出引用的应用列表。
     ---
-    delete:
-      summary: 删除项目
-      description: |
-        删除指定项目。如果该项目关联的 graph_id 被 AI 应用引用，
-        则返回 409 冲突错误，并列出引用的应用列表。
-      tags:
-        - Project / 项目管理
-      parameters:
-        - name: project_id
-          in: path
-          type: string
-          required: true
-          description: 项目 ID
-      responses:
-        200:
-          description: 删除成功
-          schema:
-            type: object
-            properties:
-              success:
-                type: boolean
-              message:
-                type: string
-        404:
-          description: 项目不存在
-        409:
-          description: 项目被 AI 应用引用，无法删除
-        500:
-          description: 删除失败
+    tags:
+      - Project / 项目管理
+    parameters:
+      - name: project_id
+        in: path
+        type: string
+        required: true
+        description: 项目 ID
+    responses:
+      200:
+        description: 删除成功
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            message:
+              type: string
+      404:
+        description: 项目不存在
+      409:
+        description: 项目被 AI 应用引用，无法删除
+      500:
+        description: 删除失败
     """
     project = ProjectManager.get_project(project_id)
     if not project:
@@ -261,46 +256,45 @@ def delete_project(project_id: str):
 @api_handler
 def update_project(project_id: str):
     """
+    更新项目信息
+    更新项目名称、当前步骤等基本信息。
     ---
-    patch:
-      summary: 更新项目信息
-      description: 更新项目名称、当前步骤等基本信息。
-      tags:
-        - Project / 项目管理
-      parameters:
-        - name: project_id
-          in: path
-          type: string
-          required: true
-          description: 项目 ID
-        - name: body
-          in: body
-          required: true
-          schema:
-            type: object
-            properties:
-              name:
-                type: string
-                description: 新项目名称
-              current_step:
-                type: integer
-                description: 当前步骤编号
-      responses:
-        200:
-          description: 更新成功
-          schema:
-            type: object
-            properties:
-              success:
-                type: boolean
-              message:
-                type: string
-              data:
-                type: object
-        404:
-          description: 项目不存在
-        500:
-          description: 服务器错误
+    tags:
+      - Project / 项目管理
+    parameters:
+      - name: project_id
+        in: path
+        type: string
+        required: true
+        description: 项目 ID
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            name:
+              type: string
+              description: 新项目名称
+            current_step:
+              type: integer
+              description: 当前步骤编号
+    responses:
+      200:
+        description: 更新成功
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            message:
+              type: string
+            data:
+              type: object
+      404:
+        description: 项目不存在
+      500:
+        description: 服务器错误
     """
     try:
         data = request.get_json() or {}
@@ -339,34 +333,30 @@ def update_project(project_id: str):
 @api_handler
 def get_project_document(project_id: str, filename: str):
     """
+    获取项目文档（PDF 预览）
+    获取与项目关联的 PDF 文档用于前端预览。
+    支持通过 project_id 或 graph_id 查找文档。
+    优先使用 project.files 中记录的 PDF 路径，回退到项目目录递归搜索。
+    返回的响应头设置为 inline，支持浏览器直接预览。
     ---
-    get:
-      summary: 获取项目文档（PDF 预览）
-      description: |
-        获取与项目关联的 PDF 文档用于前端预览。
-        支持通过 project_id 或 graph_id 查找文档。
-        优先使用 project.files 中记录的 PDF 路径，回退到项目目录递归搜索。
-        返回的响应头设置为 inline，支持浏览器直接预览。
-      tags:
-        - Project / 项目管理
-      parameters:
-        - name: project_id
-          in: path
-          type: string
-          required: true
-          description: 项目 ID 或 graph_id
-        - name: filename
-          in: path
-          type: string
-          required: true
-          description: 文件名
-      produces:
-        - application/pdf
-      responses:
-        200:
-          description: PDF 文件流
-        404:
-          description: 项目或文档不存在
+    tags:
+      - Project / 项目管理
+    parameters:
+      - name: project_id
+        in: path
+        type: string
+        required: true
+        description: 项目 ID 或 graph_id
+      - name: filename
+        in: path
+        type: string
+        required: true
+        description: 文件名
+    responses:
+      200:
+        description: PDF 文件流
+      404:
+        description: 项目或文档不存在
     """
     target_file_path = None
     target_dir = None
