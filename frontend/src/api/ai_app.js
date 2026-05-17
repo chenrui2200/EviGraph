@@ -78,3 +78,17 @@ export function addProjectToApp(appId, projectId) {
   })
 }
 
+/**
+ * Remove project from AI Application
+ * @param {String} appId
+ * @param {String} projectId
+ * @returns {Promise}
+ */
+export function removeProjectFromApp(appId, projectId) {
+  return service({
+    url: `/api/ai-app/${appId}/remove-project`,
+    method: 'post',
+    data: { project_id: projectId }
+  })
+}
+
