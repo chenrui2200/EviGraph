@@ -30,6 +30,10 @@
 
         <div class="app-info">
           <div class="info-row">
+            <span class="info-label">App ID:</span>
+            <span class="info-value app-id">{{ app.app_id }}</span>
+          </div>
+          <div class="info-row">
             <span class="info-label">关联知识库:</span>
             <span class="info-value">{{ app.workflow_data?.selectedGraphIds?.length || 0 }} 个</span>
           </div>
@@ -207,6 +211,16 @@ onMounted(() => {
 .info-value {
   font-weight: 600;
   color: #333;
+}
+
+.app-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: #888;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-footer {
