@@ -111,9 +111,53 @@ def get_project(project_id: str):
             except Exception as e:
                 logger.error(f"Failed to auto-recover project {project_id}: {e}")
 
+    # 组装返回数据
+    result = project.to_dict()
+
+    # 1. Graph 节点类型统计
+    if project.graph_id:
+        try:
+            storage = current_app.extensions.get('neo4j_storage')
+            if storage:
+                with storage.driver.session() as session:
+                    # 各标签节点数量
+                    node_counts = session.run(
+                        "MATCH (n {graph_id: $graph_id}) UNWIND labels(n) as label RETURN label, count(*) as count",
+                        graph_id=project.graph_id
+                    )
+                    result["graph_node_stats"] = {record["label"]: record["count"] for record in node_counts}
+
+                    # 各关系类型数量
+                    rel_counts = session.run(
+                        "MATCH ()-[r {graph_id: $graph_id}]->() RETURN type(r) as rel_type, count(*) as count",
+                        graph_id=project.graph_id
+                    )
+                    result["graph_rel_stats"] = {record["rel_type"]: record["count"] for record in rel_counts}
+        except Exception as e:
+            logger.warning(f"Failed to get graph stats for {project_id}: {e}")
+            result["graph_node_stats"] = {}
+            result["graph_rel_stats"] = {}
+    else:
+        result["graph_node_stats"] = {}
+        result["graph_rel_stats"] = {}
+
+    # 2. 智能分块 chunk 数量
+    try:
+        intelligent_chunks = ProjectManager.get_intelligent_chunks(project_id)
+        if intelligent_chunks:
+            result["intelligent_chunk_count"] = len(intelligent_chunks.get("clauses", []))
+            result["intelligent_section_count"] = len(intelligent_chunks.get("sections", []))
+        else:
+            result["intelligent_chunk_count"] = 0
+            result["intelligent_section_count"] = 0
+    except Exception as e:
+        logger.warning(f"Failed to get intelligent chunks for {project_id}: {e}")
+        result["intelligent_chunk_count"] = 0
+        result["intelligent_section_count"] = 0
+
     return jsonify({
         "success": True,
-        "data": project.to_dict()
+        "data": result
     })
 
 
