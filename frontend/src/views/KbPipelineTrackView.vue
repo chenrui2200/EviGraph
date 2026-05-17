@@ -128,6 +128,16 @@
                     </div>
                   </div>
                 </template>
+                <!-- 重新关联按钮（attach / create 模式均显示）-->
+                <button
+                  class="stage-reset"
+                  style="margin-top: 8px;"
+                  :disabled="reassociateLoading"
+                  @click="handleReassociate"
+                >
+                  <span v-if="reassociateLoading">关联中...</span>
+                  <span v-else>🔄 重新关联</span>
+                </button>
               </div>
             </div>
 
@@ -229,7 +239,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { getKbPipeline, getKbPipelineEventsURL, getTaskStatus, getTaskEventsURL, retryGraphBuilding } from '../api/graph'
-import { publishApp, getApp } from '../api/ai_app'
+import { publishApp, getApp, addProjectToApp, getAppList } from '../api/ai_app'
 
 const router = useRouter()
 const route = useRoute()
@@ -342,6 +352,67 @@ const handlePublish = async (appId) => {
     alert('发布失败: ' + (e.message || '未知错误'))
   } finally {
     publishLoading.value[appId] = false
+  }
+}
+
+const reassociateLoading = ref(false)
+
+const handleReassociate = async () => {
+  if (!pipeline.value?.project_id) {
+    alert('当前 Pipeline 无项目信息')
+    return
+  }
+  // 获取可用 App 列表
+  let appList = []
+  try {
+    const res = await getAppList(100)
+    if (res.success && res.data) {
+      appList = res.data
+    }
+  } catch (e) {
+    console.error('获取 App 列表失败:', e)
+  }
+
+  let targetAppId = ''
+  if (appList.length > 0) {
+    const currentId = pipeline.value.app_id
+    const options = appList.map(a => {
+      const mark = a.app_id === currentId ? ' [当前]' : ''
+      return `${a.app_id}: ${a.name}${mark}`
+    }).join('\n')
+    targetAppId = prompt(
+      `选择要关联的目标 App（输入 app_id）：\n\n可用应用：\n${options}\n\n或直接输入 app_id：`,
+      currentId || ''
+    )
+  } else {
+    targetAppId = prompt('输入要关联的目标 App ID：')
+  }
+
+  if (!targetAppId) return
+  // 提取冒号前的 app_id
+  targetAppId = targetAppId.split(':')[0].trim()
+
+  reassociateLoading.value = true
+  try {
+    const res = await addProjectToApp(targetAppId, pipeline.value.project_id)
+    if (res.success) {
+      alert('重新关联成功')
+      // 更新 pipeline 显示
+      pipeline.value.app_id = targetAppId
+      const appStage = stages.value.find(s => s.name === 'app_creation')
+      if (appStage) {
+        appStage.result = { app_id: targetAppId, app_name: res.data?.name, mode: 'attach' }
+        appStage.message = `已关联到应用 ${res.data?.name || targetAppId}`
+      }
+      loadAppPublishStatus(targetAppId)
+    } else {
+      alert('重新关联失败: ' + (res.error || '未知错误'))
+    }
+  } catch (e) {
+    console.error('重新关联失败:', e)
+    alert('重新关联失败: ' + (e.message || '未知错误'))
+  } finally {
+    reassociateLoading.value = false
   }
 }
 

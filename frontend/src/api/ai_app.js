@@ -64,3 +64,17 @@ export function publishApp(appId, published = true) {
   })
 }
 
+/**
+ * Add project to AI Application
+ * @param {String} appId
+ * @param {String} projectId
+ * @returns {Promise}
+ */
+export function addProjectToApp(appId, projectId) {
+  return service({
+    url: `/api/ai-app/${appId}/add-project`,
+    method: 'post',
+    data: { project_id: projectId }
+  })
+}
+

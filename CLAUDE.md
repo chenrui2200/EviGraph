@@ -1,6 +1,8 @@
 # Knowledge EviGraph 架构文档
 
 ## 变更记录 (Changelog)
+- **2026-05-17**: `selectedProjectIds` 成为 App 配置 source of truth：前端 `AiQaView.vue` project-grid 勾选绑定改为 `selectedProjectIds`，`selectedGraphIds` 仅作为运行时动态快照；后端 `public-query`、`query-topic`、`delete_project`、`list_projects` 统一从 `selectedProjectIds` 动态解析最新 `graph_id`。解决 graph_id 重建后 App 引用失效问题。`create_app` 接口支持传入 `workflow_data` 深度合并，默认填充 `intentMatch` 配置。`get_project` 接口新增 `graph_node_stats`（各标签节点数量）、`graph_rel_stats`（各关系类型数量）、`intelligent_chunk_count` / `intelligent_section_count`。`.env` 适配本地 embedding/reranker API。
+- **2026-05-17**: 修复全部 38 个后端接口的 Swagger docstring 格式：Flasgger 0.9.7.1 不支持 `---\npost:` 包装格式，改为 summary/description 前置、`tags`/`parameters`/`responses` 顶层键的兼容格式。`requirements.txt` 补充 `PyYAML>=6.0`。
 - **2026-04-25**: 清理不存在的关系类型引用：删除 `neo4j_storage.py` 中 `MANDATES/PROHIBITS/RECOMMENDS/HAS_CONDITION/OPERATES_ON/APPLIES_TO/IN_SITUATION` 等孤儿方法（`_create_mandates_relation` 等 10 个）及 `get_graph_data` 查询列表；删除 `graph_tools.py` 死代码 `search_with_dfs_flow` / `search_with_intent_guided_dfs_flow`；删除死模块 `query_intent_parser.py`、`semantic_enricher.py`、`normative_entity.py`；修正 `_expand_object_node_optimized` 注释和 `rel_facts` 映射。更新架构文档明确实际边类型（见"实际图谱结构"）。
 - **2026-04-25**: 新增图谱检索测试页面 (`/graph-search/:projectId`)：支持节点类型多选 + 名称模糊搜索，动态加载 1 跳邻域，节点详情面板展示全部属性，关联节点可展开到图谱并高亮；Topic 节点作为独立召回源（策略 A：复用 clause embedding），后端新增 Topic vector index、Topic hybrid 检索、graph_tools 支持 Topic root type；PublicChatView.vue 修复 canvas 渲染时序（ evidence 完全渲染后再显示 report）；后端新增 `/ops/search-nodes`（支持 node_types 数组）和 `/ops/node-neighborhood` API。
 - **2026-04-24**: 清理前后端死代码：移除未使用的后端路由（delete_graph、supplement_knowledge、check_graph_references、reset_project、cleanup_tasks、list_tasks）及 entity_routes.py 整个模块；删除 neo4j_storage.py 中的 update_node_labels 孤儿方法；前端移除 searchGraph/aiQa/chatWithAgent/mineruParse/resetIntelligentChunks 等死代码函数，Process.vue Hit-Test 改用 searchObjectFirst 对齐后端 `/tools/search-object-first`。
@@ -89,6 +91,7 @@ graph TD
 - Ollama / vLLM (用于本地运行 LLM)
 - MinerU (PDF 解析，可选)
 - BGE-reranker-v2-m3 (重排模型)
+- PyYAML >= 6.0 (Flasgger 解析 Swagger docstring 必需)
 
 ### 快速启动
 1. **安装依赖**: `npm run setup:all` (会自动执行 root, backend 和 frontend 的安装)
@@ -177,6 +180,55 @@ graph TD
 - **智能分块**: 支持 LLM 驱动分块 (`llm_driven_chunker.py`) 和层级分块 (`hierarchical_chunker.py`)。
 - **JSONL 支持**: 条款解析支持直接读取 JSONL 格式。
 - **核心模型应用**: 实际构建的图谱**只有** `MENTIONS` 和 `HAS_TOPIC` 两种边（见”实际图谱结构”）。检索路径固定为 `Entity/Term ←MENTIONS-- Topic ←HAS_TOPIC-- Clause`。
+
+## App 配置与 Project-Graph 映射
+
+### `selectedProjectIds` 作为 Source of Truth
+
+App 配置中持久化的是 `project_id`（`selectedProjectIds`），而非固定的 `graph_id`。因为图谱重建后 `graph_id` 会变化，App 必须在运行时动态查询 Project 获取最新的 `graph_id`。
+
+| 方向 | 逻辑 | 说明 |
+|:---|:---|:---|
+| **前端保存** | `selectedGraphIds` → 反向查 `project_id` → 存入 `selectedProjectIds` | `saveWorkflowApp` |
+| **前端加载** | `selectedProjectIds` → 查 `project.graph_id` → 恢复勾选 | `loadAppConfig` |
+| **前端勾选** | 基于 `selectedProjectIds`（绑定 project） | project-grid |
+| **后端检索** | `selectedProjectIds` → `ProjectManager.get_project(pid).graph_id` | `public-query`、`query-topic` |
+| **后端删除检查** | `selectedProjectIds` → 解析 graph_id → 匹配 | `delete_project`、`list_projects` |
+
+### source_link PDF 预览数据链路
+
+```
+MinerU API → chunks.json (含 page_idx、bbox_viewport)
+           → LLM 智能分块回填 pdf_bboxes
+           → intelligent_chunks.json (clause.metadata.bboxs)
+           → 图谱构建 (Clause 节点存入 source_link、pdf_bboxes)
+           → 检索透传 (source_link 含 page、bbox)
+           → 前端 PdfPreviewView.vue
+             → PDF.js 渲染 canvas
+             → canvas 绘制红色虚线高亮框
+```
+
+### `create_app` 默认工作流配置
+
+```json
+{
+  “selectedGraphIds”: [],
+  “selectedProjectIds”: [],
+  “temperature”: 0.7,
+  “similarityThreshold”: 50,
+  “topK”: 10,
+  “rerankMinScore”: 50,
+  “maxDepth”: 3,
+  “rootTypes”: [“Entity”, “Term”],
+  “intentMatch”: {
+    “topicLimit”: 50,
+    “entityLimit”: 50,
+    “rerankMinScore”: 0
+  }
+}
+```
+
+支持请求体传入 `workflow_data` 进行深度合并（顶层字段覆盖，嵌套字典如 `intentMatch` 内部字段增量更新）。
 
 ## MinerU PDF 解析流程
 

@@ -395,13 +395,13 @@ class KbPipelineRunner:
                     raise ValueError(f"目标应用 {target_app_id} 不存在")
 
                 workflow_data = app.workflow_data or {}
-                selected_graph_ids = workflow_data.get("selectedGraphIds", [])
-                if not isinstance(selected_graph_ids, list):
-                    selected_graph_ids = []
+                selected_project_ids = workflow_data.get("selectedProjectIds", [])
+                if not isinstance(selected_project_ids, list):
+                    selected_project_ids = []
 
-                if graph_id not in selected_graph_ids:
-                    selected_graph_ids.append(graph_id)
-                    workflow_data["selectedGraphIds"] = selected_graph_ids
+                if project_id not in selected_project_ids:
+                    selected_project_ids.append(project_id)
+                    workflow_data["selectedProjectIds"] = selected_project_ids
 
                 update_data = app.to_dict()
                 update_data["workflow_data"] = workflow_data
@@ -411,13 +411,13 @@ class KbPipelineRunner:
             stage.result = {"app_id": updated_app.app_id, "app_name": updated_app.name, "mode": "attach"}
             stage.message = f"已关联到应用 {updated_app.name}"
         else:
-            # 自动创建新 App（原有逻辑）
+            # 自动创建新 App
             app_name = f"Auto_{project.name}"
             app_data = {
                 "name": app_name,
                 "description": f"知识库应用 - {project.name}",
                 "workflow_data": {
-                    "selectedGraphIds": [graph_id],
+                    "selectedProjectIds": [project_id],
                     "temperature": 0.7,
                     "similarityThreshold": 0,
                     "topK": 10,

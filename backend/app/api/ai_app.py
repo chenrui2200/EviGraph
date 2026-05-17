@@ -368,8 +368,8 @@ def create_app():
 def add_project_to_app(app_id: str):
     """
     将项目关联到 AI Application
-    将现有 Project 的 graph_id 添加到指定 App 的 selectedGraphIds 中。
-    自动去重，如果 graph_id 已存在则不会重复添加。
+    将现有 Project 的 project_id 添加到指定 App 的 selectedProjectIds 中。
+    自动去重，如果 project_id 已存在则不会重复添加。
     ---
     tags:
       - AI App / 应用管理
@@ -403,7 +403,7 @@ def add_project_to_app(app_id: str):
             data:
               type: object
       400:
-        description: 缺少 project_id 或项目无 graph_id
+        description: 缺少 project_id
       404:
         description: 应用或项目不存在
       500:
@@ -423,19 +423,15 @@ def add_project_to_app(app_id: str):
         if not project:
             return jsonify({"success": False, "error": "Project not found"}), 404
 
-        graph_id = project.graph_id
-        if not graph_id:
-            return jsonify({"success": False, "error": "Project has no graph_id"}), 400
-
-        # 获取现有 selectedGraphIds，去重追加
+        # 获取现有 selectedProjectIds，去重追加
         workflow_data = app.workflow_data or {}
-        selected_graph_ids = workflow_data.get("selectedGraphIds", [])
-        if not isinstance(selected_graph_ids, list):
-            selected_graph_ids = []
+        selected_project_ids = workflow_data.get("selectedProjectIds", [])
+        if not isinstance(selected_project_ids, list):
+            selected_project_ids = []
 
-        if graph_id not in selected_graph_ids:
-            selected_graph_ids.append(graph_id)
-            workflow_data["selectedGraphIds"] = selected_graph_ids
+        if project_id not in selected_project_ids:
+            selected_project_ids.append(project_id)
+            workflow_data["selectedProjectIds"] = selected_project_ids
 
         # 保存更新后的 App
         update_data = app.to_dict()
@@ -444,7 +440,7 @@ def add_project_to_app(app_id: str):
 
         return jsonify({
             "success": True,
-            "message": f"Project {project_id} (graph {graph_id}) added to App {app_id}",
+            "message": f"Project {project_id} added to App {app_id}",
             "data": updated_app.to_dict()
         })
     except Exception as e:
