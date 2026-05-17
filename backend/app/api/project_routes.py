@@ -199,8 +199,20 @@ def list_projects():
     app_graph_map = {}
 
     for app in apps:
-        selected_graph_ids = app.workflow_data.get('selectedGraphIds', [])
-        for gid in selected_graph_ids:
+        wf = app.workflow_data or {}
+        # 优先从 selectedProjectIds（source of truth）解析 graph_id
+        saved_project_ids = wf.get('selectedProjectIds', [])
+        graph_ids = set()
+        if saved_project_ids:
+            for pid in saved_project_ids:
+                p = ProjectManager.get_project(pid)
+                if p and p.graph_id:
+                    graph_ids.add(p.graph_id)
+        else:
+            # 旧数据兼容
+            graph_ids = set(wf.get('selectedGraphIds', []))
+
+        for gid in graph_ids:
             if gid not in app_graph_map:
                 app_graph_map[gid] = []
             app_graph_map[gid].append({
@@ -267,8 +279,23 @@ def delete_project(project_id: str):
         apps = AiAppManager.list_apps(limit=100)
         referencing_apps = []
         for app in apps:
-            selected_graph_ids = app.workflow_data.get('selectedGraphIds', [])
-            if project.graph_id in selected_graph_ids:
+            wf = app.workflow_data or {}
+            # 优先从 selectedProjectIds（source of truth）解析 graph_id
+            saved_project_ids = wf.get('selectedProjectIds', [])
+            is_referenced = False
+            if saved_project_ids:
+                for pid in saved_project_ids:
+                    p = ProjectManager.get_project(pid)
+                    if p and p.graph_id == project.graph_id:
+                        is_referenced = True
+                        break
+            else:
+                # 旧数据兼容：直接查 selectedGraphIds
+                selected_graph_ids = wf.get('selectedGraphIds', [])
+                if project.graph_id in selected_graph_ids:
+                    is_referenced = True
+
+            if is_referenced:
                 referencing_apps.append({
                     "app_id": app.app_id,
                     "name": app.name,
