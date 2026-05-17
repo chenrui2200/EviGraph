@@ -448,3 +448,92 @@ def add_project_to_app(app_id: str):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@ai_app_bp.route('/<app_id>/remove-project', methods=['POST'])
+def remove_project_from_app(app_id: str):
+    """
+    从 AI Application 移除项目关联
+    从指定 App 的 selectedProjectIds 中移除指定的 project_id，
+    同时从 selectedGraphIds 中移除对应的 graph_id 以保持数据一致性。
+    ---
+    tags:
+      - AI App / 应用管理
+    parameters:
+      - name: app_id
+        in: path
+        type: string
+        required: true
+        description: 应用 ID
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          required:
+            - project_id
+          properties:
+            project_id:
+              type: string
+              description: 项目 ID（必填）
+    responses:
+      200:
+        description: 移除成功
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            message:
+              type: string
+            data:
+              type: object
+      400:
+        description: 缺少 project_id
+      404:
+        description: 应用或项目不存在
+      500:
+        description: 服务器错误
+    """
+    try:
+        data = request.get_json() or {}
+        project_id = data.get('project_id')
+        if not project_id:
+            return jsonify({"success": False, "error": "project_id is required"}), 400
+
+        app = AiAppManager.get_app(app_id)
+        if not app:
+            return jsonify({"success": False, "error": "Application not found"}), 404
+
+        project = ProjectManager.get_project(project_id)
+        if not project:
+            return jsonify({"success": False, "error": "Project not found"}), 404
+
+        workflow_data = app.workflow_data or {}
+
+        # 从 selectedProjectIds 中移除
+        selected_project_ids = workflow_data.get("selectedProjectIds", [])
+        if isinstance(selected_project_ids, list) and project_id in selected_project_ids:
+            selected_project_ids.remove(project_id)
+            workflow_data["selectedProjectIds"] = selected_project_ids
+
+        # 同时从 selectedGraphIds 中移除对应的 graph_id，保持数据一致性
+        selected_graph_ids = workflow_data.get("selectedGraphIds", [])
+        project_graph_id = getattr(project, 'graph_id', None)
+        if isinstance(selected_graph_ids, list) and project_graph_id and project_graph_id in selected_graph_ids:
+            selected_graph_ids.remove(project_graph_id)
+            workflow_data["selectedGraphIds"] = selected_graph_ids
+
+        # 保存更新后的 App
+        update_data = app.to_dict()
+        update_data["workflow_data"] = workflow_data
+        updated_app = AiAppManager.save_app(update_data)
+
+        return jsonify({
+            "success": True,
+            "message": f"Project {project_id} removed from App {app_id}",
+            "data": updated_app.to_dict()
+        })
+    except Exception as e:
+        logger.error(f"Failed to remove project from app: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
