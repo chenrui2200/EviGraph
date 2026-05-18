@@ -157,6 +157,9 @@ def start_kb_pipeline():
             target_app_id:
               type: string
               description: 目标 AI 应用 ID（可选）
+            proj_name:
+              type: string
+              description: 自定义项目名称（可选，不传则自动生成 Auto_文件名）
     responses:
       200:
         description: Pipeline 启动成功
@@ -171,7 +174,8 @@ def start_kb_pipeline():
         return jsonify({"success": False, "error": "缺少 minio_object 参数"}), 400
 
     target_app_id = data.get('target_app_id')
-    pipeline = KbPipeline.create_default(minio_object=minio_object, target_app_id=target_app_id)
+    proj_name = data.get('proj_name')
+    pipeline = KbPipeline.create_default(minio_object=minio_object, target_app_id=target_app_id, proj_name=proj_name)
     KbPipelineManager.save(pipeline)
 
     start_pipeline_runner(pipeline)

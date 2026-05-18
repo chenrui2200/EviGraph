@@ -164,8 +164,12 @@ class KbPipelineRunner:
         else:
             file_name = os.path.basename(object_name)
 
-        base_name = os.path.splitext(file_name)[0]
-        project_name = ProjectManager.generate_unique_name(f"Auto_{base_name}")
+        # 优先使用用户指定的 proj_name，否则自动生成
+        if self.pipeline.proj_name:
+            project_name = ProjectManager.generate_unique_name(self.pipeline.proj_name)
+        else:
+            base_name = os.path.splitext(file_name)[0]
+            project_name = ProjectManager.generate_unique_name(f"Auto_{base_name}")
 
         project = ProjectManager.create_project(name=project_name)
         ProjectManager.init_project_dirs(project.project_id)

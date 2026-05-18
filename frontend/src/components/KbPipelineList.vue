@@ -14,52 +14,54 @@
     </div>
 
     <!-- Pipeline list -->
-    <div v-else-if="pipelines.length > 0" class="pipelines-grid">
-      <div
-        v-for="pipeline in pipelines"
-        :key="pipeline.pipeline_id"
-        class="pipeline-card"
-        :class="'status-' + pipeline.status"
-        @click="goToTrack(pipeline)"
-      >
-        <div class="card-header">
-          <span class="pipeline-id">{{ formatPipelineId(pipeline.pipeline_id) }}</span>
-          <span class="status-badge" :class="'status-' + pipeline.status">
-            {{ formatStatus(pipeline.status) }}
-          </span>
-        </div>
-
-        <h3 class="pipeline-name">{{ pipeline.minio_object || '未命名文档' }}</h3>
-
-        <div class="pipeline-info">
-          <div class="info-row">
-            <span class="info-label">阶段进度:</span>
-            <span class="info-value">{{ computeProgress(pipeline) }}%</span>
-          </div>
-          <div class="progress-bar">
-            <div class="progress-fill" :style="{ width: computeProgress(pipeline) + '%', background: progressColor(pipeline.status) }"></div>
-          </div>
-          <div class="info-row">
-            <span class="info-label">创建时间:</span>
-            <span class="info-value">{{ formatDate(pipeline.created_at) }}</span>
-          </div>
-          <div class="info-row" v-if="pipeline.project_id">
-            <span class="info-label">项目 ID:</span>
-            <span class="info-value code">{{ formatId(pipeline.project_id) }}</span>
-          </div>
-        </div>
-
-        <div v-if="pipeline.status === 'failed' && pipeline.error" class="error-message">
-          {{ truncateText(pipeline.error, 60) }}
-        </div>
-
-        <div class="card-footer">
-          <button class="track-btn" @click.stop="goToTrack(pipeline)">
-            {{ pipeline.status === 'completed' ? '查看结果' : pipeline.status === 'failed' ? '查看详情' : '追踪进度' }}
-            <span>➝</span>
-          </button>
-        </div>
-      </div>
+    <div v-else-if="pipelines.length > 0" class="pipelines-table-wrapper">
+      <table class="pipelines-table">
+        <thead>
+          <tr>
+            <th class="col-id">Pipeline ID</th>
+            <th class="col-name">文档名称</th>
+            <th class="col-status">状态</th>
+            <th class="col-progress">阶段进度</th>
+            <th class="col-time">创建时间</th>
+            <th class="col-action">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="pipeline in pipelines"
+            :key="pipeline.pipeline_id"
+            class="pipeline-row"
+            :class="'status-' + statusCategory(pipeline.status)"
+            @click="goToTrack(pipeline)"
+          >
+            <td class="col-id">
+              <span class="pipeline-id">{{ formatPipelineId(pipeline.pipeline_id) }}</span>
+            </td>
+            <td class="col-name">
+              <span class="pipeline-name">{{ pipeline.minio_object || '未命名文档' }}</span>
+            </td>
+            <td class="col-status">
+              <span class="status-badge" :class="'status-' + statusCategory(pipeline.status)">
+                {{ formatStatus(pipeline.status) }}
+              </span>
+            </td>
+            <td class="col-progress">
+              <div class="progress-cell">
+                <span class="progress-text">{{ computeProgress(pipeline) }}%</span>
+                <div class="progress-bar">
+                  <div class="progress-fill" :style="{ width: computeProgress(pipeline) + '%', background: progressColor(statusCategory(pipeline.status)) }"></div>
+                </div>
+              </div>
+            </td>
+            <td class="col-time">{{ formatDate(pipeline.created_at) }}</td>
+            <td class="col-action">
+              <button class="track-btn" @click.stop="goToTrack(pipeline)">
+                {{ actionLabel(pipeline.status) }}
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <!-- Empty state -->
@@ -110,33 +112,65 @@ const goToLaunch = () => {
   router.push({ name: 'KbPipelineLaunch' })
 }
 
+const statusCategory = (status) => {
+  if (!status) return 'pending'
+  if (status.endsWith('_processing')) return 'processing'
+  if (status.endsWith('_completed') || status === 'total_completed') return 'completed'
+  if (status.endsWith('_failed')) return 'failed'
+  return 'pending'
+}
+
 const computeProgress = (pipeline) => {
   const stages = pipeline.stages || []
   if (!stages.length) return 0
-  const completed = stages.filter(s => s.status === 'completed').length
+  const completed = stages.filter(s => {
+    const st = s.status || ''
+    return st.endsWith('_completed') || st === 'total_completed'
+  }).length
   return Math.round((completed / stages.length) * 100)
 }
 
-const progressColor = (status) => {
+const progressColor = (category) => {
   const map = {
     pending: '#999',
     processing: '#FF4500',
     completed: '#00C853',
-    failed: '#FF1744',
-    skipped: '#9CA3AF'
+    failed: '#FF1744'
   }
-  return map[status] || '#999'
+  return map[category] || '#999'
 }
 
 const formatStatus = (status) => {
   const map = {
     pending: '等待中',
-    processing: '执行中',
-    completed: '已完成',
-    failed: '失败',
-    skipped: '已跳过'
+    total_completed: '全部完成',
+    project_creation_processing: '创建项目中',
+    project_creation_completed: '创建项目完成',
+    project_creation_failed: '创建项目失败',
+    mineru_annotation_processing: 'PDF解析中',
+    mineru_annotation_completed: 'PDF解析完成',
+    mineru_annotation_failed: 'PDF解析失败',
+    chapter_analysis_processing: '章节分析中',
+    chapter_analysis_completed: '章节分析完成',
+    chapter_analysis_failed: '章节分析失败',
+    intelligent_analysis_processing: '智能分析中',
+    intelligent_analysis_completed: '智能分析完成',
+    intelligent_analysis_failed: '智能分析失败',
+    graph_building_processing: '图谱构建中',
+    graph_building_completed: '图谱构建完成',
+    graph_building_failed: '图谱构建失败',
+    app_creation_processing: '创建应用中',
+    app_creation_completed: '创建应用完成',
+    app_creation_failed: '创建应用失败'
   }
   return map[status] || status
+}
+
+const actionLabel = (status) => {
+  const cat = statusCategory(status)
+  if (cat === 'completed') return '查看结果'
+  if (cat === 'failed') return '查看详情'
+  return '追踪进度'
 }
 
 const formatPipelineId = (id) => {
@@ -250,52 +284,72 @@ onMounted(() => {
   background: #333;
 }
 
-.pipelines-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 20px;
-}
-
-.pipeline-card {
+.pipelines-table-wrapper {
   background: #FFFFFF;
   border: 1px solid #E5E7EB;
   border-radius: 12px;
-  padding: 20px;
+  overflow: hidden;
+  overflow-x: auto;
+}
+
+.pipelines-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.pipelines-table thead {
+  background: #F9FAFB;
+  border-bottom: 1px solid #E5E7EB;
+}
+
+.pipelines-table th {
+  padding: 12px 16px;
+  text-align: left;
+  font-weight: 600;
+  color: #374151;
+  font-size: 12px;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+.pipelines-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid #F3F4F6;
+  vertical-align: middle;
+}
+
+.pipeline-row {
   cursor: pointer;
-  transition: all 0.2s ease;
-  display: flex;
-  flex-direction: column;
-  position: relative;
+  transition: background 0.15s ease;
 }
 
-.pipeline-card:hover {
-  border-color: #FF4500;
-  box-shadow: 0 10px 20px rgba(0,0,0,0.05);
-  transform: translateY(-4px);
+.pipeline-row:hover {
+  background: #FEF7F4;
 }
 
-.pipeline-card.status-completed {
+.pipeline-row.status-completed {
   border-left: 3px solid #00C853;
 }
 
-.pipeline-card.status-processing {
+.pipeline-row.status-processing {
   border-left: 3px solid #FF4500;
 }
 
-.pipeline-card.status-failed {
+.pipeline-row.status-failed {
   border-left: 3px solid #FF1744;
 }
 
-.pipeline-card.status-pending {
+.pipeline-row.status-pending {
   border-left: 3px solid #9CA3AF;
 }
 
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
+.col-id { width: 120px; }
+.col-name { min-width: 200px; }
+.col-status { width: 120px; }
+.col-progress { width: 160px; }
+.col-time { width: 150px; white-space: nowrap; }
+.col-action { width: 100px; text-align: center; }
 
 .pipeline-id {
   font-family: 'JetBrains Mono', monospace;
@@ -305,6 +359,12 @@ onMounted(() => {
   font-weight: 500;
 }
 
+.pipeline-name {
+  font-weight: 600;
+  color: #111827;
+  word-break: break-all;
+}
+
 .status-badge {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.65rem;
@@ -312,6 +372,7 @@ onMounted(() => {
   border-radius: 3px;
   font-weight: 600;
   letter-spacing: 0.3px;
+  white-space: nowrap;
 }
 
 .status-badge.status-completed {
@@ -329,50 +390,27 @@ onMounted(() => {
   color: #FF1744;
 }
 
-.status-badge.status-pending,
-.status-badge.status-skipped {
+.status-badge.status-pending {
   background: #F3F4F6;
   color: #9CA3AF;
 }
 
-.pipeline-name {
-  font-size: 1rem;
-  font-weight: 700;
-  margin: 0 0 15px 0;
-  color: #000;
-  word-break: break-all;
+.progress-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
-.pipeline-info {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
-.info-row {
-  display: flex;
-  justify-content: space-between;
+.progress-text {
   font-size: 12px;
-}
-
-.info-label {
-  color: #666;
-}
-
-.info-value {
   font-weight: 600;
-  color: #333;
-}
-
-.info-value.code {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.7rem;
+  color: #374151;
+  min-width: 32px;
+  text-align: right;
 }
 
 .progress-bar {
-  width: 100%;
+  flex: 1;
   height: 6px;
   background: #F3F4F6;
   border-radius: 3px;
@@ -384,36 +422,17 @@ onMounted(() => {
   transition: width 0.4s ease;
 }
 
-.error-message {
-  margin-bottom: 12px;
-  padding: 8px;
-  background: rgba(255, 23, 68, 0.05);
-  border: 1px solid rgba(255, 23, 68, 0.2);
-  border-radius: 4px;
-  font-size: 0.75rem;
-  color: #FF1744;
-  line-height: 1.4;
-}
-
-.card-footer {
-  display: flex;
-  gap: 10px;
-}
-
 .track-btn {
-  flex: 1;
   background: #000;
   color: #fff;
   border: none;
-  padding: 10px;
+  padding: 6px 12px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.2s;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  white-space: nowrap;
 }
 
 .track-btn:hover {
