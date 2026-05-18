@@ -155,14 +155,23 @@ class KbPipelineRunner:
     def _run_project_creation(self):
         stage = self._get_stage("project_creation")
         object_name = self.pipeline.minio_object
-        base_name = os.path.splitext(os.path.basename(object_name))[0]
+
+        # 支持对象键或完整 URL，URL 需要提取文件名
+        from urllib.parse import urlparse, unquote
+        if object_name.startswith('http://') or object_name.startswith('https://'):
+            parsed = urlparse(object_name)
+            file_name = os.path.basename(unquote(parsed.path)) or "download.pdf"
+        else:
+            file_name = os.path.basename(object_name)
+
+        base_name = os.path.splitext(file_name)[0]
         project_name = ProjectManager.generate_unique_name(f"Auto_{base_name}")
 
         project = ProjectManager.create_project(name=project_name)
         ProjectManager.init_project_dirs(project.project_id)
 
         files_dir = ProjectManager._get_project_files_dir(project.project_id)
-        local_path = os.path.join(files_dir, os.path.basename(object_name))
+        local_path = os.path.join(files_dir, file_name)
         download_object(object_name, local_path)
 
         file_size = os.path.getsize(local_path)

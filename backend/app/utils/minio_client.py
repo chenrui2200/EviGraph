@@ -55,7 +55,15 @@ def list_pdf_objects(prefix: str = "", recursive: bool = True) -> list:
 
 
 def download_object(object_name: str, file_path: str) -> None:
-    """下载 MinIO 对象到本地路径"""
-    client = get_minio_client()
-    client.fget_object(Config.MINIO_BUCKET_NAME, object_name, file_path)
-    logger.info(f"MinIO download: {object_name} -> {file_path}")
+    """下载 MinIO 对象到本地路径，支持对象键或完整 HTTP URL"""
+    if object_name.startswith('http://') or object_name.startswith('https://'):
+        import requests
+        response = requests.get(object_name, timeout=300)
+        response.raise_for_status()
+        with open(file_path, 'wb') as f:
+            f.write(response.content)
+        logger.info(f"URL download: {object_name} -> {file_path}")
+    else:
+        client = get_minio_client()
+        client.fget_object(Config.MINIO_BUCKET_NAME, object_name, file_path)
+        logger.info(f"MinIO download: {object_name} -> {file_path}")

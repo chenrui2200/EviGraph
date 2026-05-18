@@ -258,7 +258,6 @@ def create_app():
     创建空的 AI Application
     创建一个新的空 AI 应用，自动填充默认工作流配置。
     包括 selectedGraphIds、temperature、topK、rerankMinScore、intentMatch 等参数。
-    支持传入 workflow_data 自定义值进行深度合并。
     ---
     tags:
       - AI App 应用管理

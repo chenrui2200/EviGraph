@@ -138,7 +138,7 @@ def get_minio_files():
 def start_kb_pipeline():
     """
     启动 KB Pipeline
-    基于 MinIO 中的 PDF 文件启动自动化知识库构建流水线。
+    基于 MinIO 中的 PDF 文件或任意下载 URL 启动自动化知识库构建流水线。
     ---
     tags:
       - KB Pipeline / 知识库流水线
@@ -153,7 +153,7 @@ def start_kb_pipeline():
           properties:
             minio_object:
               type: string
-              description: MinIO 文件路径
+              description: MinIO 对象键（如 folder/file.pdf）或完整下载 URL（如 http://host/public/1.docx）
             target_app_id:
               type: string
               description: 目标 AI 应用 ID（可选）

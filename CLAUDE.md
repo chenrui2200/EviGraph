@@ -1,7 +1,8 @@
 # Knowledge EviGraph 架构文档
 
 ## 变更记录 (Changelog)
-- **2026-05-17**: `selectedProjectIds` 成为 App 配置 source of truth：前端 `AiQaView.vue` project-grid 勾选绑定改为 `selectedProjectIds`，`selectedGraphIds` 仅作为运行时动态快照；后端 `public-query`、`query-topic`、`delete_project`、`list_projects` 统一从 `selectedProjectIds` 动态解析最新 `graph_id`。解决 graph_id 重建后 App 引用失效问题。`create_app` 接口支持传入 `workflow_data` 深度合并，默认填充 `intentMatch` 配置。`get_project` 接口新增 `graph_node_stats`（各标签节点数量）、`graph_rel_stats`（各关系类型数量）、`intelligent_chunk_count` / `intelligent_section_count`。`.env` 适配本地 embedding/reranker API。
+- **2026-05-18**: KB Pipeline 状态管理重构：`PipelineStageStatus` 从通用 4 状态拆分为每个阶段的 `processing/completed/failed` 细分状态（如 `graph_building_processing`），外层 `pipeline.status` 精确跟踪当前执行阶段。`started_at` 重命名为 `processing_at`，新增 `total_completed` 记录全部阶段完成时间。并发限制时状态改为 `PENDING` 而非 `FAILED`。AI App 新增 `POST /<app_id>/remove-project` 接口，移除项目时同步清理 `selectedProjectIds` 和 `selectedGraphIds`。`create_app` 默认 `intentMatch.rerankMinScore` 从 `0` 改为 `40`，不再支持 `workflow_data` 深度合并和自定义 `nodes`（强制为空数组）。Swagger tags 统一为 `AI App 应用管理`，数组字段补充 `items: type: object` 和 `example`。
+- **2026-05-17**: `selectedProjectIds` 成为 App 配置 source of truth：前端 `AiQaView.vue` project-grid 勾选绑定改为 `selectedProjectIds`，`selectedGraphIds` 仅作为运行时动态快照；后端 `public-query`、`query-topic`、`delete_project`、`list_projects` 统一从 `selectedProjectIds` 动态解析最新 `graph_id`。解决 graph_id 重建后 App 引用失效问题。`get_project` 接口新增 `graph_node_stats`（各标签节点数量）、`graph_rel_stats`（各关系类型数量）、`intelligent_chunk_count` / `intelligent_section_count`。`.env` 适配本地 embedding/reranker API。
 - **2026-05-17**: 修复全部 38 个后端接口的 Swagger docstring 格式：Flasgger 0.9.7.1 不支持 `---\npost:` 包装格式，改为 summary/description 前置、`tags`/`parameters`/`responses` 顶层键的兼容格式。`requirements.txt` 补充 `PyYAML>=6.0`。
 - **2026-04-25**: 清理不存在的关系类型引用：删除 `neo4j_storage.py` 中 `MANDATES/PROHIBITS/RECOMMENDS/HAS_CONDITION/OPERATES_ON/APPLIES_TO/IN_SITUATION` 等孤儿方法（`_create_mandates_relation` 等 10 个）及 `get_graph_data` 查询列表；删除 `graph_tools.py` 死代码 `search_with_dfs_flow` / `search_with_intent_guided_dfs_flow`；删除死模块 `query_intent_parser.py`、`semantic_enricher.py`、`normative_entity.py`；修正 `_expand_object_node_optimized` 注释和 `rel_facts` 映射。更新架构文档明确实际边类型（见"实际图谱结构"）。
 - **2026-04-25**: 新增图谱检索测试页面 (`/graph-search/:projectId`)：支持节点类型多选 + 名称模糊搜索，动态加载 1 跳邻域，节点详情面板展示全部属性，关联节点可展开到图谱并高亮；Topic 节点作为独立召回源（策略 A：复用 clause embedding），后端新增 Topic vector index、Topic hybrid 检索、graph_tools 支持 Topic root type；PublicChatView.vue 修复 canvas 渲染时序（ evidence 完全渲染后再显示 report）；后端新增 `/ops/search-nodes`（支持 node_types 数组）和 `/ops/node-neighborhood` API。
@@ -223,12 +224,10 @@ MinerU API → chunks.json (含 page_idx、bbox_viewport)
   “intentMatch”: {
     “topicLimit”: 50,
     “entityLimit”: 50,
-    “rerankMinScore”: 0
+    “rerankMinScore”: 40
   }
 }
 ```
-
-支持请求体传入 `workflow_data` 进行深度合并（顶层字段覆盖，嵌套字典如 `intentMatch` 内部字段增量更新）。
 
 ## MinerU PDF 解析流程
 

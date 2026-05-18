@@ -307,7 +307,7 @@ export function getKbPipelineMinioFiles(prefix = '') {
 
 /**
  * 启动 KB Pipeline
- * @param {String} minio_object - MinIO 对象名称
+ * @param {String} minio_object - MinIO 对象键（如 folder/file.pdf）或完整下载 URL（如 http://host/public/1.docx）
  * @param {String|null} target_app_id - 关联的已有 App ID（为 null 则自动创建新 App）
  * @returns {Promise}
  */
