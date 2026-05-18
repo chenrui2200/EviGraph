@@ -83,6 +83,9 @@ class Config:
     # Frontend URL (for generating correct client-side links like /chat/{app_id})
     FRONTEND_URL = os.environ.get('FRONTEND_URL')
 
+    # KB Pipeline callback URL (optional)
+    KB_PIPELINE_CALLBACK_URL = os.environ.get('KB_PIPELINE_CALLBACK_URL')
+
     # MinIO configuration
     MINIO_ENDPOINT = os.environ.get('MINIO_ENDPOINT', 'http://localhost:9000')
     MINIO_ACCESS_KEY = os.environ.get('MINIO_ACCESS_KEY', 'minioadmin')

@@ -201,6 +201,14 @@ class KbPipelineManager:
             return None
 
     @classmethod
+    def delete(cls, pipeline_id: str) -> bool:
+        path = cls._get_path(pipeline_id)
+        if os.path.exists(path):
+            os.remove(path)
+            return True
+        return False
+
+    @classmethod
     def list_all(cls, limit: int = 100) -> List[KbPipeline]:
         cls._ensure_dir()
         pipelines = []

@@ -143,9 +143,27 @@
             <div :style="s.consoleSection">
               <div class="console-header" :style="s.consoleHeader">
                 <span>>_ 03 / KB Pipeline</span>
+                <span v-if="activePipeline" :style="s.pipelineLiveBadge">● 执行中</span>
+              </div>
+
+              <div v-if="activePipeline" :style="s.pipelineLiveCard">
+                <div :style="s.pipelineLiveHeader">
+                  <span :style="{ ...s.pipelineLiveDot, background: pipelineStatusColor(activePipeline.status) }">●</span>
+                  <span :style="s.pipelineLiveStatus">{{ pipelineStatusText(activePipeline.status) }}</span>
+                </div>
+                <div :style="s.pipelineLiveName">{{ activePipeline.minio_object || '未命名文档' }}</div>
+                <div :style="s.pipelineLiveId">{{ activePipeline.pipeline_id }}</div>
+                <button
+                  :style="s.pipelineLiveBtn"
+                  @click="goToPipelineTrack(activePipeline.pipeline_id)"
+                >
+                  <span>追踪进度</span>
+                  <span>➝</span>
+                </button>
               </div>
 
               <button
+                v-else
                 :style="s.aiAppBtn"
                 @click="goToKbPipeline"
               >
@@ -184,7 +202,7 @@ import { useRouter } from 'vue-router'
 import ProjectList from '../components/ProjectList.vue'
 import AiAppList from '../components/AiAppList.vue'
 import KbPipelineList from '../components/KbPipelineList.vue'
-import { getHealth } from '../api/graph'
+import { getHealth, getKbPipelineList } from '../api/graph'
 
 const mono = 'JetBrains Mono, monospace'
 const sans = 'Space Grotesk, Noto Sans SC, system-ui, sans-serif'
@@ -267,6 +285,14 @@ const s = reactive({
   btnSection: { padding: '0 20px 20px' },
   startEngineBtn: { width: '100%', background: '#000', color: '#fff', border: 'none', padding: '20px', fontFamily: mono, fontWeight: '700', fontSize: '1.1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', letterSpacing: '1px' },
   aiAppBtn: { width: '100%', background: '#fff', color: '#000', border: '1px solid #000', padding: '16px 20px', fontFamily: mono, fontWeight: '700', fontSize: '0.9rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', letterSpacing: '0.5px', marginTop: '15px' },
+  pipelineLiveBadge: { fontFamily: mono, fontSize: '0.7rem', color: '#FF4500', fontWeight: '600', animation: 'pulse 1.5s infinite' },
+  pipelineLiveCard: { border: '1px solid #FF4500', background: '#FFF8F5', padding: '16px 20px', marginTop: '15px' },
+  pipelineLiveHeader: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' },
+  pipelineLiveDot: { fontSize: '0.7rem', color: '#fff', width: '8px', height: '8px', borderRadius: '50%', display: 'inline-block' },
+  pipelineLiveStatus: { fontFamily: mono, fontSize: '0.8rem', fontWeight: '600', color: '#FF4500' },
+  pipelineLiveName: { fontSize: '0.85rem', fontWeight: '600', color: '#000', marginBottom: '4px', wordBreak: 'break-all' },
+  pipelineLiveId: { fontFamily: mono, fontSize: '0.65rem', color: '#999', marginBottom: '12px' },
+  pipelineLiveBtn: { width: '100%', background: '#FF4500', color: '#fff', border: 'none', padding: '12px 16px', fontFamily: mono, fontWeight: '700', fontSize: '0.85rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', letterSpacing: '0.5px' },
 })
 
 const steps = [
@@ -279,12 +305,72 @@ const steps = [
 
 const router = useRouter()
 
+const activePipeline = ref(null)
+
+const isPipelineRunning = (status) => {
+  if (!status) return false
+  return status.endsWith('_processing') || status === 'pending'
+}
+
+const pipelineStatusText = (status) => {
+  if (!status) return '未知'
+  const map = {
+    pending: '等待中',
+    total_completed: '全部完成',
+    project_creation_processing: '创建项目中',
+    project_creation_completed: '创建项目完成',
+    project_creation_failed: '创建项目失败',
+    mineru_annotation_processing: 'PDF解析中',
+    mineru_annotation_completed: 'PDF解析完成',
+    mineru_annotation_failed: 'PDF解析失败',
+    chapter_analysis_processing: '章节分析中',
+    chapter_analysis_completed: '章节分析完成',
+    chapter_analysis_failed: '章节分析失败',
+    intelligent_analysis_processing: '智能分析中',
+    intelligent_analysis_completed: '智能分析完成',
+    intelligent_analysis_failed: '智能分析失败',
+    graph_building_processing: '图谱构建中',
+    graph_building_completed: '图谱构建完成',
+    graph_building_failed: '图谱构建失败',
+    app_creation_processing: '创建应用中',
+    app_creation_completed: '创建应用完成',
+    app_creation_failed: '创建应用失败'
+  }
+  return map[status] || status
+}
+
+const pipelineStatusColor = (status) => {
+  if (!status) return '#999'
+  if (status.endsWith('_processing')) return '#FF4500'
+  if (status.endsWith('_completed') || status === 'total_completed') return '#00C853'
+  if (status.endsWith('_failed')) return '#FF1744'
+  return '#999'
+}
+
+const checkActivePipeline = async () => {
+  try {
+    const res = await getKbPipelineList(20)
+    if (res.success && res.data) {
+      const running = res.data.find(p => isPipelineRunning(p.status))
+      if (running) {
+        activePipeline.value = running
+      }
+    }
+  } catch (e) {
+    console.error('检查活跃 Pipeline 失败:', e)
+  }
+}
+
 const goToAiApp = () => {
   router.push({ name: 'AiQa', params: { id: 'new' } })
 }
 
 const goToKbPipeline = () => {
   router.push({ name: 'KbPipelineLaunch' })
+}
+
+const goToPipelineTrack = (pipelineId) => {
+  router.push({ name: 'KbPipelineTrack', params: { pipelineId } })
 }
 
 const formData = ref({ simulationRequirement: '' })
@@ -337,6 +423,7 @@ const checkSystemStatus = async () => {
 
 onMounted(() => {
   checkSystemStatus()
+  checkActivePipeline()
 })
 
 const scrollToBottom = () => { window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }) }

@@ -355,6 +355,18 @@ export function getKbPipelineEventsURL(pipelineId) {
   return `${baseURL}/api/graph/kb-pipeline/${pipelineId}/events`
 }
 
+/**
+ * 删除 KB Pipeline
+ * @param {String} pipelineId
+ * @returns {Promise}
+ */
+export function deleteKbPipeline(pipelineId) {
+  return service({
+    url: `/api/graph/kb-pipeline/${pipelineId}`,
+    method: 'delete'
+  })
+}
+
 // ============================================================================
 // MinerU PDF 解析 API
 // ============================================================================

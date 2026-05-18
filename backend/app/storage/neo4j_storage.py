@@ -1747,7 +1747,15 @@ class Neo4jStorage(GraphStorage):
                     )
 
                     # 移除 Episode 标签，统一为 Clause
-                    tx.run("MATCH (e:Episode) WHERE e.graph_id = $gid REMOVE e:Episode SET e:Clause", gid=graph_id)
+                    # 先清理可能冲突的重复 Clause 节点（同一 graph 重复构建时的残留数据）
+                    tx.run("""
+                        MATCH (e:Episode) WHERE e.graph_id = $gid
+                        WITH e
+                        OPTIONAL MATCH (dup:Clause {uuid: e.uuid}) WHERE dup <> e
+                        DETACH DELETE dup
+                        WITH e
+                        REMOVE e:Episode SET e:Clause
+                    """, gid=graph_id)
 
                     # ===== Phase 2: Clause 节点 (clause type) =====
                     if batch_clause_items:

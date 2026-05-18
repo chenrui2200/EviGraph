@@ -55,9 +55,14 @@
             </td>
             <td class="col-time">{{ formatDate(pipeline.created_at) }}</td>
             <td class="col-action">
-              <button class="track-btn" @click.stop="goToTrack(pipeline)">
-                {{ actionLabel(pipeline.status) }}
-              </button>
+              <div class="action-btns">
+                <button class="track-btn" @click.stop="goToTrack(pipeline)">
+                  {{ actionLabel(pipeline.status) }}
+                </button>
+                <button class="delete-btn" @click.stop="handleDelete(pipeline)">
+                  删除
+                </button>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -80,7 +85,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { getKbPipelineList } from '../api/graph'
+import { getKbPipelineList, deleteKbPipeline } from '../api/graph'
 
 const router = useRouter()
 const pipelines = ref([])
@@ -110,6 +115,24 @@ const goToTrack = (pipeline) => {
 
 const goToLaunch = () => {
   router.push({ name: 'KbPipelineLaunch' })
+}
+
+const handleDelete = async (pipeline) => {
+  const confirmed = window.confirm(
+    `确定要删除 Pipeline ${formatPipelineId(pipeline.pipeline_id)} 吗？\n\n仅删除 Pipeline 自身记录，不会删除关联的项目和应用。`
+  )
+  if (!confirmed) return
+  try {
+    const res = await deleteKbPipeline(pipeline.pipeline_id)
+    if (res.success) {
+      pipelines.value = pipelines.value.filter(p => p.pipeline_id !== pipeline.pipeline_id)
+    } else {
+      alert('删除失败: ' + (res.error || '未知错误'))
+    }
+  } catch (e) {
+    console.error('删除 Pipeline 失败:', e)
+    alert('删除失败: ' + (e.message || '未知错误'))
+  }
 }
 
 const statusCategory = (status) => {
@@ -351,6 +374,13 @@ onMounted(() => {
 .col-time { width: 150px; white-space: nowrap; }
 .col-action { width: 100px; text-align: center; }
 
+.action-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+}
+
 .pipeline-id {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.7rem;
@@ -437,6 +467,24 @@ onMounted(() => {
 
 .track-btn:hover {
   background: #333;
+}
+
+.delete-btn {
+  background: transparent;
+  color: #FF1744;
+  border: 1px solid #FF1744;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.delete-btn:hover {
+  background: #FF1744;
+  color: #fff;
 }
 
 @keyframes spin {

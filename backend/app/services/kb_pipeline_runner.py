@@ -122,25 +122,18 @@ class KbPipelineRunner:
             _pipeline_semaphore.release()
 
     def _invoke_stage_callback(self, stage, event_type: str, message: Optional[str] = None):
-        """触发阶段回调"""
+        """触发阶段回调（异步线程池发送，不阻塞 Pipeline 主线程）"""
         try:
-            payload = {
+            pipeline_dict = self.pipeline.to_dict()
+            # 注入当前阶段事件信息，方便接收方识别
+            pipeline_dict["_callback_event"] = {
+                "stage_name": stage.name,
                 "stage_label": stage.label,
                 "event_type": event_type,
                 "stage_index": self.pipeline.current_stage_index,
-                "project_id": self.pipeline.project_id,
-                "graph_id": self.pipeline.graph_id,
-                "app_id": self.pipeline.app_id,
-                "target_app_id": self.pipeline.target_app_id,
-                "result": stage.result,
+                "message": message or stage.message or f"{stage.label} {event_type}",
             }
-            kb_pipeline_callback.invoke_callback(
-                pipeline_id=self.pipeline.pipeline_id,
-                stage_name=stage.name,
-                stage_status=stage.status.value,
-                message=message or stage.message or f"{stage.label} {event_type}",
-                payload=payload
-            )
+            kb_pipeline_callback.invoke_callback(pipeline_dict)
         except Exception as e:
             logger.warning(f"Pipeline {self.pipeline.pipeline_id} 阶段回调异常: {e}")
 

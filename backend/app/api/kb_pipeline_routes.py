@@ -245,6 +245,39 @@ def get_kb_pipeline(pipeline_id: str):
     return success_response(data=pipeline.to_dict())
 
 
+
+@graph_bp.route('/kb-pipeline/<pipeline_id>', methods=['DELETE'])
+@api_handler
+def delete_kb_pipeline(pipeline_id: str):
+    """
+    删除 KB Pipeline
+    仅删除 Pipeline 自身记录，不删除关联的 Project、App 和图谱。
+    ---
+    tags:
+      - KB Pipeline / 知识库流水线
+    parameters:
+      - name: pipeline_id
+        in: path
+        type: string
+        required: true
+        description: Pipeline ID
+    responses:
+      200:
+        description: 删除成功
+      404:
+        description: Pipeline 不存在
+    """
+    pipeline = KbPipelineManager.get(pipeline_id)
+    if not pipeline:
+        return jsonify({"success": False, "error": "Pipeline 不存在"}), 404
+
+    deleted = KbPipelineManager.delete(pipeline_id)
+    if deleted:
+        logger.info(f"Pipeline {pipeline_id} deleted")
+        return success_response(message="Pipeline 已删除")
+    return jsonify({"success": False, "error": "删除失败"}), 500
+
+
 @graph_bp.route('/kb-pipeline/<pipeline_id>/events', methods=['GET'])
 def kb_pipeline_events(pipeline_id: str):
     """

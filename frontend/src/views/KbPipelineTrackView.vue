@@ -23,7 +23,7 @@
           <span class="id-label">Pipeline</span>
           <span class="id-value">{{ pipelineId }}</span>
         </div>
-        <div class="summary-status" :class="'status-' + pipelineStatus">
+        <div class="summary-status" :class="'status-' + getBaseStatus(pipelineStatus.value)">
           <span class="status-dot"></span>
           <span class="status-text">{{ statusText }}</span>
         </div>
@@ -36,7 +36,7 @@
           :key="stage.name"
           class="stage-wrapper"
         >
-          <div class="stage-card" :class="'stage-' + stage.status">
+          <div class="stage-card" :class="'stage-' + getBaseStatus(stage.status)">
             <div class="stage-header">
               <div class="stage-num">{{ idx + 1 }}</div>
               <div class="stage-icon">{{ stageIcon(stage.status) }}</div>
@@ -46,7 +46,7 @@
               <div class="stage-message">{{ getStageDisplayMessage(stage) }}</div>
 
               <a
-                v-if="stage.link && (stage.status === 'completed' || stage.status === 'processing')"
+                v-if="stage.link && (getBaseStatus(stage.status) === 'completed' || getBaseStatus(stage.status) === 'processing')"
                 class="stage-link"
                 @click.prevent="openLink(stage.link)"
                 href="javascript:;"
@@ -54,7 +54,7 @@
                 查看详情 →
               </a>
               <div
-                v-if="stage.name === 'project_creation' && stage.status === 'completed' && stage.result"
+                v-if="stage.name === 'project_creation' && getBaseStatus(stage.status) === 'completed' && stage.result"
                 class="project-info"
               >
                 <div class="info-row">
@@ -68,7 +68,7 @@
               </div>
               <br/>
               <button
-                v-if="stage.name === 'graph_building' && stage.status !== 'processing'"
+                v-if="stage.name === 'graph_building' && getBaseStatus(stage.status) !== 'processing'"
                 class="stage-reset"
                 @click="resetGraphBuilding(stage)"
               >
@@ -76,7 +76,7 @@
               </button>
 
               <!-- App Creation / Attach Actions -->
-              <div v-if="stage.name === 'app_creation' && stage.status === 'completed' && pipeline?.app_id" class="app-actions">
+              <div v-if="stage.name === 'app_creation' && getBaseStatus(stage.status) === 'completed' && pipeline?.app_id" class="app-actions">
                 <!-- attach 模式：只显示打开应用 -->
                 <div v-if="stage.result?.mode === 'attach'" class="attach-info">
                   <div class="attach-badge">
@@ -180,7 +180,7 @@
 
       <!-- Footer Result -->
       <div class="kpt-footer">
-        <div v-if="pipelineStatus === 'completed'" class="result-box result-success">
+        <div v-if="pipelineStatus === 'total_completed'" class="result-box result-success">
           <div class="result-icon">🎉</div>
           <div class="result-title">流水线执行完成</div>
           <div class="result-desc">您的知识库与图谱已成功构建</div>
@@ -211,7 +211,7 @@
           </div>
         </div>
 
-        <div v-else-if="pipelineStatus === 'failed'" class="result-box result-error">
+        <div v-else-if="getBaseStatus(pipelineStatus.value) === 'failed'" class="result-box result-error">
           <div class="result-icon">❌</div>
           <div class="result-title">流水线执行失败</div>
           <div class="error-message">{{ pipeline?.error || '未知错误，请检查后端日志或重试' }}</div>
@@ -253,18 +253,31 @@ const stageLogMap = ref({})
 
 const pipelineStatus = computed(() => pipeline.value?.status || 'pending')
 
+// 从细分状态提取通用状态后缀
+const getBaseStatus = (status) => {
+  if (!status) return 'pending'
+  if (status === 'pending' || status === 'total_completed') return status
+  if (status.endsWith('_processing')) return 'processing'
+  if (status.endsWith('_completed')) return 'completed'
+  if (status.endsWith('_failed')) return 'failed'
+  return 'pending'
+}
+
 const statusText = computed(() => {
+  const base = getBaseStatus(pipelineStatus.value)
   const map = {
     pending: '等待中',
     processing: '执行中',
     completed: '已完成',
     failed: '失败',
-    skipped: '已跳过'
+    skipped: '已跳过',
+    total_completed: '全部完成'
   }
-  return map[pipelineStatus.value] || pipelineStatus.value
+  return map[base] || pipelineStatus.value
 })
 
 const statusMessage = (status) => {
+  const base = getBaseStatus(status)
   const map = {
     pending: '等待开始',
     processing: '正在处理',
@@ -272,17 +285,18 @@ const statusMessage = (status) => {
     failed: '失败',
     skipped: '已跳过'
   }
-  return map[status] || status
+  return map[base] || status
 }
 
 const getStageDisplayMessage = (stage) => {
-  if (stage.name === 'chapter_analysis' && stage.status === 'completed' && stage.result?.reason) {
+  if (stage.name === 'chapter_analysis' && getBaseStatus(stage.status) === 'completed' && stage.result?.reason) {
     return stage.result.reason
   }
   return stage.message || statusMessage(stage.status)
 }
 
 const stageIcon = (status) => {
+  const base = getBaseStatus(status)
   const map = {
     pending: '◯',
     processing: '⏳',
@@ -290,12 +304,12 @@ const stageIcon = (status) => {
     failed: '✕',
     skipped: '−'
   }
-  return map[status] || '◯'
+  return map[base] || '◯'
 }
 
 const connectorActive = (idx) => {
-  const current = stages.value[idx]?.status
-  return current === 'completed' || current === 'processing'
+  const base = getBaseStatus(stages.value[idx]?.status)
+  return base === 'completed' || base === 'processing'
 }
 
 const openLink = (link) => {
@@ -527,7 +541,7 @@ function openTaskSSE(stageName, taskId) {
       entry.source = null
       setTimeout(() => {
         const stage = stages.value.find(s => s.name === stageName)
-        if (stage && stage.status === 'processing' && entry.taskId) {
+        if (stage && getBaseStatus(stage.status) === 'processing' && entry.taskId) {
           openTaskSSE(stageName, entry.taskId)
         }
       }, 5000)
@@ -543,12 +557,13 @@ function syncTaskSSEs() {
     const entry = stageLogMap.value[stage.name]
     entry.taskId = taskId
 
-    if (stage.status === 'processing') {
+    const baseStatus = getBaseStatus(stage.status)
+    if (baseStatus === 'processing') {
       entry.expanded = true
       if (!entry.source) {
         openTaskSSE(stage.name, taskId)
       }
-    } else if (stage.status === 'completed' || stage.status === 'failed') {
+    } else if (baseStatus === 'completed' || baseStatus === 'failed') {
       closeTaskSSE(stage.name)
       entry.expanded = true
       if (entry.logs.length === 0) {
@@ -602,7 +617,7 @@ const startSSE = () => {
     eventSource.close()
     eventSource = null
     const interval = setInterval(() => {
-      if (pipelineStatus.value === 'completed' || pipelineStatus.value === 'failed') {
+      if (pipelineStatus.value === 'total_completed' || getBaseStatus(pipelineStatus.value) === 'failed') {
         clearInterval(interval)
         return
       }
@@ -619,7 +634,7 @@ onMounted(() => {
       if (taskId) {
         ensureStageLog(stage.name)
         fetchTaskLogs(stage.name, taskId).then(() => {
-          if (stage.status === 'processing') {
+          if (getBaseStatus(stage.status) === 'processing') {
             stageLogMap.value[stage.name].expanded = true
             openTaskSSE(stage.name, taskId)
           }
