@@ -35,8 +35,8 @@ class PipelineStage:
     status: PipelineStageStatus = PipelineStageStatus.PENDING
     message: str = ""
     result: Dict[str, Any] = field(default_factory=dict)
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
+    processing_at: Optional[str] = None  # 进入 processing 状态的时间
+    completed_at: Optional[str] = None   # 进入 completed 状态的时间
     link: Optional[str] = None  # 完成后的跳转链接
 
     def to_dict(self) -> Dict[str, Any]:
@@ -46,20 +46,24 @@ class PipelineStage:
             "status": self.status.value,
             "message": self.message,
             "result": self.result,
-            "started_at": self.started_at,
+            "processing_at": self.processing_at,
             "completed_at": self.completed_at,
             "link": self.link,
         }
 
     @classmethod
     def from_dict(cls, data: Dict) -> "PipelineStage":
+        # 兼容旧数据：started_at 迁移到 processing_at
+        processing_at = data.get("processing_at")
+        if processing_at is None:
+            processing_at = data.get("started_at")
         return cls(
             name=data.get("name", ""),
             label=data.get("label", ""),
             status=PipelineStageStatus(data.get("status", "pending")),
             message=data.get("message", ""),
             result=data.get("result", {}),
-            started_at=data.get("started_at"),
+            processing_at=processing_at,
             completed_at=data.get("completed_at"),
             link=data.get("link"),
         )
@@ -78,6 +82,7 @@ class KbPipeline:
     stages: List[PipelineStage] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    total_completed: Optional[str] = None  # 全部阶段完成时间
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -93,6 +98,7 @@ class KbPipeline:
             "stages": [s.to_dict() for s in self.stages],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "total_completed": self.total_completed,
             "error": self.error,
         }
 
@@ -110,6 +116,7 @@ class KbPipeline:
             stages=[PipelineStage.from_dict(s) for s in data.get("stages", [])],
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
+            total_completed=data.get("total_completed"),
             error=data.get("error"),
         )
 

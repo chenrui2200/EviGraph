@@ -785,12 +785,18 @@ def update_clause_entity(project_id: str):
             terms:
               type: array
               description: 术语列表
+              items:
+                type: object
             entities:
               type: array
               description: 实体列表
+              items:
+                type: object
             topics:
               type: array
               description: 主题列表
+              items:
+                type: object
     responses:
       200:
         description: 更新成功

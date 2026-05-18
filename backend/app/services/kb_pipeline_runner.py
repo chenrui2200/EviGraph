@@ -65,7 +65,7 @@ class KbPipelineRunner:
                     continue
 
                 stage.status = PipelineStageStatus.PROCESSING
-                stage.started_at = self._now()
+                stage.processing_at = self._now()
                 KbPipelineManager.save(self.pipeline)
 
                 # 阶段开始前回调
@@ -103,6 +103,7 @@ class KbPipelineRunner:
 
                 KbPipelineManager.save(self.pipeline)
 
+            self.pipeline.total_completed = self._now()
             self._update_pipeline_status(PipelineStageStatus.COMPLETED)
             logger.info(f"Pipeline {self.pipeline.pipeline_id} completed successfully.")
         except Exception as e:

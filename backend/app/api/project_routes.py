@@ -189,6 +189,8 @@ def list_projects():
               properties:
                 projects:
                   type: array
+                  items:
+                    type: object
                 count:
                   type: integer
     """

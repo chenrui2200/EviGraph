@@ -123,6 +123,8 @@ def get_minio_files():
               type: boolean
             data:
               type: array
+              items:
+                type: object
     """
     prefix = request.args.get('prefix', '')
     files = list_pdf_objects(prefix=prefix, recursive=True)
@@ -200,6 +202,8 @@ def list_kb_pipelines():
               type: boolean
             data:
               type: array
+              items:
+                type: object
     """
     limit = request.args.get('limit', 100, type=int)
     pipelines = KbPipelineManager.list_all(limit=limit)

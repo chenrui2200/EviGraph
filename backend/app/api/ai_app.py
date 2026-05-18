@@ -25,7 +25,7 @@ def save_app():
     否则自动生成新的 app_id 并创建。
     ---
     tags:
-      - AI App / 应用管理
+      - AI App 应用管理
     parameters:
       - name: body
         in: body
@@ -48,6 +48,8 @@ def save_app():
             nodes:
               type: array
               description: 节点配置列表
+              items:
+                type: object
     responses:
       200:
         description: 保存成功
@@ -85,7 +87,7 @@ def list_apps():
     列出所有已创建的 AI 应用配置。
     ---
     tags:
-      - AI App / 应用管理
+      - AI App 应用管理
     parameters:
       - name: limit
         in: query
@@ -102,6 +104,8 @@ def list_apps():
               type: boolean
             data:
               type: array
+              items:
+                type: object
             count:
               type: integer
       500:
@@ -126,7 +130,7 @@ def get_app(app_id: str):
     根据 app_id 获取单个 AI 应用的完整配置。
     ---
     tags:
-      - AI App / 应用管理
+      - AI App 应用管理
     parameters:
       - name: app_id
         in: path
@@ -162,7 +166,7 @@ def delete_app(app_id: str):
     根据 app_id 删除指定的 AI 应用。
     ---
     tags:
-      - AI App / 应用管理
+      - AI App 应用管理
     parameters:
       - name: app_id
         in: path
@@ -193,7 +197,7 @@ def publish_app(app_id: str):
     切换 AI 应用的发布状态。
     ---
     tags:
-      - AI App / 应用管理
+      - AI App 应用管理
     parameters:
       - name: app_id
         in: path
@@ -254,7 +258,7 @@ def create_app():
     支持传入 workflow_data 自定义值进行深度合并。
     ---
     tags:
-      - AI App / 应用管理
+      - AI App 应用管理
     parameters:
       - name: body
         in: body
@@ -276,6 +280,8 @@ def create_app():
             nodes:
               type: array
               description: 节点配置列表
+              items:
+                type: object
     responses:
       200:
         description: 创建成功
@@ -301,6 +307,8 @@ def create_app():
                 nodes:
                   type: array
                   description: 节点配置列表
+                  items:
+                    type: object
                 workflow_data:
                   type: object
                   description: 工作流配置（含 selectedGraphIds、temperature、topK、intentMatch 等）
@@ -372,7 +380,7 @@ def add_project_to_app(app_id: str):
     自动去重，如果 project_id 已存在则不会重复添加。
     ---
     tags:
-      - AI App / 应用管理
+      - AI App 应用管理
     parameters:
       - name: app_id
         in: path
@@ -456,7 +464,7 @@ def remove_project_from_app(app_id: str):
     同时从 selectedGraphIds 中移除对应的 graph_id 以保持数据一致性。
     ---
     tags:
-      - AI App / 应用管理
+      - AI App 应用管理
     parameters:
       - name: app_id
         in: path

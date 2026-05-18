@@ -159,6 +159,8 @@ def query_intent_match():
                   type: string
                 topics:
                   type: array
+                  items:
+                    type: object
                 total_topics:
                   type: integer
       400:
@@ -552,6 +554,8 @@ def rerank_facts():
             rows:
               type: array
               description: 检索结果行（ObjectFirstRow 序列化）
+              items:
+                type: object
             query:
               type: string
               description: 查询语句
@@ -755,6 +759,8 @@ def llm_answer():
             facts:
               type: array
               description: 过滤后的 fact 列表（含 text, source, page, bbox 等）
+              items:
+                type: object
             query:
               type: string
               description: 用户问题
