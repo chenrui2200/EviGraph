@@ -11,6 +11,7 @@ import time
 import json
 import traceback
 import threading
+import queue
 from typing import Optional, Dict, Any
 
 from ..models.kb_pipeline import KbPipelineManager, KbPipeline, PipelineStageStatus
@@ -34,6 +35,55 @@ def _get_app():
 _MAX_CONCURRENT_PIPELINES = 2
 _pipeline_semaphore = threading.Semaphore(_MAX_CONCURRENT_PIPELINES)
 
+# 全局等待队列：存储因并发限制而挂起的 pipeline_id
+_pending_queue = queue.Queue()
+_pending_set = set()   # 去重集合，防止重复入队
+
+
+def _recover_pending_pipelines():
+    """扫描磁盘上因并发限制挂起的 Pipeline，恢复到等待队列（用于服务重启后恢复）"""
+    try:
+        pipelines = KbPipelineManager.list_all(limit=1000)
+        recovered = 0
+        for p in pipelines:
+            if (p.status == PipelineStageStatus.PENDING
+                    and p.error
+                    and "并发限制" in p.error):
+                if p.pipeline_id not in _pending_set:
+                    _pending_set.add(p.pipeline_id)
+                    _pending_queue.put(p.pipeline_id)
+                    recovered += 1
+        if recovered:
+            logger.info(f"从磁盘恢复 {recovered} 个挂起的 Pipeline 到等待队列")
+    except Exception as e:
+        logger.warning(f"恢复挂起 Pipeline 失败: {e}")
+
+
+def _try_wake_next_pending():
+    """尝试从等待队列中唤醒下一个 Pipeline（当前 Pipeline 完成后调用）"""
+    _recover_pending_pipelines()
+
+    try:
+        next_id = _pending_queue.get_nowait()
+        _pending_set.discard(next_id)
+    except queue.Empty:
+        return
+
+    pipeline = KbPipelineManager.get(next_id)
+    if not pipeline:
+        logger.warning(f"等待队列中的 Pipeline {next_id} 已不存在，跳过")
+        return _try_wake_next_pending()
+
+    if pipeline.status != PipelineStageStatus.PENDING:
+        logger.info(f"Pipeline {next_id} 状态已变为 {pipeline.status.value}，跳过唤醒")
+        return _try_wake_next_pending()
+
+    # 清除排队错误，重新启动
+    pipeline.error = None
+    KbPipelineManager.save(pipeline)
+    logger.info(f"唤醒排队 Pipeline {next_id}，当前等待队列剩余 {_pending_queue.qsize()} 个")
+    start_pipeline_runner(pipeline)
+
 
 class KbPipelineRunner:
     """KB Pipeline 运行器"""
@@ -47,10 +97,14 @@ class KbPipelineRunner:
         # 获取全局并发许可，避免同时运行过多 Pipeline 压垮外部服务
         acquired = _pipeline_semaphore.acquire(timeout=5)
         if not acquired:
-            logger.error(f"Pipeline {self.pipeline.pipeline_id} 无法启动：并发 Pipeline 数量已达上限 ({_MAX_CONCURRENT_PIPELINES})")
+            logger.warning(f"Pipeline {self.pipeline.pipeline_id} 无法启动：并发 Pipeline 数量已达上限 ({_MAX_CONCURRENT_PIPELINES})，加入等待队列")
             self.pipeline.status = PipelineStageStatus.PENDING
             self.pipeline.error = f"系统并发限制：最多同时运行 {_MAX_CONCURRENT_PIPELINES} 个 Pipeline"
             KbPipelineManager.save(self.pipeline)
+            if self.pipeline.pipeline_id not in _pending_set:
+                _pending_set.add(self.pipeline.pipeline_id)
+                _pending_queue.put(self.pipeline.pipeline_id)
+            logger.warning(f"Pipeline {self.pipeline.pipeline_id} 已进入等待队列，当前排队数: {_pending_queue.qsize()}")
             return
 
         try:
@@ -120,6 +174,10 @@ class KbPipelineRunner:
             logger.error(f"Pipeline {self.pipeline.pipeline_id} fatal error: {e}\n{traceback.format_exc()}")
         finally:
             _pipeline_semaphore.release()
+            try:
+                _try_wake_next_pending()
+            except Exception as e:
+                logger.error(f"唤醒下一个 Pipeline 失败: {e}")
 
     def _invoke_stage_callback(self, stage, event_type: str, message: Optional[str] = None):
         """触发阶段回调（异步线程池发送，不阻塞 Pipeline 主线程）"""
