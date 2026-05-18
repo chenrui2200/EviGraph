@@ -13,84 +13,81 @@
       <span class="loading-text">正在加载项目...</span>
     </div>
 
-    <!-- Project list -->
-    <div v-else-if="projects.length > 0" class="projects-grid">
-      <div
-        v-for="project in projects"
-        :key="project.project_id"
-        class="project-card"
-        :class="getStatusClass(project.status)"
-      >
-        <!-- Step Navigator -->
-        <StepNavigator
-          :projectId="project.project_id"
-          :projectStatus="project.status"
-          :currentStep="0"
-        />
-        <!-- Card header -->
-        <div class="card-header">
-          <span class="project-id">{{ formatProjectId(project.project_id) }}</span>
-          <div class="card-actions">
-            <span class="status-badge" :class="getStatusClass(project.status)">
-              {{ formatStatus(project.status) }}
-            </span>
-            <span
-              v-if="project.referencing_apps?.length > 0"
-              class="constraint-hint"
-              title="该知识库被 AI 应用使用"
-            >
-              ⚠️
-            </span>
-            <button
-              class="delete-btn"
-              :class="{ 'constrained': project.referencing_apps?.length > 0 }"
-              @click.stop="confirmDelete($event, project)"
-              :title="project.referencing_apps?.length > 0 ? '该知识库被 AI 应用使用，无法删除' : '删除项目'"
-            >
-              🗑️
-            </button>
-          </div>
-        </div>
-
-        <!-- Project name -->
-        <div class="project-name-container" @click.stop>
-          <div v-if="editingProjectId === project.project_id" class="edit-name-form">
-            <input
-              v-model="editingName"
-              ref="nameInput"
-              class="edit-name-input"
-              @keyup.enter="saveProjectName($event, project)"
-              @keyup.esc="cancelEdit($event)"
-              @blur="cancelEdit($event)"
-            />
-          </div>
-          <h3 v-else class="project-name" @click.stop="toggleEdit($event, project)">
-            {{ project.name || 'Unnamed Project' }}
-            <span class="edit-icon">✏️</span>
-          </h3>
-        </div>
-
-        <!-- Project info -->
-        <div class="project-info">
-          <div class="info-row" v-if="project.ontology">
-            <span class="info-label">实体类型:</span>
-            <span class="info-value">{{ project.ontology.entity_types?.length || 0 }}</span>
-          </div>
-          <div class="info-row" v-if="project.graph_id">
-            <span class="info-label">图谱 ID:</span>
-            <span class="info-value code">{{ project.graph_id.slice(0, 12) }}...</span>
-          </div>
-          <div class="info-row">
-            <span class="info-label">创建日期:</span>
-            <span class="info-value">{{ formatDate(project.created_at) }}</span>
-          </div>
-        </div>
-
-        <!-- Error message if failed -->
-        <div v-if="project.status === 'failed' && project.error" class="error-message">
-          {{ truncateText(project.error, 60) }}
-        </div>
-      </div>
+    <!-- Project table -->
+    <div v-else-if="projects.length > 0" class="table-wrapper">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>项目 ID</th>
+            <th>项目名称</th>
+            <th>状态</th>
+            <th>实体类型</th>
+            <th>图谱 ID</th>
+            <th>创建日期</th>
+            <th style="width: 80px;">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="project in projects"
+            :key="project.project_id"
+            :class="getStatusClass(project.status)"
+          >
+            <td>
+              <span class="id-badge">{{ formatProjectId(project.project_id) }}</span>
+            </td>
+            <td>
+              <div v-if="editingProjectId === project.project_id" class="edit-name-form">
+                <input
+                  v-model="editingName"
+                  ref="nameInput"
+                  class="edit-name-input"
+                  @keyup.enter="saveProjectName($event, project)"
+                  @keyup.esc="cancelEdit($event)"
+                  @blur="cancelEdit($event)"
+                />
+              </div>
+              <div v-else class="name-cell" @click="toggleEdit($event, project)">
+                <StepNavigator
+                  :projectId="project.project_id"
+                  :projectStatus="project.status"
+                  :currentStep="0"
+                />
+                <span class="project-name">{{ project.name || 'Unnamed Project' }}</span>
+                <span class="edit-icon">✏️</span>
+              </div>
+            </td>
+            <td>
+              <span class="status-badge" :class="getStatusClass(project.status)">
+                {{ formatStatus(project.status) }}
+              </span>
+              <span
+                v-if="project.referencing_apps?.length > 0"
+                class="constraint-hint"
+                title="该知识库被 AI 应用使用"
+              >
+                ⚠️
+              </span>
+            </td>
+            <td>{{ project.ontology?.entity_types?.length || 0 }}</td>
+            <td>
+              <code v-if="project.graph_id" class="code-value">{{ project.graph_id.slice(0, 12) }}...</code>
+              <span v-else class="empty-value">-</span>
+            </td>
+            <td>{{ formatDate(project.created_at) }}</td>
+            <td>
+              <button
+                class="delete-btn"
+                :class="{ 'constrained': project.referencing_apps?.length > 0 }"
+                @click.stop="confirmDelete($event, project)"
+                :title="project.referencing_apps?.length > 0 ? '该知识库被 AI 应用使用，无法删除' : '删除项目'"
+              >
+                🗑️
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <!-- Empty state -->
@@ -146,7 +143,6 @@ const saveProjectName = async (event, project) => {
 
 const cancelEdit = (event) => {
   if (event) event.stopPropagation()
-  // Add delay to allow enter key to trigger save
   setTimeout(() => {
     editingProjectId.value = null
   }, 100)
@@ -173,10 +169,8 @@ const confirmDelete = async (event, project) => {
   try {
     const response = await deleteProject(project.project_id)
     if (response.success) {
-      // Remove from list
       projects.value = projects.value.filter(p => p.project_id !== project.project_id)
     } else {
-      // Check if there are referencing apps
       if (response.referencing_apps && response.referencing_apps.length > 0) {
         const names = response.referencing_apps.map(a => a.name).join(', ')
         alert(`无法删除！该项目正被以下 AI 应用使用：\n${names}\n\n请先在 AI 应用中移除该知识库的关联。`)
@@ -239,12 +233,6 @@ const formatDate = (dateStr) => {
   } catch {
     return dateStr?.slice(0, 10) || ''
   }
-}
-
-// Truncate text
-const truncateText = (text, maxLength) => {
-  if (!text) return ''
-  return text.length > maxLength ? text.slice(0, maxLength) + '...' : text
 }
 
 onMounted(() => {
@@ -313,101 +301,113 @@ onMounted(() => {
   font-size: 0.85rem;
 }
 
-/* Projects grid */
-.projects-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 20px;
-}
-
-/* Project card */
-.project-card {
+/* Table */
+.table-wrapper {
   background: #FFFFFF;
   border: 1px solid #E5E7EB;
-  border-radius: 8px;
-  padding: 16px;
-  transition: all 0.2s ease;
+  border-radius: 12px;
+  overflow: hidden;
+  overflow-x: auto;
 }
 
-.project-card:hover {
-  border-color: #D1D5DB;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
 }
 
-/* Status-based border colors */
-.project-card.status-graph-completed {
+.data-table thead {
+  background: #F9FAFB;
+  border-bottom: 1px solid #E5E7EB;
+}
+
+.data-table th {
+  padding: 12px 16px;
+  text-align: left;
+  font-weight: 600;
+  color: #6B7280;
+  font-size: 0.75rem;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+}
+
+.data-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid #F3F4F6;
+  color: #374151;
+  vertical-align: middle;
+}
+
+.data-table tbody tr:hover {
+  background: #F9FAFB;
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Status-based left border */
+.data-table tbody tr.status-graph-completed {
   border-left: 3px solid #10B981;
 }
-
-.project-card.status-graph-building {
+.data-table tbody tr.status-graph-building {
   border-left: 3px solid #F59E0B;
 }
-
-.project-card.status-ontology-generated {
+.data-table tbody tr.status-ontology-generated {
   border-left: 3px solid #3B82F6;
 }
-
-.project-card.status-failed {
+.data-table tbody tr.status-failed {
   border-left: 3px solid #EF4444;
 }
 
-/* Card header */
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #F3F4F6;
-}
-
-.card-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.project-id {
+/* ID badge */
+.id-badge {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.7rem;
   color: #6B7280;
-  letter-spacing: 0.5px;
   font-weight: 500;
+  letter-spacing: 0.5px;
 }
 
-.delete-btn {
-  background: none;
-  border: none;
+/* Name cell */
+.name-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   cursor: pointer;
-  padding: 4px 6px;
-  font-size: 0.9rem;
-  opacity: 0.5;
-  transition: opacity 0.2s, transform 0.2s;
-  border-radius: 4px;
 }
 
-.delete-btn:hover {
+.project-name {
+  font-weight: 600;
+  color: #111827;
+}
+
+.edit-icon {
+  opacity: 0;
+  font-size: 0.75rem;
+  transition: opacity 0.2s;
+}
+
+.name-cell:hover .edit-icon {
   opacity: 1;
-  transform: scale(1.1);
-  background: #FEE2E2;
 }
 
-.delete-btn.constrained {
-  cursor: not-allowed;
-  opacity: 0.3;
+/* Edit input */
+.edit-name-input {
+  width: 100%;
+  max-width: 240px;
+  padding: 4px 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border: 1px solid #000;
+  border-radius: 4px;
+  outline: none;
+  font-family: inherit;
 }
 
-.delete-btn.constrained:hover {
-  opacity: 0.3;
-  transform: none;
-  background: none;
-}
-
-.constraint-hint {
-  font-size: 0.9rem;
-  cursor: help;
-}
-
+/* Status badge */
 .status-badge {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.65rem;
@@ -442,94 +442,53 @@ onMounted(() => {
   color: #9CA3AF;
 }
 
-.project-name {
-  font-family: 'Inter', sans-serif;
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: #111827;
-  margin: 0;
-  line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.constraint-hint {
+  font-size: 0.9rem;
+  cursor: help;
+  margin-left: 6px;
+}
+
+/* Code value */
+.code-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: #6B7280;
+  background: #F3F4F6;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.empty-value {
+  color: #D1D5DB;
+}
+
+/* Delete button */
+.delete-btn {
+  background: none;
+  border: none;
   cursor: pointer;
-  position: relative;
-  padding-right: 24px;
+  padding: 6px;
+  font-size: 0.9rem;
+  opacity: 0.5;
+  transition: opacity 0.2s, transform 0.2s;
+  border-radius: 6px;
 }
 
-.edit-icon {
-  opacity: 0;
-  font-size: 0.8rem;
-  transition: opacity 0.2s;
-  position: absolute;
-  right: 0;
-}
-
-.project-name:hover .edit-icon {
+.delete-btn:hover {
   opacity: 1;
+  transform: scale(1.1);
+  background: #FEE2E2;
 }
 
-.project-name-container {
-  margin-bottom: 12px;
+.delete-btn.constrained {
+  cursor: not-allowed;
+  opacity: 0.3;
 }
 
-.edit-name-form {
-  width: 100%;
-}
-
-.edit-name-input {
-  width: 100%;
-  padding: 4px 8px;
-  font-size: 0.95rem;
-  font-weight: 600;
-  border: 1px solid #000;
-  border-radius: 4px;
-  outline: none;
-  font-family: inherit;
-}
-
-/* Project info */
-.project-info {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.info-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.75rem;
-}
-
-.info-label {
-  color: #9CA3AF;
-  font-family: 'JetBrains Mono', monospace;
-}
-
-.info-value {
-  color: #4B5563;
-  font-family: 'Inter', sans-serif;
-}
-
-.info-value.code {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.7rem;
-}
-
-/* Error message */
-.error-message {
-  margin-top: 12px;
-  padding: 8px;
-  background: rgba(239, 68, 68, 0.05);
-  border: 1px solid rgba(239, 68, 68, 0.2);
-  border-radius: 4px;
-  font-size: 0.7rem;
-  color: #EF4444;
-  line-height: 1.4;
+.delete-btn.constrained:hover {
+  opacity: 0.3;
+  transform: none;
+  background: none;
 }
 
 /* Empty state */
@@ -540,6 +499,9 @@ onMounted(() => {
   gap: 12px;
   padding: 48px;
   color: #9CA3AF;
+  background: #FFFFFF;
+  border: 1px dashed #E5E7EB;
+  border-radius: 12px;
 }
 
 .empty-icon {
@@ -554,9 +516,11 @@ onMounted(() => {
 }
 
 /* Responsive */
-@media (max-width: 768px) {
-  .projects-grid {
-    grid-template-columns: 1fr;
+@media (max-width: 900px) {
+  .data-table th,
+  .data-table td {
+    padding: 10px 12px;
+    font-size: 0.8rem;
   }
 }
 </style>

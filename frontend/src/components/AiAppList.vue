@@ -13,48 +13,55 @@
       <span class="loading-text">加载应用中...</span>
     </div>
 
-    <!-- App list -->
-    <div v-else-if="apps.length > 0" class="apps-grid">
-      <div
-        v-for="app in apps"
-        :key="app.app_id"
-        class="app-card"
-        @click="navigateToApp(app)"
-      >
-        <div class="card-header">
-          <span class="app-icon">🤖</span>
-          <span class="app-date">{{ formatDate(app.created_at) }}</span>
-        </div>
-
-        <h3 class="app-name">{{ app.name }}</h3>
-
-        <div class="app-info">
-          <div class="info-row">
-            <span class="info-label">App ID:</span>
-            <span class="info-value app-id">{{ app.app_id }}</span>
-          </div>
-          <div class="info-row">
-            <span class="info-label">关联知识库:</span>
-            <span class="info-value">{{ app.workflow_data?.selectedGraphIds?.length || 0 }} 个</span>
-          </div>
-          <div class="info-row">
-            <span class="info-label">工作流节点:</span>
-            <span class="info-value">{{ app.nodes?.length || 0 }} 个</span>
-          </div>
-        </div>
-
-        <div class="card-footer">
-          <button class="edit-btn" @click.stop="navigateToApp(app)">进入工作流 ➝</button>
-          <button class="delete-btn" @click.stop="confirmDelete(app)">×</button>
-        </div>
-      </div>
+    <!-- App table -->
+    <div v-else-if="apps.length > 0" class="table-wrapper">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>App ID</th>
+            <th>应用名称</th>
+            <th>关联知识库</th>
+            <th>工作流节点</th>
+            <th>创建日期</th>
+            <th style="width: 140px;">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="app in apps"
+            :key="app.app_id"
+            @click="navigateToApp(app)"
+            class="app-row"
+          >
+            <td>
+              <code class="id-badge">{{ app.app_id }}</code>
+            </td>
+            <td>
+              <span class="app-name">{{ app.name }}</span>
+            </td>
+            <td>
+              <span class="count-badge">{{ app.workflow_data?.selectedGraphIds?.length || 0 }}</span>
+            </td>
+            <td>
+              <span class="count-badge">{{ app.nodes?.length || 0 }}</span>
+            </td>
+            <td>{{ formatDate(app.created_at) }}</td>
+            <td>
+              <div class="action-btns" @click.stop>
+                <button class="enter-btn" @click="navigateToApp(app)">进入工作流 ➝</button>
+                <button class="delete-btn" @click="confirmDelete(app)">×</button>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <!-- Empty state -->
     <div v-else class="empty-state">
       <span class="empty-icon">📂</span>
       <p class="empty-text">暂无保存的 AI 应用</p>
-      <p class="empty-hint">在项目构建完成后点击“创建 AI 知识库应用”即可开始</p>
+      <p class="empty-hint">在项目构建完成后点击"创建 AI 知识库应用"即可开始</p>
     </div>
   </div>
 </template>
@@ -142,112 +149,141 @@ onMounted(() => {
   text-transform: uppercase;
 }
 
-.apps-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 20px;
+/* Loading state */
+.loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 48px;
+  color: #9CA3AF;
 }
 
-.app-card {
+.loading-spinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid #E5E7EB;
+  border-top-color: #6B7280;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-text {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85rem;
+}
+
+/* Table */
+.table-wrapper {
   background: #FFFFFF;
   border: 1px solid #E5E7EB;
   border-radius: 12px;
-  padding: 20px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  display: flex;
-  flex-direction: column;
-  position: relative;
-}
-
-.app-card:hover {
-  border-color: #FF4500;
-  box-shadow: 0 10px 20px rgba(0,0,0,0.05);
-  transform: translateY(-4px);
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.app-icon {
-  font-size: 24px;
-}
-
-.app-date {
-  font-size: 10px;
-  color: #999;
-  font-family: 'JetBrains Mono', monospace;
-}
-
-.app-name {
-  font-size: 1.1rem;
-  font-weight: 700;
-  margin: 0 0 15px 0;
-  color: #000;
-}
-
-.app-info {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 20px;
-}
-
-.info-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-}
-
-.info-label {
-  color: #666;
-}
-
-.info-value {
-  font-weight: 600;
-  color: #333;
-}
-
-.app-id {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  color: #888;
-  max-width: 160px;
   overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.data-table thead {
+  background: #F9FAFB;
+  border-bottom: 1px solid #E5E7EB;
+}
+
+.data-table th {
+  padding: 12px 16px;
+  text-align: left;
+  font-weight: 600;
+  color: #6B7280;
+  font-size: 0.75rem;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  font-family: 'JetBrains Mono', monospace;
   white-space: nowrap;
 }
 
-.card-footer {
-  display: flex;
-  gap: 10px;
+.data-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid #F3F4F6;
+  color: #374151;
+  vertical-align: middle;
 }
 
-.edit-btn {
-  flex: 1;
+.data-table tbody tr:hover {
+  background: #F9FAFB;
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* App row clickable */
+.app-row {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+/* ID badge */
+.id-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: #6B7280;
+  background: #F3F4F6;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* App name */
+.app-name {
+  font-weight: 600;
+  color: #111827;
+}
+
+/* Count badge */
+.count-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #6B7280;
+  background: #F3F4F6;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+/* Action buttons */
+.action-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.enter-btn {
   background: #000;
   color: #fff;
   border: none;
-  padding: 10px;
+  padding: 6px 12px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.2s;
+  font-family: 'JetBrains Mono', monospace;
 }
 
-.edit-btn:hover {
+.enter-btn:hover {
   background: #333;
 }
 
 .delete-btn {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   background: #fff;
   border: 1px solid #E5E7EB;
   border-radius: 6px;
@@ -256,7 +292,8 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
+  font-size: 16px;
+  transition: all 0.2s;
 }
 
 .delete-btn:hover {
@@ -265,24 +302,14 @@ onMounted(() => {
   border-color: #FECACA;
 }
 
-.loading-state, .empty-state {
+/* Empty state */
+.empty-state {
   text-align: center;
   padding: 60px;
   color: #999;
   background: #fff;
   border-radius: 12px;
   border: 1px dashed #E5E7EB;
-}
-
-.loading-spinner {
-  width: 30px;
-  height: 30px;
-  border: 3px solid #f3f3f3;
-  border-top: 3px solid #000;
-  border-radius: 50%;
-  display: inline-block;
-  animation: spin 1s linear infinite;
-  margin-bottom: 15px;
 }
 
 .empty-icon {
@@ -301,5 +328,12 @@ onMounted(() => {
   font-size: 12px;
 }
 
-@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+/* Responsive */
+@media (max-width: 900px) {
+  .data-table th,
+  .data-table td {
+    padding: 10px 12px;
+    font-size: 0.8rem;
+  }
+}
 </style>
