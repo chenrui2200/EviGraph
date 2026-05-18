@@ -22,10 +22,33 @@ from ..config import Config
 
 class PipelineStageStatus(str, Enum):
     PENDING = "pending"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
+
+    # Stage 细分状态（Pipeline 外层 status 使用，标识当前执行到哪个阶段）
+    PROJECT_CREATION_PROCESSING = "project_creation_processing"
+    PROJECT_CREATION_COMPLETED = "project_creation_completed"
+    PROJECT_CREATION_FAILED = "project_creation_failed"
+
+    MINERU_ANNOTATION_PROCESSING = "mineru_annotation_processing"
+    MINERU_ANNOTATION_COMPLETED = "mineru_annotation_completed"
+    MINERU_ANNOTATION_FAILED = "mineru_annotation_failed"
+
+    CHAPTER_ANALYSIS_PROCESSING = "chapter_analysis_processing"
+    CHAPTER_ANALYSIS_COMPLETED = "chapter_analysis_completed"
+    CHAPTER_ANALYSIS_FAILED = "chapter_analysis_failed"
+
+    INTELLIGENT_ANALYSIS_PROCESSING = "intelligent_analysis_processing"
+    INTELLIGENT_ANALYSIS_COMPLETED = "intelligent_analysis_completed"
+    INTELLIGENT_ANALYSIS_FAILED = "intelligent_analysis_failed"
+
+    GRAPH_BUILDING_PROCESSING = "graph_building_processing"
+    GRAPH_BUILDING_COMPLETED = "graph_building_completed"
+    GRAPH_BUILDING_FAILED = "graph_building_failed"
+
+    APP_CREATION_PROCESSING = "app_creation_processing"
+    APP_CREATION_COMPLETED = "app_creation_completed"
+    APP_CREATION_FAILED = "app_creation_failed"
+
+    TOTAL_COMPLETED = "total_completed"
 
 
 @dataclass
@@ -53,17 +76,13 @@ class PipelineStage:
 
     @classmethod
     def from_dict(cls, data: Dict) -> "PipelineStage":
-        # 兼容旧数据：started_at 迁移到 processing_at
-        processing_at = data.get("processing_at")
-        if processing_at is None:
-            processing_at = data.get("started_at")
         return cls(
             name=data.get("name", ""),
             label=data.get("label", ""),
             status=PipelineStageStatus(data.get("status", "pending")),
             message=data.get("message", ""),
             result=data.get("result", {}),
-            processing_at=processing_at,
+            processing_at=data.get("processing_at"),
             completed_at=data.get("completed_at"),
             link=data.get("link"),
         )

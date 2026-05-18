@@ -48,24 +48,28 @@ class KbPipelineRunner:
         acquired = _pipeline_semaphore.acquire(timeout=5)
         if not acquired:
             logger.error(f"Pipeline {self.pipeline.pipeline_id} 无法启动：并发 Pipeline 数量已达上限 ({_MAX_CONCURRENT_PIPELINES})")
-            self.pipeline.status = PipelineStageStatus.FAILED
+            self.pipeline.status = PipelineStageStatus.PENDING
             self.pipeline.error = f"系统并发限制：最多同时运行 {_MAX_CONCURRENT_PIPELINES} 个 Pipeline"
             KbPipelineManager.save(self.pipeline)
             return
 
         try:
-            self._update_pipeline_status(PipelineStageStatus.PROCESSING)
             stages = self.pipeline.stages
 
             for idx, stage in enumerate(stages):
                 self.pipeline.current_stage_index = idx
                 KbPipelineManager.save(self.pipeline)
 
-                if stage.status == PipelineStageStatus.COMPLETED:
+                if stage.status.value.endswith("_completed"):
                     continue
 
-                stage.status = PipelineStageStatus.PROCESSING
+                processing_status = getattr(PipelineStageStatus, f"{stage.name.upper()}_PROCESSING")
+                completed_status = getattr(PipelineStageStatus, f"{stage.name.upper()}_COMPLETED")
+                failed_status = getattr(PipelineStageStatus, f"{stage.name.upper()}_FAILED")
+
+                stage.status = processing_status
                 stage.processing_at = self._now()
+                self.pipeline.status = processing_status
                 KbPipelineManager.save(self.pipeline)
 
                 # 阶段开始前回调
@@ -85,15 +89,16 @@ class KbPipelineRunner:
                     elif stage.name == "app_creation":
                         self._run_app_creation()
 
-                    stage.status = PipelineStageStatus.COMPLETED
+                    stage.status = completed_status
                     stage.completed_at = self._now()
                     stage.message = stage.message or "完成"
+                    self.pipeline.status = completed_status
                     # 阶段成功完成后回调
                     self._invoke_stage_callback(stage, "completed")
                 except Exception as e:
-                    stage.status = PipelineStageStatus.FAILED
+                    stage.status = failed_status
                     stage.message = str(e)
-                    self.pipeline.status = PipelineStageStatus.FAILED
+                    self.pipeline.status = failed_status
                     self.pipeline.error = f"阶段 [{stage.label}] 失败: {str(e)}"
                     KbPipelineManager.save(self.pipeline)
                     # 阶段失败后回调
@@ -104,12 +109,14 @@ class KbPipelineRunner:
                 KbPipelineManager.save(self.pipeline)
 
             self.pipeline.total_completed = self._now()
-            self._update_pipeline_status(PipelineStageStatus.COMPLETED)
+            self.pipeline.status = PipelineStageStatus.TOTAL_COMPLETED
+            KbPipelineManager.save(self.pipeline)
             logger.info(f"Pipeline {self.pipeline.pipeline_id} completed successfully.")
         except Exception as e:
-            self.pipeline.status = PipelineStageStatus.FAILED
-            self.pipeline.error = str(e)
-            KbPipelineManager.save(self.pipeline)
+            # fatal error：保持当前 stage 的 failed 状态，如果没有则设为 pending
+            if self.pipeline.status == PipelineStageStatus.PENDING:
+                self.pipeline.error = str(e)
+                KbPipelineManager.save(self.pipeline)
             logger.error(f"Pipeline {self.pipeline.pipeline_id} fatal error: {e}\n{traceback.format_exc()}")
         finally:
             _pipeline_semaphore.release()
@@ -136,10 +143,6 @@ class KbPipelineRunner:
             )
         except Exception as e:
             logger.warning(f"Pipeline {self.pipeline.pipeline_id} 阶段回调异常: {e}")
-
-    def _update_pipeline_status(self, status: PipelineStageStatus):
-        self.pipeline.status = status
-        KbPipelineManager.save(self.pipeline)
 
     @staticmethod
     def _now() -> str:

@@ -32,6 +32,9 @@ def save_app():
         required: true
         schema:
           type: object
+          example:
+            name: "string"
+            description: "string"
           properties:
             app_id:
               type: string
@@ -267,6 +270,9 @@ def create_app():
           type: object
           required:
             - name
+          example:
+            name: "string"
+            description: "string"
           properties:
             name:
               type: string
@@ -347,19 +353,12 @@ def create_app():
                 "rerankMinScore": 0
             }
         }
-        user_workflow = data.get('workflow_data') or {}
-        # 深度合并：保留默认值，用户传入的覆盖
-        for key, value in user_workflow.items():
-            if isinstance(value, dict) and key in default_workflow and isinstance(default_workflow[key], dict):
-                default_workflow[key].update(value)
-            else:
-                default_workflow[key] = value
 
         app_data = {
             "name": name,
             "description": data.get('description', ''),
             "workflow_data": default_workflow,
-            "nodes": data.get('nodes', [])
+            "nodes": []
         }
         app = AiAppManager.save_app(app_data)
         return jsonify({

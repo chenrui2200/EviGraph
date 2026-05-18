@@ -73,22 +73,24 @@ def retry_graph_building(pipeline_id: str):
     graph_idx = 0
     if stage:
         graph_idx = pipeline.stages.index(stage)
-        stage.status = PipelineStageStatus.PROCESSING
+        stage.status = PipelineStageStatus.GRAPH_BUILDING_PROCESSING
         stage.message = "重新构建中..."
+        stage.processing_at = None
         stage.completed_at = None
         if not stage.result:
             stage.result = {}
         stage.result["task_id"] = task_id
 
     # Reset subsequent stages to pending
-    if pipeline.status in (PipelineStageStatus.COMPLETED, PipelineStageStatus.FAILED):
-        pipeline.status = PipelineStageStatus.PROCESSING
+    if pipeline.status.value.endswith(("_completed", "_failed")) or pipeline.status == PipelineStageStatus.TOTAL_COMPLETED:
+        pipeline.status = PipelineStageStatus.GRAPH_BUILDING_PROCESSING
         pipeline.error = None
     pipeline.current_stage_index = graph_idx
     for s in pipeline.stages[graph_idx + 1:]:
         s.status = PipelineStageStatus.PENDING
         s.message = ""
         s.result = {}
+        s.processing_at = None
         s.completed_at = None
         s.link = None
 
