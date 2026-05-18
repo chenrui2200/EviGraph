@@ -350,7 +350,7 @@ def create_app():
             "intentMatch": {
                 "topicLimit": 50,
                 "entityLimit": 50,
-                "rerankMinScore": 0
+                "rerankMinScore": 40
             }
         }
 
