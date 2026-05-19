@@ -160,6 +160,9 @@ def start_kb_pipeline():
             proj_name:
               type: string
               description: 自定义项目名称（可选，不传则自动生成 Auto_文件名）
+            kb_pipeline_callback_url:
+              type: string
+              description: Pipeline 阶段完成后的回调地址（可选，不传则使用全局配置）
     responses:
       200:
         description: Pipeline 启动成功
@@ -175,7 +178,13 @@ def start_kb_pipeline():
 
     target_app_id = data.get('target_app_id')
     proj_name = data.get('proj_name')
-    pipeline = KbPipeline.create_default(minio_object=minio_object, target_app_id=target_app_id, proj_name=proj_name)
+    kb_pipeline_callback_url = data.get('kb_pipeline_callback_url')
+    pipeline = KbPipeline.create_default(
+        minio_object=minio_object,
+        target_app_id=target_app_id,
+        proj_name=proj_name,
+        kb_pipeline_callback_url=kb_pipeline_callback_url,
+    )
     KbPipelineManager.save(pipeline)
 
     start_pipeline_runner(pipeline)

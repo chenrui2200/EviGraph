@@ -58,10 +58,11 @@ def invoke_callback(pipeline_data: Dict[str, Any]) -> None:
         pipeline_data: 完整的 Pipeline JSON 数据（KbPipeline.to_dict() 结果）
 
     注意：本方法立即返回，HTTP 请求在线程池中异步执行，不会阻塞调用方。
+    回调地址优先级：pipeline_data['kb_pipeline_callback_url'] > Config.KB_PIPELINE_CALLBACK_URL
     """
-    callback_url = Config.KB_PIPELINE_CALLBACK_URL
+    callback_url = pipeline_data.get("kb_pipeline_callback_url") or Config.KB_PIPELINE_CALLBACK_URL
     if not callback_url:
-        logger.debug(f"Pipeline {pipeline_data.get('pipeline_id')}: KB_PIPELINE_CALLBACK_URL 未配置，跳过回调")
+        logger.debug(f"Pipeline {pipeline_data.get('pipeline_id')}: KB_PIPELINE_CALLBACK_URL 未配置且未传入回调地址，跳过回调")
         return
 
     # 提交到线程池异步执行，不阻塞 Pipeline 主线程

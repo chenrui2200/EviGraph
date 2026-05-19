@@ -97,6 +97,7 @@ class KbPipeline:
     app_id: Optional[str] = None
     target_app_id: Optional[str] = None  # 用户指定的已有 App（非自动创建）
     proj_name: Optional[str] = None  # 用户指定的项目自定义名称（可选）
+    kb_pipeline_callback_url: Optional[str] = None  # 阶段完成后的回调地址（创建时绑定）
     status: PipelineStageStatus = PipelineStageStatus.PENDING
     current_stage_index: int = 0
     stages: List[PipelineStage] = field(default_factory=list)
@@ -114,6 +115,7 @@ class KbPipeline:
             "app_id": self.app_id,
             "target_app_id": self.target_app_id,
             "proj_name": self.proj_name,
+            "kb_pipeline_callback_url": self.kb_pipeline_callback_url,
             "status": self.status.value,
             "current_stage_index": self.current_stage_index,
             "stages": [s.to_dict() for s in self.stages],
@@ -133,6 +135,7 @@ class KbPipeline:
             app_id=data.get("app_id"),
             target_app_id=data.get("target_app_id"),
             proj_name=data.get("proj_name"),
+            kb_pipeline_callback_url=data.get("kb_pipeline_callback_url"),
             status=PipelineStageStatus(data.get("status", "pending")),
             current_stage_index=data.get("current_stage_index", 0),
             stages=[PipelineStage.from_dict(s) for s in data.get("stages", [])],
@@ -143,7 +146,13 @@ class KbPipeline:
         )
 
     @classmethod
-    def create_default(cls, minio_object: str, target_app_id: Optional[str] = None, proj_name: Optional[str] = None) -> "KbPipeline":
+    def create_default(
+        cls,
+        minio_object: str,
+        target_app_id: Optional[str] = None,
+        proj_name: Optional[str] = None,
+        kb_pipeline_callback_url: Optional[str] = None,
+    ) -> "KbPipeline":
         now = datetime.now().isoformat()
         pipeline_id = f"kbpipe_{uuid.uuid4().hex[:12]}"
         # 根据是否有 target_app_id 决定最后阶段标签
@@ -153,6 +162,7 @@ class KbPipeline:
             minio_object=minio_object,
             target_app_id=target_app_id,
             proj_name=proj_name,
+            kb_pipeline_callback_url=kb_pipeline_callback_url,
             stages=[
                 PipelineStage(name="project_creation", label="项目创建"),
                 PipelineStage(name="mineru_annotation", label="MinerU 标注"),

@@ -25,10 +25,22 @@ from . import kb_pipeline_callback
 
 logger = get_logger('mirofish.kb_pipeline')
 
-# 延迟导入 Flask app 以避免循环依赖
+# 缓存 Flask app 实例，避免递归创建
+_flask_app = None
+
+
 def _get_app():
+    global _flask_app
+    if _flask_app is not None:
+        return _flask_app
     from app import create_app
     return create_app()
+
+
+def set_flask_app(app):
+    """在 create_app() 中注册 Flask app 实例，供 Pipeline 线程复用"""
+    global _flask_app
+    _flask_app = app
 
 
 # 全局并发控制：最多同时运行 2 个 Pipeline，防止外部资源过载
@@ -83,6 +95,61 @@ def _try_wake_next_pending():
     KbPipelineManager.save(pipeline)
     logger.info(f"唤醒排队 Pipeline {next_id}，当前等待队列剩余 {_pending_queue.qsize()} 个")
     start_pipeline_runner(pipeline)
+
+
+def _restart_interrupted_pipelines():
+    """应用启动时扫描并恢复被中断的 Pipeline（PROCESSING 状态的重置为 PENDING 后继续执行）"""
+    try:
+        pipelines = KbPipelineManager.list_all(limit=1000)
+        recovered_pending = 0
+        recovered_processing = 0
+
+        for p in pipelines:
+            status = p.status.value
+
+            # 已完成或已失败的跳过
+            if status == 'total_completed' or status.endswith('_failed'):
+                continue
+
+            # PENDING 状态：加入等待队列
+            if status == 'pending':
+                if p.pipeline_id not in _pending_set:
+                    _pending_set.add(p.pipeline_id)
+                    _pending_queue.put(p.pipeline_id)
+                    recovered_pending += 1
+                continue
+
+            # *_PROCESSING 状态：被中断的运行中 Pipeline，重置当前 stage 为 PENDING 后恢复
+            if status.endswith('_processing'):
+                if 0 <= p.current_stage_index < len(p.stages):
+                    stage = p.stages[p.current_stage_index]
+                    stage.status = PipelineStageStatus.PENDING
+                    stage.message = "服务重启后恢复，等待重新执行"
+                    stage.processing_at = None
+
+                p.status = PipelineStageStatus.PENDING
+                p.error = None
+                KbPipelineManager.save(p)
+
+                if p.pipeline_id not in _pending_set:
+                    _pending_set.add(p.pipeline_id)
+                    _pending_queue.put(p.pipeline_id)
+                    recovered_processing += 1
+                logger.info(f"Pipeline {p.pipeline_id} 从 {status} 恢复为 PENDING，准备重新执行")
+
+        total = recovered_pending + recovered_processing
+        if total:
+            logger.info(
+                f"启动恢复：共 {total} 个 Pipeline 进入等待队列"
+                f"（PENDING: {recovered_pending}, PROCESSING->PENDING: {recovered_processing}）"
+            )
+            # 尝试启动最多并发上限数量的 Pipeline
+            for _ in range(_MAX_CONCURRENT_PIPELINES):
+                _try_wake_next_pending()
+        else:
+            logger.info("启动恢复：没有需要恢复的 Pipeline")
+    except Exception as e:
+        logger.error(f"启动恢复被中断 Pipeline 失败: {e}")
 
 
 class KbPipelineRunner:

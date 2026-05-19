@@ -208,4 +208,12 @@ def create_app(config_class=Config):
     except Exception as e:
         logger.warning(f"Startup task cleanup skipped: {e}")
 
+    # Startup: recover interrupted KB Pipelines
+    try:
+        from .services.kb_pipeline_runner import set_flask_app, _restart_interrupted_pipelines
+        set_flask_app(app)
+        _restart_interrupted_pipelines()
+    except Exception as e:
+        logger.warning(f"Startup KB Pipeline recovery skipped: {e}")
+
     return app
