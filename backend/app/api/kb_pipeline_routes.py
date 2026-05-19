@@ -162,7 +162,7 @@ def start_kb_pipeline():
               description: 自定义项目名称（可选，不传则自动生成 Auto_文件名）
             kb_pipeline_callback_url:
               type: string
-              description: Pipeline 阶段完成后的回调地址（可选，不传则使用全局配置）
+              description: Pipeline 阶段完成后的回调地址（可选，不传则不触发外部回调）
     responses:
       200:
         description: Pipeline 启动成功

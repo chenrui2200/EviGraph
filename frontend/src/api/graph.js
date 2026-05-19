@@ -310,13 +310,14 @@ export function getKbPipelineMinioFiles(prefix = '') {
  * @param {String} minio_object - MinIO 对象键（如 folder/file.pdf）或完整下载 URL（如 http://host/public/1.docx）
  * @param {String|null} target_app_id - 关联的已有 App ID（为 null 则自动创建新 App）
  * @param {String|null} proj_name - 自定义项目名称（可选，不传则自动生成）
+ * @param {String|null} kb_pipeline_callback_url - Pipeline 阶段完成后的回调地址（可选，不传则不触发外部回调）
  * @returns {Promise}
  */
-export function startKbPipeline(minio_object, target_app_id = null, proj_name = null) {
+export function startKbPipeline(minio_object, target_app_id = null, proj_name = null, kb_pipeline_callback_url = null) {
   return service({
     url: '/api/graph/kb-pipeline/start',
     method: 'post',
-    data: { minio_object, target_app_id, proj_name }
+    data: { minio_object, target_app_id, proj_name, kb_pipeline_callback_url }
   })
 }
 

@@ -2,7 +2,7 @@
 KB Pipeline 回调服务模块
 
 Pipeline 每个阶段完成后触发外部 HTTP 回调通知。
-回调目标 URL 从 Config.KB_PIPELINE_CALLBACK_URL 读取（对应 .env 中的 KB_PIPELINE_CALLBACK_URL）。
+回调目标 URL 从 Pipeline 创建时传入的 kb_pipeline_callback_url 获取，不再依赖 .env 硬编码。
 回调在线程池中异步执行，失败仅记录日志，不阻断 Pipeline 执行。
 """
 
@@ -11,7 +11,6 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Dict, Any
 
-from ..config import Config
 from ..utils.logger import get_logger
 
 logger = get_logger('mirofish.kb_pipeline_callback')
@@ -58,11 +57,11 @@ def invoke_callback(pipeline_data: Dict[str, Any]) -> None:
         pipeline_data: 完整的 Pipeline JSON 数据（KbPipeline.to_dict() 结果）
 
     注意：本方法立即返回，HTTP 请求在线程池中异步执行，不会阻塞调用方。
-    回调地址优先级：pipeline_data['kb_pipeline_callback_url'] > Config.KB_PIPELINE_CALLBACK_URL
+    回调地址仅使用 Pipeline 创建时传入的 kb_pipeline_callback_url，不再 fallback 到 .env。
     """
-    callback_url = pipeline_data.get("kb_pipeline_callback_url") or Config.KB_PIPELINE_CALLBACK_URL
+    callback_url = pipeline_data.get("kb_pipeline_callback_url")
     if not callback_url:
-        logger.debug(f"Pipeline {pipeline_data.get('pipeline_id')}: KB_PIPELINE_CALLBACK_URL 未配置且未传入回调地址，跳过回调")
+        logger.debug(f"Pipeline {pipeline_data.get('pipeline_id')}: 未传入 kb_pipeline_callback_url，跳过回调")
         return
 
     # 提交到线程池异步执行，不阻塞 Pipeline 主线程

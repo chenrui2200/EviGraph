@@ -98,6 +98,7 @@ class KbPipeline:
     target_app_id: Optional[str] = None  # 用户指定的已有 App（非自动创建）
     proj_name: Optional[str] = None  # 用户指定的项目自定义名称（可选）
     kb_pipeline_callback_url: Optional[str] = None  # 阶段完成后的回调地址（创建时绑定）
+    chunks_count: Optional[int] = None  # 智能分析生成的 chunks（clauses）数量
     status: PipelineStageStatus = PipelineStageStatus.PENDING
     current_stage_index: int = 0
     stages: List[PipelineStage] = field(default_factory=list)
@@ -116,6 +117,7 @@ class KbPipeline:
             "target_app_id": self.target_app_id,
             "proj_name": self.proj_name,
             "kb_pipeline_callback_url": self.kb_pipeline_callback_url,
+            "chunks_count": self.chunks_count,
             "status": self.status.value,
             "current_stage_index": self.current_stage_index,
             "stages": [s.to_dict() for s in self.stages],
@@ -136,6 +138,7 @@ class KbPipeline:
             target_app_id=data.get("target_app_id"),
             proj_name=data.get("proj_name"),
             kb_pipeline_callback_url=data.get("kb_pipeline_callback_url"),
+            chunks_count=data.get("chunks_count"),
             status=PipelineStageStatus(data.get("status", "pending")),
             current_stage_index=data.get("current_stage_index", 0),
             stages=[PipelineStage.from_dict(s) for s in data.get("stages", [])],

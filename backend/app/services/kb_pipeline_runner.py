@@ -467,6 +467,9 @@ class KbPipelineRunner:
             result={"sections": len(result.sections), "clauses": len(result.clauses), "entities": entity_count}
         )
 
+        self.pipeline.chunks_count = len(result.clauses)
+        KbPipelineManager.save(self.pipeline)
+
         stage.result = {"task_id": task_id, "sections": len(result.sections), "clauses": len(result.clauses)}
         stage.link = f"/chunk-analysis/{project_id}"
         stage.message = "智能分析完成"
