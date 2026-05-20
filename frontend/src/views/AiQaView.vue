@@ -2722,10 +2722,13 @@ onUnmounted(() => {
 
 .kb-modal {
   background: #fff;
-  width: 500px;
+  width: 800px;
+  max-height: 80vh;
   border-radius: 12px;
   overflow: hidden;
   box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+  display: flex;
+  flex-direction: column;
 }
 
 .modal-header {
@@ -2747,6 +2750,8 @@ onUnmounted(() => {
 .modal-body {
   padding: 20px;
   overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .modal-desc {
@@ -2756,8 +2761,8 @@ onUnmounted(() => {
 }
 
 .project-grid {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
   gap: 10px;
 }
 
