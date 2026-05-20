@@ -174,6 +174,9 @@ class Project:
     # Error information
     error: Optional[str] = None
 
+    # Soft delete flag
+    deleted: bool = False
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
         return {
@@ -195,7 +198,8 @@ class Project:
             "chunk_overlap": self.chunk_overlap,
             "use_semantic": self.use_semantic,
             "entity_label": self.entity_label,
-            "error": self.error
+            "error": self.error,
+            "deleted": self.deleted
         }
 
     @classmethod
@@ -224,7 +228,8 @@ class Project:
             chunk_overlap=data.get('chunk_overlap', 50),
             use_semantic=data.get('use_semantic', False),
             entity_label=data.get('entity_label'),
-            error=data.get('error')
+            error=data.get('error'),
+            deleted=data.get('deleted', False)
         )
 
 
@@ -348,9 +353,16 @@ class ProjectManager:
             raise e
 
     @classmethod
-    def get_project(cls, project_id: str) -> Optional[Project]:
+    def get_project(cls, project_id: str, include_deleted: bool = False) -> Optional[Project]:
         """
-        Get project with JSON error handling
+        Get project with JSON error handling.
+
+        Args:
+            project_id: Project ID
+            include_deleted: If False (default), return None for soft-deleted projects
+
+        Returns:
+            Project instance or None
         """
         meta_path = cls._get_project_meta_path(project_id)
 
@@ -360,7 +372,10 @@ class ProjectManager:
         try:
             with open(meta_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            return Project.from_dict(data)
+            project = Project.from_dict(data)
+            if project.deleted and not include_deleted:
+                return None
+            return project
         except (json.JSONDecodeError, KeyError) as e:
             # Prevent crashing the entire system if one project file is corrupted
             from ..utils.logger import get_logger
@@ -382,7 +397,7 @@ class ProjectManager:
 
         projects = []
         for project_id in os.listdir(cls.PROJECTS_DIR):
-            project = cls.get_project(project_id)
+            project = cls.get_project(project_id, include_deleted=False)
             if project:
                 projects.append(project)
 
@@ -392,22 +407,40 @@ class ProjectManager:
         return projects[:limit]
 
     @classmethod
-    def delete_project(cls, project_id: str) -> bool:
+    def delete_project(cls, project_id: str, storage=None) -> bool:
         """
-        Delete project and all its files
+        Soft delete project: clear Neo4j graph data, mark as deleted,
+        but preserve all files under proj_xx directory.
 
         Args:
             project_id: Project ID
+            storage: Neo4jStorage instance for graph cleanup (optional)
 
         Returns:
-            Whether deletion succeeded
+            Whether soft deletion succeeded
         """
-        project_dir = cls._get_project_dir(project_id)
-
-        if not os.path.exists(project_dir):
+        project = cls.get_project(project_id, include_deleted=True)
+        if not project:
             return False
 
-        shutil.rmtree(project_dir)
+        # 1. Clear Neo4j graph if graph_id exists
+        if project.graph_id and storage:
+            try:
+                storage.clear_graph(project.graph_id)
+                from ..utils.logger import get_logger
+                get_logger('mirofish.project').info(
+                    f"Cleared Neo4j graph {project.graph_id} for project {project_id}"
+                )
+            except Exception as e:
+                from ..utils.logger import get_logger
+                get_logger('mirofish.project').warning(
+                    f"Failed to clear Neo4j graph {project.graph_id}: {e}"
+                )
+
+        # 2. Mark as deleted and save (preserve all files)
+        project.deleted = True
+        project.updated_at = datetime.now().isoformat()
+        cls.save_project(project)
         return True
 
     @classmethod

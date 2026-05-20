@@ -11,7 +11,7 @@ from flask import request, jsonify, current_app, send_file, make_response
 from . import graph_bp
 from ..utils.logger import get_logger
 from ..utils.api_utils import api_handler, success_response
-from ..models.project import ProjectManager, ProjectStatus
+from ..models.project import ProjectManager, ProjectStatus, Project
 from ..models.task import TaskManager
 from ..models.ai_app import AiAppManager
 
@@ -241,9 +241,10 @@ def list_projects():
 @api_handler
 def delete_project(project_id: str):
     """
-    删除项目
-    删除指定项目。如果该项目关联的 graph_id 被 AI 应用引用，
-    则返回 409 冲突错误，并列出引用的应用列表。
+    软删除项目
+    清空 Neo4j 图谱数据并标记项目为已删除，但保留 proj_xx 目录下的所有文件。
+    软删除后项目不再出现在列表和详情查询中，但 source_link 的 PDF 预览仍可正常访问。
+    如果该项目关联的 graph_id 被 AI 应用引用，则返回 409 冲突错误。
     ---
     tags:
       - Project / 项目管理
@@ -311,7 +312,9 @@ def delete_project(project_id: str):
                 "referencing_apps": referencing_apps
             }), 409
 
-    success = ProjectManager.delete_project(project_id)
+    from flask import current_app
+    storage = current_app.extensions.get('neo4j_storage')
+    success = ProjectManager.delete_project(project_id, storage=storage)
 
     if not success:
         return jsonify({
@@ -321,7 +324,7 @@ def delete_project(project_id: str):
 
     return jsonify({
         "success": True,
-        "message": f"Project deleted: {project_id}"
+        "message": f"Project soft-deleted: {project_id}"
     })
 
 
@@ -435,14 +438,25 @@ def get_project_document(project_id: str, filename: str):
     target_dir = None
     found_filename = None
 
-    project = ProjectManager.get_project(project_id)
+    # PDF preview must remain accessible even for soft-deleted projects
+    project = ProjectManager.get_project(project_id, include_deleted=True)
 
     if not project:
-        all_projects = ProjectManager.list_projects(limit=500)
-        for p in all_projects:
-            if p.graph_id == project_id:
-                project = p
-                break
+        # Fallback: search by graph_id across all projects (including deleted)
+        import os, json
+        projects_dir = ProjectManager.PROJECTS_DIR
+        if os.path.exists(projects_dir):
+            for pid in os.listdir(projects_dir):
+                meta_path = os.path.join(projects_dir, pid, 'project.json')
+                if os.path.isfile(meta_path):
+                    try:
+                        with open(meta_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        if data.get('graph_id') == project_id:
+                            project = Project.from_dict(data)
+                            break
+                    except Exception:
+                        pass
 
     # 优先使用 project.files 中记录的 path（确保是有效的 PDF 文件）
     if project and project.files:
