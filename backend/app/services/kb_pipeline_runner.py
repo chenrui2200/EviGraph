@@ -232,6 +232,10 @@ class KbPipelineRunner:
             self.pipeline.total_completed = self._now()
             self.pipeline.status = PipelineStageStatus.TOTAL_COMPLETED
             KbPipelineManager.save(self.pipeline)
+            # 整体 Pipeline 完成后额外触发一次总完成回调
+            last_stage = self.pipeline.stages[-1] if self.pipeline.stages else None
+            if last_stage:
+                self._invoke_stage_callback(last_stage, "total_completed")
             logger.info(f"Pipeline {self.pipeline.pipeline_id} completed successfully.")
         except Exception as e:
             # fatal error：保持当前 stage 的 failed 状态，如果没有则设为 pending
