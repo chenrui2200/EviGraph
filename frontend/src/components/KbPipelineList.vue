@@ -198,7 +198,7 @@ const actionLabel = (status) => {
 
 const formatPipelineId = (id) => {
   if (!id) return 'PIPE_UNKNOWN'
-  return id.slice(0, 14).toUpperCase()
+  return id
 }
 
 const formatId = (id) => {

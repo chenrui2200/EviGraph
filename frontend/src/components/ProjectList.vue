@@ -203,8 +203,7 @@ const loadProjects = async () => {
 // Format project ID
 const formatProjectId = (projectId) => {
   if (!projectId) return 'PROJ_UNKNOWN'
-  const prefix = projectId.replace('proj_', '').slice(0, 8)
-  return `PROJ_${prefix.toUpperCase()}`
+  return projectId
 }
 
 // Format status

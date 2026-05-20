@@ -21,7 +21,6 @@
             <th>App ID</th>
             <th>应用名称</th>
             <th>关联知识库</th>
-            <th>工作流节点</th>
             <th>创建日期</th>
             <th style="width: 140px;">操作</th>
           </tr>
@@ -41,9 +40,6 @@
             </td>
             <td>
               <span class="count-badge">{{ app.workflow_data?.selectedGraphIds?.length || 0 }}</span>
-            </td>
-            <td>
-              <span class="count-badge">{{ app.nodes?.length || 0 }}</span>
             </td>
             <td>{{ formatDate(app.created_at) }}</td>
             <td>
