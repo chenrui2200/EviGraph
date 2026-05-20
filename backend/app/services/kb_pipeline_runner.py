@@ -296,13 +296,26 @@ class KbPipelineRunner:
         local_path = os.path.join(files_dir, file_name)
         download_object(object_name, local_path)
 
+        # Word 文档自动转为 PDF，确保后续 MinerU 解析阶段可处理
+        ext = os.path.splitext(file_name)[1].lower()
+        if ext in {".doc", ".docx"}:
+            from ..utils.word_converter import convert_word_to_pdf
+            pdf_path = convert_word_to_pdf(local_path, output_dir=files_dir)
+            if os.path.exists(pdf_path):
+                # 删除原始 Word 文件，后续流程统一使用 PDF
+                if os.path.exists(local_path) and local_path != pdf_path:
+                    os.remove(local_path)
+                local_path = pdf_path
+                file_name = os.path.basename(pdf_path)
+                logger.info(f"Pipeline {self.pipeline.pipeline_id}: Word 已转为 PDF -> {pdf_path}")
+
         file_size = os.path.getsize(local_path)
         project.files.append({
-            "filename": os.path.basename(object_name),
+            "filename": file_name,
             "path": local_path,
             "size": file_size,
             "original_filename": os.path.basename(object_name),
-            "saved_filename": os.path.basename(object_name),
+            "saved_filename": file_name,
         })
         ProjectManager.save_project(project)
 
