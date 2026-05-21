@@ -190,10 +190,6 @@
               <code>{{ pipeline?.project_id }}</code>
             </div>
             <div class="result-item">
-              <span class="item-label">图谱 ID</span>
-              <code>{{ pipeline?.graph_id }}</code>
-            </div>
-            <div class="result-item">
               <span class="item-label">应用 ID</span>
               <code>{{ pipeline?.app_id }}</code>
             </div>
