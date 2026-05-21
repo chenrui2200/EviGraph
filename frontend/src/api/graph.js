@@ -60,7 +60,7 @@ export function getTaskStatus(taskId) {
  * @returns {String}
  */
 export function getTaskEventsURL(taskId) {
-  const baseURL = import.meta.env.VITE_API_BASE_URL
+  const baseURL = import.meta.env.VITE_API_BASE_URL || ''
   return `${baseURL}/api/graph/task/${taskId}/events`
 }
 
@@ -352,7 +352,7 @@ export function getKbPipeline(pipelineId) {
  * @returns {String}
  */
 export function getKbPipelineEventsURL(pipelineId) {
-  const baseURL = import.meta.env.VITE_API_BASE_URL
+  const baseURL = import.meta.env.VITE_API_BASE_URL || ''
   return `${baseURL}/api/graph/kb-pipeline/${pipelineId}/events`
 }
 
