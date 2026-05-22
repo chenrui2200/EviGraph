@@ -300,6 +300,21 @@ class KbPipelineRunner:
         local_path = os.path.join(files_dir, file_name)
         download_object(object_name, local_path)
 
+        # 如果文件没有 .pdf 扩展名但实际是 PDF，重命名为带 .pdf 扩展名
+        # 确保前端 chunk-analysis 页面能通过文件名识别 PDF
+        if not file_name.lower().endswith('.pdf'):
+            try:
+                with open(local_path, 'rb') as f:
+                    if f.read(5) == b'%PDF-':
+                        new_file_name = file_name + '.pdf'
+                        new_local_path = os.path.join(files_dir, new_file_name)
+                        os.rename(local_path, new_local_path)
+                        file_name = new_file_name
+                        local_path = new_local_path
+                        logger.info(f"Pipeline {self.pipeline.pipeline_id}: PDF 文件重命名为: {file_name}")
+            except Exception as rename_err:
+                logger.warning(f"Pipeline {self.pipeline.pipeline_id}: PDF 重命名失败: {rename_err}")
+
         # Word 文档自动转为 PDF，确保后续 MinerU 解析阶段可处理
         ext = os.path.splitext(file_name)[1].lower()
         if ext in {".doc", ".docx"}:

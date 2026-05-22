@@ -880,10 +880,26 @@ def _get_chapter_title(chapter_tree: Dict, chapter_num: Optional[str]) -> str:
 
 
 def _get_project_pdf_filename(project) -> Optional[str]:
-    """获取项目中第一个 PDF 文件名"""
+    """获取项目中第一个 PDF 文件名。
+
+    优先根据文件名后缀判断，若文件名无 .pdf 后缀则 fallback 检查文件 magic bytes。
+    这用于兼容 Pipeline 下载的 MinIO 对象键/URL 可能不带 .pdf 扩展名的情况。
+    """
+    import os
     files = project.files or []
     for f in files:
         fname = f.get('saved_filename', '') or f.get('filename', '')
         if fname.lower().endswith('.pdf'):
             return fname
+        # Fallback: 检查文件内容是否为 PDF
+        fpath = f.get('path', '')
+        if fpath and os.path.isfile(fpath):
+            try:
+                with open(fpath, 'rb') as fh:
+                    if fh.read(5) == b'%PDF-':
+                        if fname and not fname.lower().endswith('.pdf'):
+                            fname = fname + '.pdf'
+                        return fname or 'document.pdf'
+            except Exception:
+                pass
     return None
