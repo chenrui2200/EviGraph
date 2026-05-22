@@ -1122,20 +1122,7 @@ def public_query():
                         images = [i for i in record.get("images", []) if i]
                         rel_map[cu] = {"tables": tables, "images": images}
 
-                # Rerank images/tables by query relevance (filter to top 3 relevant)
-                for cu, rel_data in rel_map.items():
-                    images = rel_data.get("images", [])
-                    if images:
-                        image_items = [(img, f"{img.get('caption', '')} {img.get('img_path', '')}".strip()) for img in images]
-                        scored_images = tools._rerank_items(query, image_items, top_n=3)
-                        rel_data["images"] = [img for img, score in scored_images if not rerank_min_score or score >= rerank_min_score]
-                    tables = rel_data.get("tables", [])
-                    if tables:
-                        table_items = [(tbl, f"{tbl.get('caption', '')} {tbl.get('table_id', '')} {str(tbl.get('table_content', ''))[:400]}".strip()) for tbl in tables]
-                        scored_tables = tools._rerank_items(query, table_items, top_n=3)
-                        rel_data["tables"] = [tbl for tbl, score in scored_tables if not rerank_min_score or score >= rerank_min_score]
-
-                for r in results:
+                    for r in results:
                         cu = r.get("clause_uuid")
                         if cu and cu in rel_map:
                             r["related_tables"] = rel_map[cu]["tables"]
