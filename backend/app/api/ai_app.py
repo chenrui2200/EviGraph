@@ -157,9 +157,14 @@ def get_app(app_id: str):
     if not app:
         return jsonify({"success": False, "error": "Application not found"}), 404
 
+    data = app.to_dict()
+    # 平铺 selectedProjectIds 到顶层，方便前端直接访问
+    workflow = data.get('workflow_data') or {}
+    data['selectedProjectIds'] = workflow.get('selectedProjectIds', [])
+
     return jsonify({
         "success": True,
-        "data": app.to_dict()
+        "data": data
     })
 
 @ai_app_bp.route('/<app_id>', methods=['DELETE'])
