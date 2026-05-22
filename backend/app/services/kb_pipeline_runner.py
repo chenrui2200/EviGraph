@@ -12,6 +12,7 @@ import json
 import traceback
 import threading
 import queue
+from datetime import datetime
 from typing import Optional, Dict, Any
 
 from ..models.kb_pipeline import KbPipelineManager, KbPipeline, PipelineStageStatus
@@ -113,6 +114,9 @@ def _restart_interrupted_pipelines():
 
             # PENDING 状态：加入等待队列
             if status == 'pending':
+                if not p.pending_at:
+                    p.pending_at = datetime.now().isoformat()
+                    KbPipelineManager.save(p)
                 if p.pipeline_id not in _pending_set:
                     _pending_set.add(p.pipeline_id)
                     _pending_queue.put(p.pipeline_id)
@@ -128,6 +132,7 @@ def _restart_interrupted_pipelines():
                     stage.processing_at = None
 
                 p.status = PipelineStageStatus.PENDING
+                p.pending_at = datetime.now().isoformat()
                 p.error = None
                 KbPipelineManager.save(p)
 
@@ -166,6 +171,7 @@ class KbPipelineRunner:
         if not acquired:
             logger.warning(f"Pipeline {self.pipeline.pipeline_id} 无法启动：并发 Pipeline 数量已达上限 ({_MAX_CONCURRENT_PIPELINES})，加入等待队列")
             self.pipeline.status = PipelineStageStatus.PENDING
+            self.pipeline.pending_at = self._now()
             self.pipeline.error = f"系统并发限制：最多同时运行 {_MAX_CONCURRENT_PIPELINES} 个 Pipeline"
             KbPipelineManager.save(self.pipeline)
             if self.pipeline.pipeline_id not in _pending_set:
@@ -175,6 +181,12 @@ class KbPipelineRunner:
             return
 
         try:
+            # 计算从 PENDING 到开始执行的等待时间
+            if self.pipeline.pending_at:
+                self.pipeline.pending_duration_ms = self._calc_duration_ms(self.pipeline.pending_at, self._now())
+                self.pipeline.pending_at = None  # 清空，避免重复计算
+                KbPipelineManager.save(self.pipeline)
+
             stages = self.pipeline.stages
 
             for idx, stage in enumerate(stages):
@@ -212,12 +224,15 @@ class KbPipelineRunner:
 
                     stage.status = completed_status
                     stage.completed_at = self._now()
+                    stage.duration_ms = self._calc_duration_ms(stage.processing_at, stage.completed_at)
                     stage.message = stage.message or "完成"
                     self.pipeline.status = completed_status
                     # 阶段成功完成后回调
                     self._invoke_stage_callback(stage, "completed")
                 except Exception as e:
                     stage.status = failed_status
+                    stage.completed_at = self._now()
+                    stage.duration_ms = self._calc_duration_ms(stage.processing_at, stage.completed_at)
                     stage.message = str(e)
                     self.pipeline.status = failed_status
                     self.pipeline.error = f"阶段 [{stage.label}] 失败: {str(e)}"
@@ -231,6 +246,7 @@ class KbPipelineRunner:
 
             self.pipeline.total_completed = self._now()
             self.pipeline.status = PipelineStageStatus.TOTAL_COMPLETED
+            self.pipeline.total_duration_ms = self._calc_duration_ms(self.pipeline.created_at, self.pipeline.total_completed)
             KbPipelineManager.save(self.pipeline)
             # 整体 Pipeline 完成后额外触发一次总完成回调
             last_stage = self.pipeline.stages[-1] if self.pipeline.stages else None
@@ -270,6 +286,30 @@ class KbPipelineRunner:
     def _now() -> str:
         from datetime import datetime
         return datetime.now().isoformat()
+
+    @staticmethod
+    def _calc_duration_ms(start_at: Optional[str], end_at: Optional[str]) -> Optional[int]:
+        """计算两个 ISO 时间字符串之间的毫秒差"""
+        if not start_at or not end_at:
+            return None
+        try:
+            from datetime import datetime
+            start = datetime.fromisoformat(start_at)
+            end = datetime.fromisoformat(end_at)
+            return int((end - start).total_seconds() * 1000)
+        except Exception:
+            return None
+
+    def _record_task_timing(self, stage, task_id: str, task_type: str, duration_ms: int, status: str):
+        """记录 stage 内部 task 的耗时"""
+        if stage.tasks_timing is None:
+            stage.tasks_timing = []
+        stage.tasks_timing.append({
+            "task_id": task_id,
+            "task_type": task_type,
+            "duration_ms": duration_ms,
+            "status": status,
+        })
 
     # ========================================================================
     # Stage 1: 项目创建 + MinIO 文件下载
@@ -638,15 +678,25 @@ class KbPipelineRunner:
 
     def _wait_task(self, task_id: str, stage, timeout: int = 1800, interval: int = 3):
         """轮询等待任务完成"""
-        start = time.time()
-        while time.time() - start < timeout:
+        wait_start = time.time()
+        while time.time() - wait_start < timeout:
             task = self.task_manager.get_task(task_id)
             if not task:
                 raise ValueError(f"任务 {task_id} 不存在")
             if task.status == TaskStatus.COMPLETED:
                 stage.message = task.message or "完成"
+                self._record_task_timing(
+                    stage, task_id, task.task_type,
+                    int((time.time() - wait_start) * 1000),
+                    task.status.value
+                )
                 return
             if task.status == TaskStatus.FAILED:
+                self._record_task_timing(
+                    stage, task_id, task.task_type,
+                    int((time.time() - wait_start) * 1000),
+                    task.status.value
+                )
                 raise ValueError(task.error or task.message or "任务失败")
             stage.message = task.message or "处理中..."
             KbPipelineManager.save(self.pipeline)

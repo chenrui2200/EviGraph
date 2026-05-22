@@ -60,6 +60,8 @@ class PipelineStage:
     result: Dict[str, Any] = field(default_factory=dict)
     processing_at: Optional[str] = None  # 进入 processing 状态的时间
     completed_at: Optional[str] = None   # 进入 completed 状态的时间
+    duration_ms: Optional[int] = None  # stage 总耗时（毫秒）
+    tasks_timing: List[Dict[str, Any]] = field(default_factory=list)  # 内部 task 耗时明细
     link: Optional[str] = None  # 完成后的跳转链接
 
     def to_dict(self) -> Dict[str, Any]:
@@ -71,6 +73,8 @@ class PipelineStage:
             "result": self.result,
             "processing_at": self.processing_at,
             "completed_at": self.completed_at,
+            "duration_ms": self.duration_ms,
+            "tasks_timing": self.tasks_timing,
             "link": self.link,
         }
 
@@ -84,6 +88,8 @@ class PipelineStage:
             result=data.get("result", {}),
             processing_at=data.get("processing_at"),
             completed_at=data.get("completed_at"),
+            duration_ms=data.get("duration_ms"),
+            tasks_timing=data.get("tasks_timing", []),
             link=data.get("link"),
         )
 
@@ -105,6 +111,9 @@ class KbPipeline:
     created_at: str = ""
     updated_at: str = ""
     total_completed: Optional[str] = None  # 全部阶段完成时间
+    total_duration_ms: Optional[int] = None  # pipeline 总耗时（毫秒）
+    pending_at: Optional[str] = None  # 进入 PENDING（等待队列）的时间
+    pending_duration_ms: Optional[int] = None  # 从 PENDING 到开始执行的等待耗时（毫秒）
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -124,6 +133,9 @@ class KbPipeline:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "total_completed": self.total_completed,
+            "total_duration_ms": self.total_duration_ms,
+            "pending_at": self.pending_at,
+            "pending_duration_ms": self.pending_duration_ms,
             "error": self.error,
         }
 
@@ -145,6 +157,9 @@ class KbPipeline:
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
             total_completed=data.get("total_completed"),
+            total_duration_ms=data.get("total_duration_ms"),
+            pending_at=data.get("pending_at"),
+            pending_duration_ms=data.get("pending_duration_ms"),
             error=data.get("error"),
         )
 
