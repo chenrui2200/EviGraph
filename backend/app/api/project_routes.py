@@ -474,8 +474,28 @@ def get_project_document(project_id: str, filename: str):
                         target_file_path = pf_path
                         target_dir = os.path.dirname(pf_path)
                         found_filename = os.path.basename(pf_path)
+                        break
                     else:
                         logger.warning(f"File in project.files is not a PDF: {pf_path}, header: {header}")
+
+            # 尝试 2: path 在当前环境无效时（如容器路径在 Windows 上），
+            # 根据 filename 从项目 files/ 目录重新构建路径
+            if not target_file_path:
+                fname = pf.get('saved_filename', '') or pf.get('filename', '')
+                if fname:
+                    files_dir = ProjectManager._get_project_files_dir(project.project_id)
+                    alt_path = os.path.join(files_dir, os.path.basename(fname))
+                    if os.path.isfile(alt_path):
+                        with open(alt_path, 'rb') as f:
+                            header = f.read(5)
+                        if header == b'%PDF-':
+                            logger.info(f"Using reconstructed path: {alt_path}")
+                            target_file_path = alt_path
+                            target_dir = files_dir
+                            found_filename = os.path.basename(fname)
+                            break
+                        else:
+                            logger.warning(f"Reconstructed file is not a PDF: {alt_path}")
 
     # Fallback: 如果 project.files 中没有有效 PDF，则从项目目录递归搜索
     if not target_file_path:
