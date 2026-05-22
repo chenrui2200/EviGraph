@@ -885,6 +885,20 @@ class GraphToolsService:
             except Exception as e:
                 logger.warning(f"[IntentMatch] Failed to query related tables/images: {e}")
 
+        # Step 3.6: Rerank images/tables by query relevance (filter to top 3 relevant)
+        if clause_rel_map:
+            for cu, rel_data in clause_rel_map.items():
+                images = rel_data.get("images", [])
+                if images:
+                    image_items = [(img, f"{img.get('caption', '')} {img.get('img_path', '')}".strip()) for img in images]
+                    scored_images = self._rerank_items(query, image_items, top_n=3)
+                    rel_data["images"] = [img for img, score in scored_images if not rerank_min_score or score >= rerank_min_score]
+                tables = rel_data.get("tables", [])
+                if tables:
+                    table_items = [(tbl, f"{tbl.get('caption', '')} {tbl.get('table_id', '')} {str(tbl.get('table_content', ''))[:400]}".strip()) for tbl in tables]
+                    scored_tables = self._rerank_items(query, table_items, top_n=3)
+                    rel_data["tables"] = [tbl for tbl, score in scored_tables if not rerank_min_score or score >= rerank_min_score]
+
         # Step 4: Rerank all unique entities against the query
         entity_items = [(e, f"{e.get('name', '')} {e.get('summary', '')}") for e in unique_entities]
         scored_entity_map: Dict[str, float] = {}
