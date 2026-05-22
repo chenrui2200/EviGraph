@@ -443,7 +443,7 @@ def get_project_document(project_id: str, filename: str):
 
     if not project:
         # Fallback: search by graph_id across all projects (including deleted)
-        import os, json
+        import json
         projects_dir = ProjectManager.PROJECTS_DIR
         if os.path.exists(projects_dir):
             for pid in os.listdir(projects_dir):
