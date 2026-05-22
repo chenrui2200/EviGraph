@@ -459,23 +459,48 @@ class KbPipelineRunner:
             raise ValueError("chunker.chunk() 返回空结果")
 
         from ..services.llm_driven_chunker import clause_to_dict
-        chunks_result = {
-            "source": "llm",
-            "sections": [{"chapter_number": s.chapter_number, "title": s.title, "content": s.content} for s in result.sections],
-            "clauses": (lambda seen_ids: [c for c in (clause_to_dict(c) for c in result.clauses) if c["clause_id"] not in seen_ids and not seen_ids.add(c["clause_id"])])(set()),
-            "elements": (lambda seen_keys: [{"element_type": "noun_entity", "key": ent if isinstance(ent, str) else "", "value": "", "unit": "", "abbreviation": "", "definition": "", "source_clause_id": c["clause_id"], "scope_prefix": c.get("scope_prefix") or c.get("metadata", {}).get("scope_prefix"), "chapter": c.get("chapter") or c.get("metadata", {}).get("chapter"), "metadata": {"name": ent if isinstance(ent, str) else ""}} for c in (clause_to_dict(c) for c in result.clauses) for ent in c.get("entities", []) if ent and (str(ent) + "|" + c["clause_id"]) not in seen_keys and not seen_keys.add(str(ent) + "|" + c["clause_id"])])(set()),
-            "edges": getattr(result, 'edges', []) or []
-        }
-        ProjectManager.save_chunks_result(project_id, chunks_result)
-        ProjectManager.delete_chunk_checkpoint_v2(project_id)
-        project = ProjectManager.get_project(project_id)
-        project.status = ProjectStatus.GRAPH_CHUNKED
-        ProjectManager.save_project(project)
+        chunks_result = None
+        save_success = False
+        try:
+            chunks_result = {
+                "source": "llm",
+                "sections": [{"chapter_number": s.chapter_number, "title": s.title, "content": s.content} for s in result.sections],
+                "clauses": (lambda seen_ids: [c for c in (clause_to_dict(c) for c in result.clauses) if c["clause_id"] not in seen_ids and not seen_ids.add(c["clause_id"])])(set()),
+                "elements": (lambda seen_keys: [{"element_type": "noun_entity", "key": ent if isinstance(ent, str) else "", "value": "", "unit": "", "abbreviation": "", "definition": "", "source_clause_id": c["clause_id"], "scope_prefix": c.get("scope_prefix") or c.get("metadata", {}).get("scope_prefix"), "chapter": c.get("chapter") or c.get("metadata", {}).get("chapter"), "metadata": {"name": ent if isinstance(ent, str) else ""}} for c in (clause_to_dict(c) for c in result.clauses) for ent in c.get("entities", []) if ent and (str(ent) + "|" + c["clause_id"]) not in seen_keys and not seen_keys.add(str(ent) + "|" + c["clause_id"])])(set()),
+                "edges": getattr(result, 'edges', []) or []
+            }
+            ProjectManager.save_chunks_result(project_id, chunks_result)
+            save_success = True
+        except Exception as save_err:
+            logger.error(f"[{task_id}] Pipeline 序列化失败: {save_err}")
+            try:
+                fallback_checkpoint = ProjectManager.get_chunk_checkpoint_v2(project_id)
+                if fallback_checkpoint:
+                    fallback_elements = []
+                    for clause in (fallback_checkpoint.completed_clauses or []):
+                        for ent in clause.get("metadata", {}).get("entities", []):
+                            fallback_elements.append({"element_type": ent.get("entity_type", "unknown"), "key": ent.get("name", ""), "value": ent.get("value", ""), "unit": ent.get("unit", ""), "abbreviation": ent.get("abbreviation", ""), "definition": ent.get("definition", ""), "source_clause_id": ent.get("clause_id", clause.get("clause_id")), "scope_prefix": clause.get("scope_prefix") or clause.get("metadata", {}).get("scope_prefix"), "chapter": clause.get("chapter") or clause.get("metadata", {}).get("chapter"), "metadata": ent})
+                    chunks_result = {"source": "llm_checkpoint_fallback", "sections": [{"chapter_number": cp.chapter_number, "title": cp.title, "content": ""} for cp in fallback_checkpoint.chapter_plan if cp.status.value in ("completed", "processing")], "clauses": fallback_checkpoint.completed_clauses or [], "elements": fallback_elements, "edges": []}
+                    ProjectManager.save_chunks_result(project_id, chunks_result)
+                    save_success = True
+            except Exception as fb_err:
+                logger.error(f"[{task_id}] Pipeline 兜底失败: {fb_err}")
 
-        entity_count = sum(
-            sum(len(tp.get('entities', [])) for tp in c.metadata.get('topics', []) if isinstance(tp, dict))
-            for c in result.clauses
-        )
+        if save_success and chunks_result:
+            try:
+                from ..api.chunk_routes import _generate_kb_words_pool, _get_project_pdf_filename
+                pdf_name = _get_project_pdf_filename(project) or "unknown.pdf"
+                json_path = _generate_kb_words_pool(project_id, chunks_result, pdf_name)
+                logger.info(f"[{task_id}] kb_words_pool.json 已生成: {json_path}")
+            except Exception as md_err:
+                logger.warning(f"[{task_id}] 生成 kb_words_pool.json 失败: {md_err}")
+
+            ProjectManager.delete_chunk_checkpoint_v2(project_id)
+            project = ProjectManager.get_project(project_id)
+            project.status = ProjectStatus.GRAPH_CHUNKED
+            ProjectManager.save_project(project)
+
+        entity_count = sum(len(c.metadata.get("entities", [])) for c in result.clauses)
         self.task_manager.update_task(
             task_id,
             status=TaskStatus.COMPLETED,
