@@ -3209,6 +3209,110 @@ topic：{topic}
 
             # 虚拟章节下不再生成内容块伪 clause
 
+        # =====================================================================
+        # 后处理：为没有 sub_chapters 的一级章节合并未分配的内容块
+        # （例如章节锚点为 x，但无合适的 x.x 二级容器时，将一级下的所有
+        #  text/table 内容合并为一个 sub_content_chunk 挂到该章节下）
+        # =====================================================================
+        for section in sections:
+            if section.get('sub_chapters'):
+                continue
+
+            start = section['start_idx']
+            end = section['end_idx']
+            content_start = start + 1  # 排除章节标题自身
+
+            contents = []
+            bboxes = []
+            chunk_ids_list = []
+            pages = []
+
+            for i in range(content_start, end + 1):
+                if i < 0 or i >= len(chunks_data):
+                    continue
+                if i in chunk_clause_map:
+                    continue
+
+                chunk = chunks_data[i]
+                metadata = chunk.get('metadata', {})
+                chunk_type = chunk.get('type') or metadata.get('type', '')
+                # 跳过其他 title，避免把无编号标题混入内容
+                if chunk_type == 'title':
+                    continue
+
+                content = chunk.get('content') or chunk.get('text') or metadata.get('content', '')
+                if not content or not str(content).strip():
+                    continue
+
+                contents.append(str(content).strip())
+
+                chunk_id = chunk.get('chunk_id') or metadata.get('chunk_id', f'chunk_{i}')
+                if chunk_id:
+                    chunk_ids_list.append(chunk_id)
+
+                page_idx = chunk.get('page_idx') or metadata.get('page_idx', 0)
+                pages.append(page_idx)
+
+                bbox = chunk.get('bbox_viewport') or metadata.get('bbox_viewport', [])
+                if bbox:
+                    bboxes.append((page_idx, bbox))
+
+            if not contents:
+                continue
+
+            sub_clause_id = f"{section['chapter_number']}-content"
+            merged_content = "\n\n".join(contents)
+
+            req_type = RequirementType.RECOMMENDED
+            if any(kw in merged_content for kw in ['应', '必须', '严禁', '不得', '应不', '不应', '不宜']):
+                req_type = RequirementType.MANDATORY
+            elif any(kw in merged_content for kw in ['宜', '可', '建议', '推荐']):
+                req_type = RequirementType.RECOMMENDED
+            elif any(kw in merged_content for kw in ['禁止', '不应', '不得']):
+                req_type = RequirementType.PROHIBITED
+
+            source = chunks_data[content_start].get('source', '') if content_start < len(chunks_data) else ''
+
+            sub_clause = ClauseSegment(
+                clause_id=sub_clause_id,
+                clause_title=section['title'][:60] or '章节内容',
+                content=merged_content,
+                paragraphs=[],
+                requirement_type=req_type,
+                applicable_systems=[],
+                cross_refs=[],
+                source=source,
+                page=min(pages) if pages else section['page_idx'],
+                triplets=[],
+                clause_items=[],
+                is_term_definition=False,
+                terms=[],
+                formula_content=None,
+                semantics_enriched=False,
+                parent_chapter=section['chapter_number'],
+                referenced_clauses=[],
+                referenced_standards=[],
+                metadata={
+                    "chunk_type": "text",
+                    "chunk_id": chunk_ids_list[0] if chunk_ids_list else f"sub_chunk_{section['chapter_number']}",
+                    "parent_chapter": section['chapter_number'],
+                    "parent_chapter_title": section['title'],
+                    "page_idx": min(pages) if pages else section['page_idx'],
+                    "bbox_viewport": bboxes[0][1] if bboxes else [],
+                    "is_sub_content_chunk": True,
+                    "entities": []
+                }
+            )
+            clauses.append(sub_clause)
+            section['sub_chapters'].append(sub_clause_id)
+
+            # 注册 chunk 映射到 sub_content_clause，以便 bbox 聚合阶段正确处理
+            for i in range(content_start, end + 1):
+                if i not in chunk_clause_map and 0 <= i < len(chunks_data):
+                    chunk_clause_map[i] = sub_clause_id
+
+            self._report_progress(-1, f"[章节构建] ⚠️ 章节 {section['chapter_number']} 无二级容器，合并 {len(contents)} 个内容块为 sub_content_chunk: {sub_clause_id}")
+
         # 更新 chapter_plan 的 end_position
         for plan in chapter_plan:
             plan.end_position = len(chunks_data)  # 简化处理
