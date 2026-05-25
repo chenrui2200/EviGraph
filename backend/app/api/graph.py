@@ -1148,7 +1148,7 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str, parse_me
     results_map = {}  # 按页码排序
 
     # 使用 ThreadPoolExecutor 并发处理
-    max_workers = min(8, total_pages)
+    max_workers = min(50, total_pages)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # 提交所有页面的解析任务
