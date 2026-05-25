@@ -212,7 +212,6 @@ class GraphBuilderService:
             raise
 
         # 构建交叉引用关系 + PART_OF层级关系（相互独立，并行执行）
-        from concurrent.futures import ThreadPoolExecutor
         cross_ref_count, hier_count = 0, 0
         try:
             logger.info("[hierarchical] Building cross-reference & hierarchical relations in parallel...")

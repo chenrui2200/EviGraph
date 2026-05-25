@@ -165,6 +165,8 @@
                 </div>
               </div>
             </div>
+            <!-- 执行耗时：卡片右下角 -->
+            <div v-if="stage.duration_ms" class="stage-duration">{{ formatDuration(stage.duration_ms) }}</div>
           </div>
 
           <div v-if="idx < stages.length - 1" class="stage-connector">
@@ -282,6 +284,17 @@ const statusMessage = (status) => {
     skipped: '已跳过'
   }
   return map[base] || status
+}
+
+const formatDuration = (ms) => {
+  if (!ms || ms < 0) return ''
+  const totalSeconds = Math.floor(ms / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (minutes > 0) {
+    return `${minutes}分${seconds}秒`
+  }
+  return `${seconds}秒`
 }
 
 const getStageDisplayMessage = (stage) => {
@@ -919,6 +932,19 @@ onUnmounted(() => {
   font-weight: 700;
   font-size: 1.05rem;
   color: #1a202c;
+}
+.stage-duration {
+  position: absolute;
+  bottom: 16px;
+  right: 20px;
+  font-size: 0.75rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  color: #667eea;
+  background: rgba(102, 126, 234, 0.08);
+  padding: 2px 8px;
+  border-radius: 4px;
+  z-index: 2;
 }
 .stage-message {
   font-size: 0.85rem;

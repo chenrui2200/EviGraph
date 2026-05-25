@@ -1225,7 +1225,7 @@ def _do_mineru_parse_work(task_id: str, project_id: str, filename: str, parse_me
         },
         'files': {
             filename: {
-                'md_content': sorted_md_content,
+                'md_content': sorted_md_content,`
                 'info': {
                     'pdf_info': all_pdf_info,
                     '_version_name': '2.1.10 (并发解析)',
