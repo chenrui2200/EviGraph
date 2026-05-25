@@ -243,6 +243,20 @@ def query_intent_match():
         # Sort by relevance_score desc
         all_topics.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
 
+        # Attach source_link to each clause (PDF preview with bbox highlight)
+        base_url = request.host_url.rstrip('/')
+        from flask import current_app
+        frontend_url = current_app.config.get('FRONTEND_URL')
+        frontend_base_url = frontend_url.rstrip('/') if frontend_url else base_url
+
+        for topic in all_topics:
+            for clause in topic.get('associated_clauses', []):
+                pdf_bboxes = clause.get('pdf_bboxes')
+                if clause.get('source') and pdf_bboxes and len(pdf_bboxes) > 0:
+                    import urllib.parse
+                    bboxes_str = urllib.parse.quote(json.dumps(pdf_bboxes))
+                    clause['source_link'] = f"{frontend_base_url}/preview/{app_id}?source={clause['source']}&page={clause.get('page', 1)}&pdf_bboxes={bboxes_str}&graph_id={clause.get('graph_id', '')}"
+
         merged_result = {
             "query": query,
             "topics": all_topics,

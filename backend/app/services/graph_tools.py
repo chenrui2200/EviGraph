@@ -832,6 +832,7 @@ class GraphToolsService:
                         "page_width": record.get("pdf_page_width"),
                         "page_height": record.get("pdf_page_height"),
                         "pdf_bboxes": pdf_bboxes,
+                        "graph_id": graph_id,
                     }
                     if t_uuid:
                         topic_clause_map.setdefault(t_uuid, []).append(clause)
