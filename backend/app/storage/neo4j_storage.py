@@ -1529,6 +1529,8 @@ class Neo4jStorage(GraphStorage):
         """
         根据条文元数据中的cross_refs构建交叉引用关系
 
+        优化：一次性批量查询所有 metadata_json，消除 N+1 查询
+
         Args:
             graph_id: 图谱ID
 
@@ -1538,36 +1540,25 @@ class Neo4jStorage(GraphStorage):
         count = 0
 
         with self._driver.session() as session:
-            # 获取所有条文
+            # 一次性获取所有条文的 clause_id + uuid + metadata_json
             result = session.run(
                 """
                 MATCH (ep:Clause {graph_id: $gid})
                 WHERE ep.clause_id IS NOT NULL
-                RETURN ep.uuid AS uuid, ep.clause_id AS clause_id
+                RETURN ep.uuid AS uuid, ep.clause_id AS clause_id, ep.metadata_json AS metadata_json
                 """,
                 gid=graph_id
             )
 
             clause_map = {}
+            cross_ref_batches = []  # [(src_uuid, tgt_uuid), ...]
+
             for record in result:
-                clause_map[record["clause_id"]] = record["uuid"]
+                clause_id = record["clause_id"]
+                source_uuid = record["uuid"]
+                clause_map[clause_id] = source_uuid
 
-            # 构建交叉引用关系
-            for clause_id, source_uuid in clause_map.items():
-                # 获取该条文的引用
-                ref_result = session.run(
-                    """
-                    MATCH (ep:Episode {uuid: $uuid})
-                    RETURN ep.metadata_json AS metadata_json
-                    """,
-                    uuid=source_uuid
-                ).single()
-
-                if not ref_result:
-                    continue
-
-                # 解析 metadata_json（存储为 JSON 字符串）
-                metadata_json = ref_result.get("metadata_json")
+                metadata_json = record.get("metadata_json")
                 metadata = self._parse_json_safe(metadata_json, {}) if metadata_json else {}
                 cross_refs = metadata.get("cross_refs", [])
                 if isinstance(cross_refs, str):
@@ -1577,20 +1568,26 @@ class Neo4jStorage(GraphStorage):
                     if ref_id in clause_map:
                         target_uuid = clause_map[ref_id]
                         if target_uuid != source_uuid:
-                            try:
-                                session.run(
-                                    """
-                                    MATCH (src:Episode {uuid: $src_uuid}), (tgt:Episode {uuid: $tgt_uuid})
-                                    MERGE (src)-[r:CROSS_REFERENCE]->(tgt)
-                                    ON CREATE SET r.graph_id = $gid
-                                    """,
-                                    src_uuid=source_uuid,
-                                    tgt_uuid=target_uuid,
-                                    gid=graph_id
-                                )
-                                count += 1
-                            except Exception as e:
-                                logger.debug(f"[hierarchical] Failed to create cross-ref: {e}")
+                            cross_ref_batches.append((source_uuid, target_uuid))
+
+            # 批量写入交叉引用关系（每批 100 条，减少事务次数）
+            BATCH_SIZE = 100
+            for i in range(0, len(cross_ref_batches), BATCH_SIZE):
+                batch = cross_ref_batches[i:i + BATCH_SIZE]
+                try:
+                    session.run(
+                        """
+                        UNWIND $pairs AS p
+                        MATCH (src:Episode {uuid: p.src_uuid}), (tgt:Episode {uuid: p.tgt_uuid})
+                        MERGE (src)-[r:CROSS_REFERENCE]->(tgt)
+                        ON CREATE SET r.graph_id = $gid
+                        """,
+                        pairs=[{"src_uuid": s, "tgt_uuid": t} for s, t in batch],
+                        gid=graph_id
+                    )
+                    count += len(batch)
+                except Exception as e:
+                    logger.debug(f"[hierarchical] Failed to create cross-ref batch: {e}")
 
         logger.info(f"[hierarchical] Built {count} cross-reference relations")
         return count

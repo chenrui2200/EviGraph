@@ -1757,9 +1757,17 @@ topic：{topic}
         self,
         clause,
         entity_count_range: tuple = (5, 15),
-        project_id: Optional[str] = None
+        project_id: Optional[str] = None,
+        cache: Optional[Dict] = None
     ) -> None:
-        """处理单个 clause 的 topic + entities + terms 提取（单阶段 LLM）"""
+        """处理单个 clause 的 topic + entities + terms 提取（单阶段 LLM）
+
+        Args:
+            clause: 待处理的条款
+            entity_count_range: 目标实体数量范围
+            project_id: 项目ID（用于缓存持久化）
+            cache: 可选的内存缓存字典（复用外部缓存，避免重复文件I/O）
+        """
         if self.stop_event and self.stop_event.is_set():
             return
 
@@ -1771,8 +1779,9 @@ topic：{topic}
             clause.metadata['semantics_enriched'] = True
             return
 
-        # 检查缓存
-        cache = self._load_clause_cache(project_id) if project_id else {}
+        # 检查缓存：优先使用传入的内存缓存，其次加载文件缓存
+        if cache is None:
+            cache = self._load_clause_cache(project_id) if project_id else {}
         content_hash = self._get_clause_content_hash(clause.content)
         cached = cache.get(content_hash)
         if cached:
@@ -1874,10 +1883,9 @@ topic：{topic}
         clause.metadata['terms'] = terms
         clause.metadata['semantics_enriched'] = True
 
-        # 写入缓存
+        # 写入内存缓存（由调用方负责批量 flush 到磁盘）
         if project_id:
             cache[content_hash] = {"topics": topics, "topic": topic, "entities": all_entities, "terms": terms}
-            self._save_clause_cache(project_id, cache)
 
         topic_summary = f"{len(topics)}个主题" if len(topics) > 1 else (topic[:20] if topic else '(无)')
         self.logger.info(f"[LLM 单阶段提取] 完成, clause_id={clause.clause_id}, {topic_summary}, entities={len(all_entities)}, terms={len(terms)}")
@@ -2170,7 +2178,7 @@ topic：{topic}
         unprocessed = [c for c in clauses_to_llm if c.clause_id not in processed_ids]
         if unprocessed:
             for clause in unprocessed:
-                self._process_single_clause(clause, entity_count_range, project_id=project_id)
+                self._process_single_clause(clause, entity_count_range, project_id=project_id, cache=cache)
 
     # =========================================================================
     # JSONL 增量写入工具
@@ -2184,6 +2192,14 @@ topic：{topic}
         clause_dict = self._clause_to_dict(clause)
         # clause_to_dict 已包含 bboxs 和 chunks，直接写入
         ProjectManager.append_clause_to_jsonl(project_id, clause_dict)
+
+    def _append_clauses_to_jsonl(self, project_id: Optional[str], clauses: List) -> None:
+        """批量将多个 clause 追加写入 JSONL 文件（单次 open，减少 I/O）"""
+        if not project_id or not clauses:
+            return
+        from ..models.project import ProjectManager
+        clause_dicts = [self._clause_to_dict(c) for c in clauses]
+        ProjectManager.append_clauses_to_jsonl(project_id, clause_dicts)
 
     def _init_jsonl_file(self, project_id: Optional[str]) -> None:
         """初始化/清空 JSONL 文件（每轮任务从头写）"""
@@ -2320,8 +2336,8 @@ topic：{topic}
         if project_id:
             self._init_jsonl_file(project_id)
 
-        # Batch 分组策略：每章节内最多 5 个 clause 一批；超长 clause (>1500 字) 单独成批
-        def _make_batches(clauses: List[ClauseSegment], batch_size: int = 5) -> List[List[ClauseSegment]]:
+        # Batch 分组策略：每章节内最多 8 个 clause 一批；超长 clause (>1500 字) 单独成批
+        def _make_batches(clauses: List[ClauseSegment], batch_size: int = 8) -> List[List[ClauseSegment]]:
             batches = []
             current_batch = []
             current_len = 0
@@ -2427,10 +2443,9 @@ topic：{topic}
                     # 等待所有 batch 完成（结果在 clause.metadata 中直接修改）
                     pass
 
-            # JSONL 增量写入：每 clause 处理完立即落盘
+            # JSONL 增量写入：章节内批量落盘（单次 open，减少 I/O）
             if project_id:
-                for clause in chapter_clauses:
-                    self._append_clause_to_jsonl(project_id, clause)
+                self._append_clauses_to_jsonl(project_id, chapter_clauses)
 
             chapter_entities_count = sum(
                 sum(len(tp.get('entities', [])) for tp in c.metadata.get('topics', []) if isinstance(tp, dict))
@@ -2703,6 +2718,115 @@ topic：{topic}
         except Exception as e:
             self.logger.warning(f"[LLM 术语提取] 失败: {e}")
             return []
+
+    def _analyze_images_parallel(
+        self,
+        clauses_with_images: List,
+        max_workers: int = 4,
+        vlm_timeout: float = 60.0
+    ) -> Dict[str, List[Dict]]:
+        """并行分析所有条款中的图片（VLM多模态分析）
+
+        Args:
+            clauses_with_images: 包含图片的条款列表
+            max_workers: 并行线程数（控制对VLM服务的并发压力）
+            vlm_timeout: VLM调用超时（秒）
+
+        Returns:
+            Dict[clause_id, List[vlm_result]]: 每个条款的图片分析结果
+        """
+        if not clauses_with_images:
+            return {}
+
+        # 收集所有待分析的图片任务
+        ImageTask = Dict[str, Any]
+        tasks: List[Tuple[str, int, ImageTask]] = []  # (clause_id, img_idx, img_dict)
+        for clause in clauses_with_images:
+            images: List[Dict] = clause.metadata.get('images', [])
+            for img_idx, img in enumerate(images):
+                if img.get('content'):
+                    tasks.append((clause.clause_id, img_idx, img))
+
+        if not tasks:
+            self.logger.info("[VLM并行] 无有效图片任务（全部缺少base64内容），跳过")
+            return {}
+
+        self.logger.info(f"[VLM并行] 共 {len(tasks)} 张图片待分析，max_workers={max_workers}")
+
+        # 复用单个VLM客户端（线程安全，内部有thread-local client）
+        vlm = LLMClient(
+            api_key=Config.VLM_API_KEY,
+            base_url=Config.VLM_BASE_URL,
+            model=Config.VLM_MODEL_NAME,
+            timeout=vlm_timeout,
+        )
+
+        prompt = (
+            "你是一位熟悉工程技术文档的分析师。请用自然、连贯的语言直接描述这张图片的内容，"
+            "像向同事口头解释一样流畅。不要分条列点，不要使用类似 '**图片类型**'、'**统计数值**' "
+            "'**详细描述**' 等模板化标题或编号。\n\n"
+            "描述应覆盖以下内容，但请直接以叙述方式融入正文："
+            "这张图属于什么类型（如流程图、接线图、架构图、原理图、布置图、统计图表、表格等）；"
+            "图中的关键文字、符号、线条及其含义；"
+            "各组件之间的连接关系和数据流向；"
+            "所有可读的技术参数、型号、规格数值，直接陈述具体数值而不加分类标签；"
+            "如果是表格，直接说明表中数据的内容和含义。"
+        )
+
+        def _process_one_image(task: Tuple[str, int, ImageTask]) -> Tuple[str, int, Dict]:
+            """处理单张图片，返回 (clause_id, img_idx, result_dict)"""
+            clause_id, img_idx, img = task
+            content_base64 = img.get('content', '')
+            img_path = img.get('img_path', '') or ''
+            caption = img.get('caption', '') or ''
+
+            try:
+                vlm_description = vlm.chat_image(
+                    image_base64=content_base64,
+                    prompt=prompt,
+                    temperature=0.3,
+                    max_tokens=4096,
+                )
+                return clause_id, img_idx, {
+                    'img_path': img_path,
+                    'caption': caption,
+                    'img_vlm_content': vlm_description or '',
+                    'status': 'ok',
+                }
+            except Exception as e:
+                return clause_id, img_idx, {
+                    'img_path': img_path,
+                    'caption': caption,
+                    'img_vlm_content': '',
+                    'status': f'error: {str(e)}',
+                }
+
+        # 并行执行所有图片分析
+        # results_map[clause_id] = List[(img_idx, result_dict)]，按 img_idx 排序后写回
+        results_map: Dict[str, List[Tuple[int, Dict]]] = {}
+        vlm_count = 0
+        vlm_fail = 0
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_process_one_image, t): t for t in tasks}
+            for future in as_completed(futures):
+                clause_id, img_idx, result = future.result()
+                if clause_id not in results_map:
+                    results_map[clause_id] = []
+                results_map[clause_id].append((img_idx, result))
+                if result['status'] == 'ok':
+                    vlm_count += 1
+                    desc_preview = result['img_vlm_content'][:60] if result['img_vlm_content'] else ''
+                    self._report_progress(-1, f"[VLM分析] clause={clause_id}: {desc_preview}...")
+                else:
+                    vlm_fail += 1
+
+        # 按 img_idx 排序，确保写回顺序与原始 images 列表一致
+        for clause_id in results_map:
+            results_map[clause_id].sort(key=lambda x: x[0])
+
+        self._report_progress(-1, f"[VLM并行] 完成: 成功 {vlm_count} 张，失败 {vlm_fail} 张")
+        return results_map
 
     def _build_sections_and_clauses_from_chunks(
         self,
@@ -3532,92 +3656,28 @@ topic：{topic}
         self._report_progress(-1, f"[章节构建] 完成: {len(sections)} 章节, {len(clauses)} 条款，bboxs 聚合完成")
 
         # =====================================================================
-        # 图片 VLM 分析：使用多模态 LLM 读取图片内容
+        # 图片 VLM 分析：并行多模态 LLM 读取图片内容
         # =====================================================================
         clauses_with_images = [c for c in clauses if c.metadata.get('images')]
         if clauses_with_images:
-            self._report_progress(-1, f"[VLM分析] 检测到 {len(clauses_with_images)} 个条款包含图片，开始多模态分析...")
-            vlm_count = 0
-            vlm_fail = 0
+            self._report_progress(-1, f"[VLM分析] 检测到 {len(clauses_with_images)} 个条款包含图片，开始并行多模态分析...")
+
+            # 并行分析所有图片（max_workers=4，复用单个VLM客户端，60秒超时）
+            vlm_results = self._analyze_images_parallel(
+                clauses_with_images,
+                max_workers=4,
+                vlm_timeout=60.0
+            )
+
+            # 将并行结果写回各 clause（按 img_idx 精确映射）
             for clause in clauses_with_images:
-                images: List[Dict] = clause.metadata.get('images', [])
-                self.logger.info(f"[VLM诊断] clause={clause.clause_id} 包含 {len(images)} 张图片")
-                clause_vlm_results = []
-                for img_idx, img in enumerate(images):
-                    content_base64 = img.get('content', '')
-                    img_path = img.get('img_path', '') or ''
-                    caption = img.get('caption', '') or ''
-                    self.logger.info(
-                        f"[VLM诊断] clause={clause.clause_id} 图{img_idx + 1}/{len(images)}: "
-                        f"path={img_path}, caption={caption[:30] if caption else '(空)'}, "
-                        f"base64_len={len(content_base64)}"
-                    )
-                    if not content_base64:
-                        clause_vlm_results.append({'img_path': img_path, 'img_vlm_content': '', 'status': 'no_base64'})
-                        self.logger.warning(f"[VLM诊断] clause={clause.clause_id} 图{img_idx + 1} 跳过: 无 base64 内容")
-                        continue
+                clause_results = vlm_results.get(clause.clause_id, [])
+                for img_idx, result in clause_results:
+                    if img_idx < len(clause.metadata['images']):
+                        clause.metadata['images'][img_idx]['img_vlm_content'] = result.get('img_vlm_content', '')
+                        clause.metadata['images'][img_idx]['vlm_status'] = result.get('status', 'unknown')
 
-                    page_idx = img.get('page_idx', 0)
-
-                    prompt = (
-                        "你是一位熟悉工程技术文档的分析师。请用自然、连贯的语言直接描述这张图片的内容，"
-                        "像向同事口头解释一样流畅。不要分条列点，不要使用类似 '**图片类型**'、'**统计数值**' "
-                        "'**详细描述**' 等模板化标题或编号。\n\n"
-                        "描述应覆盖以下内容，但请直接以叙述方式融入正文："
-                        "这张图属于什么类型（如流程图、接线图、架构图、原理图、布置图、统计图表、表格等）；"
-                        "图中的关键文字、符号、线条及其含义；"
-                        "各组件之间的连接关系和数据流向；"
-                        "所有可读的技术参数、型号、规格数值，直接陈述具体数值而不加分类标签；"
-                        "如果是表格，直接说明表中数据的内容和含义。"
-                    )
-
-                    try:
-                        vlm = LLMClient(
-                            api_key=Config.VLM_API_KEY,
-                            base_url=Config.VLM_BASE_URL,
-                            model=Config.VLM_MODEL_NAME,
-                        )
-                        self.logger.info(f"[VLM诊断] 正在调用 chat_image: model={vlm.model}, base_url={vlm.base_url}")
-                        vlm_description = vlm.chat_image(
-                            image_base64=content_base64,
-                            prompt=prompt,
-                            temperature=0.3,
-                            max_tokens=4096,
-                        )
-                        desc_len = len(vlm_description) if vlm_description else 0
-                        self.logger.info(f"[VLM诊断] chat_image 返回: desc_len={desc_len}, preview={vlm_description[:80] if vlm_description else '(空)'}")
-                        clause_vlm_results.append({
-                            'img_path': img_path,
-                            'caption': caption,
-                            'img_vlm_content': vlm_description,
-                            'status': 'ok',
-                        })
-                        vlm_count += 1
-                        self._report_progress(-1, f"[VLM分析] clause={clause.clause_id} 图{vlm_count}: {vlm_description[:60]}...")
-                    except Exception as e:
-                        vlm_fail += 1
-                        clause_vlm_results.append({
-                            'img_path': img_path,
-                            'caption': caption,
-                            'img_vlm_content': '',
-                            'status': f'error: {str(e)}',
-                        })
-                        self.logger.warning(f"[VLM分析] clause={clause.clause_id} 图片分析失败: {e}")
-
-                # 将 VLM 结果写回 clause metadata（替换原有 images 中的对应条目）
-                self.logger.info(f"[VLM诊断] clause={clause.clause_id} 写回 {len(clause_vlm_results)} 条结果到 metadata")
-                for i, result in enumerate(clause_vlm_results):
-                    if i < len(clause.metadata['images']):
-                        old_val = clause.metadata['images'][i].get('img_vlm_content', '')
-                        new_val = result['img_vlm_content']
-                        clause.metadata['images'][i]['img_vlm_content'] = new_val
-                        clause.metadata['images'][i]['vlm_status'] = result['status']
-                        self.logger.info(
-                            f"[VLM诊断] 写回 images[{i}]: status={result['status']}, "
-                            f"vlm_content 旧len={len(old_val)}, 新len={len(new_val) if new_val else 0}"
-                        )
-
-                # 将成功的 VLM 描述追加到 clause.content，确保进入 Neo4j summary 和 QA Pipeline
+                # 将成功的 VLM 描述追加到 clause.content
                 vlm_texts = []
                 for img in clause.metadata.get('images', []):
                     if img.get('vlm_status') == 'ok' and img.get('img_vlm_content'):
@@ -3626,11 +3686,9 @@ topic：{topic}
                 if vlm_texts:
                     clause.content += "\n\n--- 关联图片内容 ---\n" + "\n\n".join(vlm_texts)
                     self.logger.info(
-                        f"[VLM诊断] clause={clause.clause_id}: content 已追加 VLM 描述 "
+                        f"[VLM并行] clause={clause.clause_id}: content 已追加 VLM 描述 "
                         f"({len(vlm_texts)} 张图片, 追加 {sum(len(t) for t in vlm_texts)} 字符)"
                     )
-
-            self._report_progress(-1, f"[VLM分析] 完成: 成功 {vlm_count} 张，失败 {vlm_fail} 张")
         else:
             self.logger.info("[VLM诊断] 无条款包含图片，跳过 VLM 分析")
 

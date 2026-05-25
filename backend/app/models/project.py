@@ -555,6 +555,16 @@ class ProjectManager:
             f.write(json.dumps(clause_dict, ensure_ascii=False) + '\n')
 
     @classmethod
+    def append_clauses_to_jsonl(cls, project_id: str, clause_dicts: List[Dict[str, Any]]) -> None:
+        """批量追加多个 clause 到 JSONL 文件（单次 open，减少 I/O 开销）"""
+        if not clause_dicts:
+            return
+        path = cls._get_intelligent_chunks_jsonl_path(project_id)
+        with open(path, 'a', encoding='utf-8') as f:
+            for clause_dict in clause_dicts:
+                f.write(json.dumps(clause_dict, ensure_ascii=False) + '\n')
+
+    @classmethod
     def assemble_intelligent_chunks_from_jsonl(cls, project_id: str) -> Dict[str, Any]:
         """Read all JSONL lines and assemble into final intelligent_chunks.json structure"""
         jsonl_path = cls._get_intelligent_chunks_jsonl_path(project_id)

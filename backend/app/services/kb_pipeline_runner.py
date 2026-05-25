@@ -677,8 +677,10 @@ class KbPipelineRunner:
         raise ValueError(f"未知阶段: {name}")
 
     def _wait_task(self, task_id: str, stage, timeout: int = 1800, interval: int = 3):
-        """轮询等待任务完成"""
+        """轮询等待任务完成（指数退避：0.5s -> 1s -> 2s -> max 3s）"""
         wait_start = time.time()
+        poll_interval = 0.5  # 初始轮询间隔
+        max_interval = interval  # 最大轮询间隔
         while time.time() - wait_start < timeout:
             task = self.task_manager.get_task(task_id)
             if not task:
@@ -700,7 +702,8 @@ class KbPipelineRunner:
                 raise ValueError(task.error or task.message or "任务失败")
             stage.message = task.message or "处理中..."
             KbPipelineManager.save(self.pipeline)
-            time.sleep(interval)
+            time.sleep(poll_interval)
+            poll_interval = min(poll_interval * 2, max_interval)
         raise TimeoutError(f"任务 {task_id} 超时")
 
 

@@ -211,21 +211,26 @@ class GraphBuilderService:
             logger.error(f"[hierarchical] ❌ Neo4j写入失败: {e}")
             raise
 
-        # 构建交叉引用关系
+        # 构建交叉引用关系 + PART_OF层级关系（相互独立，并行执行）
+        from concurrent.futures import ThreadPoolExecutor
+        cross_ref_count, hier_count = 0, 0
         try:
-            logger.info("[hierarchical] Building cross-reference relations...")
-            cross_ref_count = self.storage.build_cross_ref_relations(graph_id)
-            logger.info(f"[hierarchical] Built {cross_ref_count} cross-reference relations")
+            logger.info("[hierarchical] Building cross-reference & hierarchical relations in parallel...")
+            with ThreadPoolExecutor(max_workers=2) as rel_executor:
+                future_cross = rel_executor.submit(self.storage.build_cross_ref_relations, graph_id)
+                future_hier = rel_executor.submit(self.storage.build_hierarchical_relations, graph_id)
+                try:
+                    cross_ref_count = future_cross.result()
+                    logger.info(f"[hierarchical] Built {cross_ref_count} cross-reference relations")
+                except Exception as e:
+                    logger.warning(f"[hierarchical] Failed to build cross-refs: {e}")
+                try:
+                    hier_count = future_hier.result()
+                    logger.info(f"[hierarchical] Built {hier_count} hierarchical relations")
+                except Exception as e:
+                    logger.warning(f"[hierarchical] Failed to build hierarchical relations: {e}")
         except Exception as e:
-            logger.warning(f"[hierarchical] Failed to build cross-refs: {e}")
-
-        # 构建PART_OF层级关系
-        try:
-            logger.info("[hierarchical] Building hierarchical relations...")
-            hier_count = self.storage.build_hierarchical_relations(graph_id)
-            logger.info(f"[hierarchical] Built {hier_count} hierarchical relations")
-        except Exception as e:
-            logger.warning(f"[hierarchical] Failed to build hierarchical relations: {e}")
+            logger.warning(f"[hierarchical] Parallel relation building failed: {e}")
 
         logger.info(f"[hierarchical] Complete: {len(episode_ids)} episodes created")
         return episode_ids
