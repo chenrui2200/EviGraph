@@ -42,26 +42,33 @@ export async function hitTestSearch({
   const allRows = []
   const seenUuids = new Set()
 
-  for (const gid of graphIds) {
-    // 单次请求同时搜索 Entity 和 Term，后端共享 embedding 计算
-    const res = await searchEntityTopicClause({
+  // 并行请求所有图谱，减少总耗时
+  const requests = graphIds.map(gid =>
+    searchEntityTopicClause({
       graph_id: gid,
       query,
       limit,
       root_types: rootTypes,
+      similarity_threshold: similarityThreshold, // 后端过滤，减少网络传输
     })
+      .then(res => ({ gid, res }))
+      .catch(err => {
+        console.error(`[hitTestSearch] graph_id=${gid} failed:`, err)
+        return { gid, res: null }
+      })
+  )
+  const results = await Promise.all(requests)
 
+  for (const { gid, res } of results) {
     if (res?.success) {
       const rawRows = res.data.rows || []
-      console.log(`[hitTestSearch] raw=${rawRows.length}, threshold=${similarityThreshold}, scores=${rawRows.map(r => r.relevance_score).join(',')}`)
-      const rows = rawRows
-        .filter(r => (r.relevance_score || 0) >= similarityThreshold)
-        // 标注 root_type（后端 Term 优先排列，通过 labels 判断）
-        .map(r => ({
-          ...r,
-          root_type: r.object_node?.labels?.includes('Term') ? 'Term' : 'Entity',
-        }))
-      console.log(`[hitTestSearch] after filter=${rows.length}, types=${rows.map(r => r.root_type).join(',')}`)
+      console.log(`[hitTestSearch] gid=${gid}, raw=${rawRows.length}, scores=${rawRows.map(r => r.relevance_score).join(',')}`)
+      // 后端已完成 similarity_threshold 过滤，前端只需标注 root_type
+      const rows = rawRows.map(r => ({
+        ...r,
+        root_type: r.object_node?.labels?.includes('Term') ? 'Term' : 'Entity',
+      }))
+      console.log(`[hitTestSearch] gid=${gid}, after map=${rows.length}, types=${rows.map(r => r.root_type).join(',')}`)
 
       for (const row of rows) {
         const uuid = row.object_node?.uuid
