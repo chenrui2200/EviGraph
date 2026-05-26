@@ -18,8 +18,6 @@ SOTA 知识图谱构建模式：
 - 附录（A/B/...）章节识别支持
 """
 
-import hashlib
-import json
 import logging
 import os
 import random
@@ -1713,43 +1711,6 @@ topic：{topic}
         raise LLMChunkerError(f"LLM 调用失败，重试 {self.MAX_RETRIES} 次后仍失败: {last_error}")
 
     # =========================================================================
-    # Clause LLM 结果缓存
-    # =========================================================================
-    def _get_clause_cache_path(self, project_id: str) -> str:
-        return os.path.join(ProjectManager._get_project_dir(project_id), 'clause_llm_cache.json')
-
-    def _load_clause_cache(self, project_id: Optional[str]) -> Dict[str, Dict]:
-        if not project_id:
-            return {}
-        path = self._get_clause_cache_path(project_id)
-        if os.path.exists(path):
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception:
-                return {}
-        return {}
-
-    def _save_clause_cache(self, project_id: Optional[str], cache: Dict[str, Dict]) -> None:
-        if not project_id:
-            return
-        path = self._get_clause_cache_path(project_id)
-        try:
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            self.logger.warning(f"保存 clause 缓存失败: {e}")
-
-    def _flush_clause_cache(self, project_id: Optional[str], cache: Dict[str, Dict]) -> None:
-        """将内存中的缓存写入磁盘（批量操作，只写一次）"""
-        if cache:
-            self._save_clause_cache(project_id, cache)
-
-    @staticmethod
-    def _get_clause_content_hash(content: str) -> str:
-        return hashlib.md5(content.encode('utf-8')).hexdigest()
-
-    # =========================================================================
     # 并行处理工具（用于章节内 clause 并行 LLM 调用）
     # =========================================================================
 
@@ -1757,17 +1718,9 @@ topic：{topic}
         self,
         clause,
         entity_count_range: tuple = (5, 15),
-        project_id: Optional[str] = None,
-        cache: Optional[Dict] = None
+        project_id: Optional[str] = None
     ) -> None:
-        """处理单个 clause 的 topic + entities + terms 提取（单阶段 LLM）
-
-        Args:
-            clause: 待处理的条款
-            entity_count_range: 目标实体数量范围
-            project_id: 项目ID（用于缓存持久化）
-            cache: 可选的内存缓存字典（复用外部缓存，避免重复文件I/O）
-        """
+        """处理单个 clause 的 topic + entities + terms 提取（单阶段 LLM）"""
         if self.stop_event and self.stop_event.is_set():
             return
 
@@ -1777,34 +1730,6 @@ topic：{topic}
             clause.metadata['entities'] = []
             clause.metadata['terms'] = []
             clause.metadata['semantics_enriched'] = True
-            return
-
-        # 检查缓存：优先使用传入的内存缓存，其次加载文件缓存
-        if cache is None:
-            cache = self._load_clause_cache(project_id) if project_id else {}
-        content_hash = self._get_clause_content_hash(clause.content)
-        cached = cache.get(content_hash)
-        if cached:
-            topics = cached.get('topics', [])
-            # 对旧缓存也执行后处理（修复遗漏的核心对象）
-            self._ensure_topic_core_entities(topics)
-            # 重新计算合并 entities
-            all_entities = []
-            seen = set()
-            for t in topics:
-                for e in t.get("entities", []):
-                    if e not in seen:
-                        seen.add(e)
-                        all_entities.append(e)
-            topic = topics[0].get("topic", "") if topics else ""
-            clause.metadata['topics'] = topics
-            clause.metadata['topic'] = topic
-            clause.metadata['entities'] = all_entities
-            clause.metadata['terms'] = cached.get('terms', [])
-            clause.metadata['semantics_enriched'] = True
-            first_topic = topic[:20] if topic else '(无)'
-            self.logger.info(f"[LLM 单阶段缓存命中] clause_id={clause.clause_id}, topic={first_topic}")
-            self._push_clause_progress_log(clause)
             return
 
         min_cnt, max_cnt = entity_count_range
@@ -1882,10 +1807,6 @@ topic：{topic}
         clause.metadata['entities'] = all_entities
         clause.metadata['terms'] = terms
         clause.metadata['semantics_enriched'] = True
-
-        # 写入内存缓存（由调用方负责批量 flush 到磁盘）
-        if project_id:
-            cache[content_hash] = {"topics": topics, "topic": topic, "entities": all_entities, "terms": terms}
 
         topic_summary = f"{len(topics)}个主题" if len(topics) > 1 else (topic[:20] if topic else '(无)')
         self.logger.info(f"[LLM 单阶段提取] 完成, clause_id={clause.clause_id}, {topic_summary}, entities={len(all_entities)}, terms={len(terms)}")
@@ -2008,19 +1929,15 @@ topic：{topic}
         clauses: List[ClauseSegment],
         entity_count_range: tuple,
         project_id: Optional[str] = None,
-        cache: Optional[Dict[str, Dict]] = None,
         use_mineru_titles: bool = False
     ) -> None:
-        """批量处理 clause 的 topic + entities + terms 提取（使用传入的进程内缓存）"""
+        """批量处理 clause 的 topic + entities + terms 提取"""
         if not clauses:
             return
 
-        # 使用传入的内存缓存（避免每批次文件 I/O）
-        cache = cache if cache is not None else {}
         min_cnt, max_cnt = entity_count_range
 
-        # 1. 先处理缓存命中
-        clauses_to_llm = []
+        # 过滤空 content 的 clause
         for clause in clauses:
             if self.stop_event and self.stop_event.is_set():
                 return
@@ -2030,32 +1947,8 @@ topic：{topic}
                 clause.metadata['entities'] = []
                 clause.metadata['terms'] = []
                 clause.metadata['semantics_enriched'] = True
-                continue
-            content_hash = self._get_clause_content_hash(clause.content)
-            cached = cache.get(content_hash)
-            if cached:
-                topics = cached.get('topics', [])
-                # 对旧缓存也执行后处理（修复遗漏的核心对象）
-                self._ensure_topic_core_entities(topics)
-                all_entities = []
-                seen = set()
-                for t in topics:
-                    for e in t.get("entities", []):
-                        if e not in seen:
-                            seen.add(e)
-                            all_entities.append(e)
-                topic = topics[0].get("topic", "") if topics else ""
-                clause.metadata['topics'] = topics
-                clause.metadata['topic'] = topic
-                clause.metadata['entities'] = all_entities
-                clause.metadata['terms'] = cached.get('terms', [])
-                clause.metadata['semantics_enriched'] = True
-                first_topic = topic[:20] if topic else '(无)'
-                self.logger.info(f"[LLM Batch 缓存命中] clause_id={clause.clause_id}, topic={first_topic}")
-                self._push_clause_progress_log(clause)
-            else:
-                clauses_to_llm.append(clause)
 
+        clauses_to_llm = [c for c in clauses if c.content]
         if not clauses_to_llm:
             return
 
@@ -2152,9 +2045,6 @@ topic：{topic}
                         matched_clause.metadata['semantics_enriched'] = True
                         processed_ids.add(clause_id)
 
-                        content_hash = self._get_clause_content_hash(matched_clause.content)
-                        cache[content_hash] = {"topics": topics, "topic": topic, "entities": all_entities, "terms": terms}
-
                         topic_summary = f"{len(topics)}个主题" if len(topics) > 1 else (topic[:20] if topic else '(无)')
                         self.logger.info(f"[LLM Batch 提取] 完成, clause_id={clause_id}, {topic_summary}, entities={len(all_entities)}, terms={len(terms)}")
                         self._push_clause_progress_log(matched_clause)
@@ -2178,7 +2068,7 @@ topic：{topic}
         unprocessed = [c for c in clauses_to_llm if c.clause_id not in processed_ids]
         if unprocessed:
             for clause in unprocessed:
-                self._process_single_clause(clause, entity_count_range, project_id=project_id, cache=cache)
+                self._process_single_clause(clause, entity_count_range, project_id=project_id)
 
     # =========================================================================
     # JSONL 增量写入工具
@@ -2363,9 +2253,6 @@ topic：{topic}
 
         para_start = time.time()
 
-        # P1优化：进程内缓存（只读写一次，替代每批次文件I/O）
-        project_cache = self._load_clause_cache(project_id) if project_id else {}
-
         for i, section_data in enumerate(sections_data):
             # 检查是否收到停止信号
             if self.stop_event and self.stop_event.is_set():
@@ -2436,7 +2323,7 @@ topic：{topic}
             chapter_max_workers = min(8, len(batches)) if batches else 1
             with ThreadPoolExecutor(max_workers=chapter_max_workers) as executor:
                 futures = {
-                    executor.submit(self._process_clause_batch, batch, entity_count_range, project_id, project_cache, use_mineru_titles): batch
+                    executor.submit(self._process_clause_batch, batch, entity_count_range, project_id, use_mineru_titles): batch
                     for batch in batches
                 }
                 for future in as_completed(futures):
@@ -2504,10 +2391,6 @@ topic：{topic}
 
             chapter_results.append((section, list(chapter_clauses)))
             all_clauses.extend(chapter_clauses)
-
-        # P1优化：缓存只在所有章节处理完毕后一次性写入磁盘
-        if project_cache:
-            self._flush_clause_cache(project_id, project_cache)
 
         # =====================================================================
         # Step 3: 保存结果（JSONL 已增量写入，sections + edges 最后写入）
