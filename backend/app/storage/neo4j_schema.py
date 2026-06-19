@@ -116,26 +116,31 @@ OPTIONS {{indexConfig: {{
 CREATE_ENTITY_FULLTEXT_INDEX = """
 CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS
 FOR (n:Entity) ON EACH [n.name, n.summary]
+OPTIONS {indexConfig: {`fulltext.analyzer`: 'cjk'}}
 """
 
 CREATE_FACT_FULLTEXT_INDEX = """
 CREATE FULLTEXT INDEX fact_fulltext IF NOT EXISTS
 FOR ()-[r:RELATION]-() ON EACH [r.fact, r.name]
+OPTIONS {indexConfig: {`fulltext.analyzer`: 'cjk'}}
 """
 
 CREATE_EPISODE_FULLTEXT_INDEX = """
 CREATE FULLTEXT INDEX episode_fulltext IF NOT EXISTS
 FOR (e:Episode) ON EACH [e.data]
+OPTIONS {indexConfig: {`fulltext.analyzer`: 'cjk'}}
 """
 
 CREATE_TOPIC_FULLTEXT_INDEX = """
 CREATE FULLTEXT INDEX topic_fulltext IF NOT EXISTS
 FOR (t:Topic) ON EACH [t.topic, t.name]
+OPTIONS {indexConfig: {`fulltext.analyzer`: 'cjk'}}
 """
 
 CREATE_CLAUSE_FULLTEXT_INDEX = """
 CREATE FULLTEXT INDEX clause_fulltext IF NOT EXISTS
 FOR (c:Clause) ON EACH [c.name, c.summary]
+OPTIONS {indexConfig: {`fulltext.analyzer`: 'cjk'}}
 """
 
 CREATE_ENTITY_NAME_LOWER_INDEX = """

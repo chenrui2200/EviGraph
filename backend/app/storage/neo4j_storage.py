@@ -206,7 +206,7 @@ class Neo4jStorage(GraphStorage):
 
                     logger.warning(f"   Vector search will be disabled for this index")
 
-            # 3. Create fulltext indexes
+            # 3. Create fulltext indexes (with automatic upgrade to CJK analyzer)
             fulltext_queries = [
                 ("entity_fulltext", neo4j_schema.CREATE_ENTITY_FULLTEXT_INDEX),
                 ("fact_fulltext", neo4j_schema.CREATE_FACT_FULLTEXT_INDEX),
@@ -215,15 +215,38 @@ class Neo4jStorage(GraphStorage):
                 ("clause_fulltext", neo4j_schema.CREATE_CLAUSE_FULLTEXT_INDEX),
             ]
 
+            # Fetch analyzer details for existing fulltext indexes
+            analyzer_map = {}
+            try:
+                analyzer_check = session.run(
+                    "SHOW INDEXES YIELD name, type, options WHERE type = 'FULLTEXT' RETURN name, options.indexConfig['fulltext.analyzer'] AS analyzer"
+                )
+                for record in analyzer_check:
+                    idx_name = record.get("name")
+                    idx_analyzer = record.get("analyzer")
+                    if idx_name:
+                        analyzer_map[idx_name] = idx_analyzer
+            except Exception as e:
+                logger.warning(f"Could not retrieve fulltext index analyzer info: {e}")
+
             for index_name, query in fulltext_queries:
                 try:
+                    # If index exists but does NOT use CJK analyzer, drop it first to force upgrade
+                    if index_name in existing_indexes:
+                        current_analyzer = analyzer_map.get(index_name)
+                        if current_analyzer != "cjk":
+                            logger.info(f"🔄 Fulltext index '{index_name}' uses analyzer '{current_analyzer}'. Upgrading to CJK...")
+                            session.run(f"DROP INDEX {index_name} IF EXISTS")
+                            # Remove from existing_indexes map so it triggers creation below
+                            existing_indexes.pop(index_name, None)
+
                     if index_name not in existing_indexes:
                         session.run(query)
-                        logger.info(f"✅ Fulltext index '{index_name}' created/verified")
+                        logger.info(f"✅ Fulltext index '{index_name}' created/verified with CJK analyzer")
                     else:
-                        logger.info(f"⏭️ Fulltext index '{index_name}' already exists")
+                        logger.info(f"⏭️ Fulltext index '{index_name}' already exists (using CJK analyzer)")
                 except Exception as e:
-                    logger.warning(f"❌ Fulltext index '{index_name}' creation failed: {e}")
+                    logger.warning(f"❌ Fulltext index '{index_name}' creation/upgrade failed: {e}")
 
             # 4. Verify all required indexes after creation
             self._verify_indexes(session)
